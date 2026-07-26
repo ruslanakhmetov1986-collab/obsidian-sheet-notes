@@ -10,7 +10,10 @@
  */
 import fs from "node:fs";
 import path from "node:path";
-import { chromium } from "file:///H:/repo/infra/node_modules/playwright/index.mjs";
+// Playwright is only needed for e2e, not for building the plugin. Either
+// `npm i -D playwright` in this repo, or point SHEETS_PLAYWRIGHT at an
+// existing install (a file:// URL to its index.mjs).
+const { chromium } = await import(process.env.SHEETS_PLAYWRIGHT ?? "playwright");
 import {
 	CDP_PORT,
 	PLUGIN_ID,

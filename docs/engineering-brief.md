@@ -490,7 +490,7 @@ Plugin crashes surface as `error  Plugin failure: <id> Error: …`. For startup 
 
 Second instance, own user-data-dir, throwaway vault. BOM-free seeded `obsidian.json`. `connectOverCDP` with `noDefaults:true`. `setEnable(true)` once. Then `enablePluginAndSave` + disable/enable cycles. **Never attach a destructive test to the user's running Obsidian on port 9222.**
 
-> Playwright 1.61.1 is in `H:\repo\infra` devDependencies; no browser binaries installed and none needed for CDP attach.
+> Playwright is needed only for CDP attach; no browser binaries are required (`connectOverCDP` talks to the Electron process directly).
 
 ---
 
