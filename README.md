@@ -1,84 +1,96 @@
-# leovale-sheets — таблицы в Obsidian
+# Spreadsheet Notes
 
-Плагин добавляет в Obsidian новый тип заметки: **электронную таблицу**. Файлы с
-расширением `.sheet` открываются не в редакторе Markdown, а в сетке в духе Google
-Sheets: набор значений, формулы, изменение ширины колонок, форматирование ячеек.
+Adds a new kind of note to Obsidian: a **spreadsheet**. Files with the `.sheet`
+extension open in a Google Sheets-style grid instead of the Markdown editor —
+values, formulas, resizable columns and rows, cell formatting.
 
-Данные лежат в вашем хранилище (vault) обычным текстовым JSON — их видит Git,
-Obsidian LiveSync и любой другой инструмент синхронизации.
+Your data stays in your vault as plain-text JSON, so Git, Obsidian LiveSync and
+any other sync tool can see and diff it.
 
-![Таблица в светлой теме](tests/shots/03-reopened-light.png)
+The plugin makes **zero network requests**. Nothing is uploaded, no telemetry, no
+remote fonts or icons — the grid engine's assets are inlined into the bundle.
 
----
+Документация на русском: [README.ru.md](README.ru.md)
 
-## Установка
+![Spreadsheet in the light theme](tests/shots/02-filled-light.png)
 
-Плагин не опубликован в каталоге сообщества, ставится вручную.
+![The same sheet in the dark theme](tests/shots/04-dark.png)
 
-1. Собрать (см. «Сборка») либо взять готовые `main.js`, `manifest.json`,
-   `styles.css`.
-2. Скопировать эти три файла в
-   `<ваш-vault>/.obsidian/plugins/leovale-sheets/`.
-3. Obsidian → Настройки → Сторонние плагины → выключить «Ограниченный режим»
-   (Restricted Mode) → включить **Sheets**.
+![Fill colour palette](tests/shots/06-palette-open-light.png)
 
-Требуется Obsidian **1.7.2** или новее (плагин опирается на отложенные
-представления — deferred views). Мобильную версию плагин не блокирует
-(`isDesktopOnly: false`), но на телефоне сетка не тестировалась.
+## Requirements
 
-## Как пользоваться
+Obsidian **1.7.2** or newer (the plugin relies on deferred views). Mobile is not
+blocked (`isDesktopOnly: false`), but the grid has not been tested on phones.
 
-**Создать таблицу** — тремя способами:
+## Install
 
-- палитра команд: `Sheets: Create new spreadsheet`;
-- иконка таблицы на левой ленте (ribbon);
-- правый клик по папке в проводнике файлов → «New spreadsheet».
+**Community plugins** (once the plugin is published): Settings → Community
+plugins → Browse → search for *Spreadsheet Notes* → Install → Enable.
 
-Файл создаётся рядом по правилам вашей настройки «Папка для новых заметок» и
-сразу открывается в новой вкладке.
+**BRAT**: install the [BRAT](https://github.com/TfTHacker/obsidian42-brat)
+plugin, then *Add beta plugin* and paste this repository's GitHub URL.
 
-**Работа с сеткой**
+**Manual**: copy `main.js`, `manifest.json` and `styles.css` into
+`<your-vault>/.obsidian/plugins/leovale-sheets/`, then enable **Spreadsheet
+Notes** in Settings → Community plugins (Restricted Mode must be off).
 
-| Действие | Как |
+## Usage
+
+Create a spreadsheet in any of three ways:
+
+- command palette: `Sheets: Create new spreadsheet`
+- the table icon in the left ribbon
+- right-click a folder in the file explorer → **New spreadsheet**
+
+The file is placed according to your *Default location for new notes* setting and
+opens in a new tab straight away.
+
+### Working with the grid
+
+| Action | How |
 |---|---|
-| Ввести значение | Кликнуть по ячейке и начать печатать, `Enter` — подтвердить |
-| Перемещение | Стрелки, `Tab`, `Enter` |
-| Формула | Начать с `=`, например `=SUM(B2:B3)`, `=B2*2`, `=IF(B4>5;"да";"нет")` |
-| Изменить ширину колонки | Потянуть за правую границу заголовка `A`, `B`, … |
-| Изменить высоту строки | Потянуть за нижнюю границу номера строки |
-| Вставить/удалить строку, колонку | Правый клик по заголовку |
-| Копировать/вставить, отменить | `Ctrl+C` / `Ctrl+V`, `Ctrl+Z` / `Ctrl+Y` |
+| Enter a value | Click a cell and start typing, `Enter` to commit |
+| Move around | Arrow keys, `Tab`, `Enter` |
+| Enter a formula | Start with `=`, e.g. `=SUM(B2:B3)`, `=B2*2`, `=IF(B4>5;"yes";"no")` |
+| Resize a column | Drag the right edge of the `A`, `B`, … header |
+| Resize a row | Drag the bottom edge of the row number |
+| Insert / delete rows and columns | Right-click a header |
+| Copy, paste, undo, redo | `Ctrl+C` / `Ctrl+V`, `Ctrl+Z` / `Ctrl+Y` |
 
-Формулы считает встроенный движок Jspreadsheet CE: есть `SUM`, `AVERAGE`, `IF`,
-`VLOOKUP`, `SUMIF`, `IFERROR`, `SUMPRODUCT`, `TEXTJOIN` и ещё несколько сотен
-функций. **Результаты формул не сохраняются в файл** — только исходный текст
-формулы; при открытии всё пересчитывается заново.
+Column widths and row heights are stored in the file, so they survive closing and
+reopening the note.
 
-**Форматирование** — плоская панель над таблицей, в духе панели Google Sheets:
-один ряд высотой 36 px, кнопки-иконки 28×28 без рамок и теней, тонкие
-разделители между группами.
+Formulas are evaluated by the bundled Jspreadsheet CE engine: `SUM`, `AVERAGE`,
+`IF`, `VLOOKUP`, `SUMIF`, `IFERROR`, `SUMPRODUCT`, `TEXTJOIN` and a few hundred
+more. **Computed results are never written to the file** — only the formula
+source is stored, and everything is recalculated on open.
 
-| Кнопка | Что делает |
+### Formatting
+
+A single flat toolbar sits above the grid: one 36 px row of borderless 28×28 icon
+buttons, with thin separators between groups.
+
+| Button | What it does |
 |---|---|
-| **B** (иконка «bold») | Жирный шрифт. Если в выделении есть хоть одна нежирная ячейка — жирными станут все; иначе жирность снимается со всех. Нажатая кнопка подсвечивается акцентным цветом |
-| Размер, `18 ⌄` | Открывает обычное меню Obsidian: «По умолчанию», 10, 12, 14, 16, 18, 24. Текущий размер выделения показан прямо на кнопке |
-| Заливка (ведро) | Всплывающая палитра 6×2: «Без заливки» (перечёркнутый квадрат) и 11 цветов. Под ведром — полоска текущего цвета, как в Google Sheets |
-| Границы (сетка) | Меню: «Все границы», «Внешние границы», «Без границ», затем отдельные стороны — сверху / справа / снизу / слева |
+| **B** | Bold. If any cell in the selection is not bold, all of them become bold; otherwise bold is cleared. The button highlights when the selection is bold |
+| Font size, `18 ⌄` | Opens a native Obsidian menu: Default, 10, 12, 14, 16, 18, 24. The current size of the selection is shown on the button |
+| Fill (bucket) | A 6×2 popup palette: *No fill* plus 11 colours. A strip under the bucket shows the current colour, like in Google Sheets |
+| Borders (grid) | Menu: All borders, Outer borders, No borders, then individual sides — top / right / bottom / left |
 
-![Палитра заливки, тёмная тема](tests/shots/07-palette-open-dark.png)
+Formatting applies to the **entire selected range**, not just the active cell.
+Text colour inside a filled cell is picked automatically from the fill's
+luminance, so a pale yellow background stays readable in the dark theme too.
 
-Формат применяется ко **всему выделенному диапазону**, а не только к активной
-ячейке. Цвет текста внутри залитой ячейки подбирается автоматически по яркости
-заливки — поэтому светло-жёлтый фон читается и в тёмной теме тоже.
+### Saving
 
-**Сохранение** происходит само: примерно через 1,5 с тишины после правки плагин
-просит Obsidian сохранить файл (тот добавляет свои ~2 с). При закрытии вкладки
-несохранённое дописывается принудительно. Команда `Sheets: Save spreadsheet now`
-пишет файл немедленно.
+Saving is automatic: roughly 1.5 s after you stop editing, the plugin asks
+Obsidian to save (Obsidian adds ~2 s of its own). Closing a tab flushes any
+pending changes. `Sheets: Save spreadsheet now` writes the file immediately.
 
-## Формат файла `.sheet`
+## The `.sheet` file format
 
-Обычный JSON, разреженный и с жёстко заданным порядком ключей:
+Plain JSON, sparse, with a strictly fixed key order:
 
 ```json
 {
@@ -89,12 +101,8 @@ Obsidian LiveSync и любой другой инструмент синхрон
       "name": "Sheet1",
       "rows": 100,
       "cols": 26,
-      "colWidths": {
-        "0": 180
-      },
-      "rowHeights": {
-        "1": 51
-      },
+      "colWidths": { "0": 180 },
+      "rowHeights": { "1": 51 },
       "merges": {},
       "cells": {
         "A1": { "v": "Item", "s": { "b": true, "fs": 18, "bg": "#fff2cc", "bd": "trbl" } },
@@ -106,145 +114,133 @@ Obsidian LiveSync и любой другой инструмент синхрон
 }
 ```
 
-Ключи ячейки, всегда в этом порядке:
+Cell keys, always in this order:
 
-- `v` — значение (строка, число или булево);
-- `f` — исходный текст формулы (тогда `v` не пишется);
-- `s` — стиль, тоже с фиксированным порядком: `b` (жирный), `fs` (кегль в px),
-  `bg` (заливка, `#rrggbb`), `bd` (границы — подмножество строки `trbl`:
-  top/right/bottom/left в этом порядке).
+- `v` — value (string, number or boolean)
+- `f` — formula source (in which case `v` is omitted)
+- `s` — style, also fixed order: `b` (bold), `fs` (font size in px), `bg` (fill,
+  `#rrggbb`), `bd` (borders — a subset of `trbl`: top/right/bottom/left, in that
+  order)
 
-Правила сериализации подобраны под **Obsidian LiveSync**, который для
-не-markdown файлов решает конфликты по принципу «кто последний, тот и прав», без
-слияния:
+Serialisation is tuned for sync tools, in particular **Obsidian LiveSync**, which
+resolves conflicts on non-Markdown files last-write-wins, without merging:
 
-1. Порядок ключей детерминирован: листы — по порядку в массиве, ячейки — по
-   `(строка, колонка)`, подключи — фиксированы. Один и тот же документ всегда
-   сериализуется байт в байт одинаково.
-2. Отступ 2 пробела, **одна ячейка — одна строка**. Правка одной ячейки меняет
-   ровно одну строку файла, и LiveSync передаёт килобайты вместо всего файла.
-3. Переводы строк только `LF`, в конце файла перевод строки, BOM нет.
-4. `NaN` и `Infinity` не записываются.
-5. Пустые ячейки не пишутся вовсе: таблица 100×26 с тремя заполненными ячейками
-   занимает ~300 байт.
-6. Поле `version`. Файл с версией новее той, что знает плагин, открывается
-   **только для чтения** — плагин не перезапишет данные, которых не понимает.
+1. Key order is deterministic — sheets by array position, cells by
+   `(row, column)`, subkeys fixed. The same document always serialises to
+   byte-identical output.
+2. Two-space indent, **one cell per line**. Editing one cell changes exactly one
+   line, so LiveSync ships kilobytes instead of the whole file.
+3. `LF` line endings only, trailing newline, no BOM.
+4. `NaN` and `Infinity` are never written.
+5. Empty cells are omitted entirely: a 100×26 sheet with three filled cells is
+   about 300 bytes.
+6. A `version` field. A file with a version newer than the plugin knows opens
+   **read-only**, so the plugin never overwrites data it does not understand.
 
-Сырой CSS в файл не попадает никогда: движок хранит стиль как inline-CSS, но на
-границе он явно преобразуется в четыре нормализованных свойства и обратно
+Raw CSS never reaches the file. The engine keeps styles as inline CSS, but at the
+boundary they are explicitly converted to the four normalised properties and back
 (`src/cellcss.ts`).
 
-## Защита от потери данных
+## Data-loss protection
 
-Известная беда плагинов-таблиц для Obsidian (`obsidian-spreadsheets`, issues
-#27 и #29) — `getViewData()` возвращает пустую строку и Obsidian затирает файл.
-Здесь стоят три предохранителя:
+A well-known failure mode of spreadsheet plugins for Obsidian
+(`obsidian-spreadsheets`, issues #27 and #29) is `getViewData()` returning an
+empty string and Obsidian truncating the file. Three safeguards are in place:
 
-- `getViewData()` работает через движок только если документ действительно
-  изменён; иначе возвращает последнюю заведомо корректную сериализацию;
-- если сериализация упала или результат подозрительно короткий — возвращается
-  та же последняя корректная версия, а не пустая строка;
-- если файл не удалось разобрать (битый JSON, чужой формат), таблица
-  открывается только для чтения, и запись в этот файл невозможна в принципе.
+- `getViewData()` goes through the engine only when the document is actually
+  dirty; otherwise it returns the last known-good serialisation.
+- If serialisation throws, or the result is suspiciously short, the same
+  last known-good version is returned instead of an empty string.
+- If a file cannot be parsed (broken JSON, foreign format), it opens read-only
+  and writing to it is impossible by construction.
 
-## Сборка
+## Development
 
 ```bash
-npm install          # node_modules ~40 МБ
+npm install          # node_modules ~40 MB
 npm run build        # tsc --noEmit + esbuild production -> main.js, styles.css
 npm run dev          # esbuild --watch
-npm test             # 36 юнит-тестов формата и стилей (node --test)
-npm run e2e          # e2e в песочнице Obsidian, скриншоты в tests/shots/
+npm test             # 36 unit tests for the format and styles (node --test)
+npm run e2e          # e2e in a sandboxed Obsidian, screenshots into tests/shots/
 ```
 
-Размер сборки: `main.js` ~498 КБ, `styles.css` ~91 КБ, сетевых запросов в рантайме
-нет — шрифты и иконки движка вшиты как data-URI.
+Build output: `main.js` ~498 KB, `styles.css` ~91 KB.
 
-Что важно в конфигурации сборки:
+Notes on the build configuration:
 
-- Obsidian грузит **только** `styles.css`; esbuild при импорте CSS кладёт её в
-  `main.css`, который Obsidian молча игнорирует. Поэтому шаг `onEnd` в
-  `esbuild.config.mjs` берёт `main.css`, прогоняет через `postcss-prefix-selector`
-  и дописывает наш слой тем — результат пишется в `styles.css`.
-- CSS движка **весь** переписан под `.leovale-sheet-root`; селекторы `html`,
-  `body`, `:root` не префиксуются, а заменяются (иначе `:root`-переменные и
-  `body { margin: 0 }` протекли бы на всё приложение).
-- Цвета движка (`#fff`, `#ccc`, `#f3f3f3`) переопределены на переменные
-  Obsidian. Никаких `filter: invert(1)`.
+- Obsidian loads **only** `styles.css`. esbuild writes imported CSS to
+  `main.css`, which Obsidian silently ignores, so the `onEnd` step in
+  `esbuild.config.mjs` takes `main.css`, runs it through
+  `postcss-prefix-selector`, appends the theming layer and writes `styles.css`.
+- The engine's CSS is scoped entirely to `.leovale-sheet-root`. `html`, `body`
+  and `:root` selectors are *replaced* rather than prefixed, otherwise
+  `:root` variables and `body { margin: 0 }` would leak into the whole app.
+- The engine's hard-coded colours (`#fff`, `#ccc`, `#f3f3f3`) are remapped to
+  Obsidian CSS variables. No `filter: invert(1)` anywhere.
 
-## Тесты
+The e2e suite (91 assertions) launches a **separate** Obsidian instance with its
+own `--user-data-dir` on CDP port 9333, so your running Obsidian on 9222 is left
+alone. It installs and enables the plugin, creates a sheet, types values and
+formulas with real keyboard events, drags column and row edges, formats a
+selection with real toolbar clicks, waits for autosave, reads the file **from
+disk** and checks the format, reopens it, switches themes and captures the
+screenshots in `tests/shots/`.
 
-**Юнит (36):** round-trip разбора и сериализации, побайтовая детерминированность
-при любом порядке вставки ключей, разреженность, отказ писать `NaN`/`Infinity`,
-проверка версии, «никогда не пустая строка», нормализация цветов и границ,
-преобразование стиль ↔ CSS в обе стороны.
+## Limitations
 
-**E2E (91 проверка):** поднимает **отдельный** экземпляр Obsidian со своим
-`--user-data-dir` и портом CDP 9333 (рабочий Obsidian пользователя на порту 9222
-не трогается), ставит плагин, включает его, создаёт таблицу командой, печатает
-значения и формулы **настоящими событиями клавиатуры**, проверяет навигацию
-стрелками, тянет мышью границы колонки и строки, форматирует выделение через
-панель настоящими кликами, ждёт автосохранение, читает файл **с диска** и
-сверяет формат, закрывает и открывает файл заново, переключает светлую и тёмную
-темы и снимает скриншоты (`tests/shots/`), включая открытую палитру заливки в
-светлой и тёмной теме. Отдельно проверяется внешний вид панели: высота ряда
-36 px, кнопки 28×28, отсутствие рамок и теней, скругление 4 px, прозрачный фон в
-покое, ни одного нативного `<select>`, разделители 1 px высотой ~60 %.
+- **Dragging columns and rows is disabled.** Order is stored by index, not by id,
+  so reordering would make the saved order a lie.
+- Formatting covers fill, font size, bold and borders only. No italics, font
+  family, alignment or number formats. Text is left-aligned, numbers included.
+- The format supports multiple sheets per file, but there is no UI yet for
+  creating a second sheet.
+- Merged cells (`merges`) are saved and restored, but there is no toolbar button
+  for them — only the engine's own context menu.
+- Styles are bound to cell addresses. Inserting a row or column shifts them via
+  the engine; exotic scenarios (sorting with styles) are untested.
+- When the plugin is disabled, already-open `.sheet` tabs show "no view of
+  type…". That is intentional: closing the user's tabs in `onunload` would
+  rearrange their workspace.
+- Mobile is untested.
 
-## Ограничения
+## Gotchas worth knowing
 
-- **Перетаскивание колонок и строк выключено.** Порядок в файле хранится по
-  индексу, а не по идентификатору, поэтому перестановка сделала бы сохранённый
-  порядок ложным.
-- Из форматирования есть только заливка, кегль, жирность и границы. Курсива,
-  выбора шрифта, выравнивания и числовых форматов нет. Текст выровнен по левому
-  краю, включая числа.
-- Несколько листов в одном файле формат поддерживает, но создать второй лист из
-  интерфейса пока нельзя.
-- Объединённые ячейки (`merges`) сохраняются и восстанавливаются, но кнопки в
-  панели для них нет — только через контекстное меню движка.
-- Стили привязаны к адресу ячейки. Вставка строки или колонки сдвигает их
-  силами движка; экзотические сценарии (сортировка со стилями) не проверялись.
-- При отключении плагина открытые вкладки `.sheet` показывают «no view of
-  type…». Это нормально: закрывать чужие вкладки в `onunload` значило бы ломать
-  раскладку пользователя.
-- Мобильная версия не тестировалась.
+**`dirty` is a taken name.** `TextFileView` keeps its own undocumented `dirty`
+field on the instance and resets it inside its own save logic. A `private dirty`
+field in a subclass collides with it: the flag was being cleared between our
+`scheduleSave()` and `getViewData()`, and the file silently stayed in its
+just-created state — full grid on screen, empty file on disk. Every view field is
+therefore prefixed with `sheet` (`sheetDirty`, `sheetEngine`, `sheetLastGood`, …).
+Do not rename them back.
 
-## Грабли, на которые уже наступили
+**Clicking the toolbar kills the selection.** Jspreadsheet installs a `mousedown`
+handler on `document` that clears the selection on any click outside the grid. The
+toolbar therefore captures the selection at `mousedown` time, and the engine also
+keeps the last selection from its `onselection` event.
 
-**`dirty` — занятое имя.** `TextFileView` держит на экземпляре собственное
-недокументированное поле `dirty` и сбрасывает его в своей же логике сохранения.
-Приватное поле `private dirty` в наследнике конфликтует с ним: флаг сбрасывался
-между нашим `scheduleSave()` и `getViewData()`, и файл молча оставался в
-состоянии «только что создан» — таблица на экране заполнена, а на диске пусто.
-Поэтому все поля представления имеют префикс `sheet`
-(`sheetDirty`, `sheetEngine`, `sheetLastGood`, …). Не переименовывайте обратно.
+**Row heights are not applied from options.** The `rows: { "1": { height: 51 } }`
+option is accepted but has no effect on the first render. Heights are reapplied
+with an explicit `setHeight()` after init, with autosave suppressed — otherwise
+merely opening a file would mark it modified.
 
-**Клик по панели инструментов убивает выделение.** У Jspreadsheet висит
-обработчик `mousedown` на `document`, который сбрасывает выделение при клике вне
-таблицы. Панель поэтому запоминает выделение в момент `mousedown` (и движок
-дополнительно хранит последнее выделение из события `onselection`).
+**`setIcon()` with an unknown name silently draws nothing.** The icons
+`grid-2x2`, `borders` and `border-all` are **absent** from the Lucide set in this
+Obsidian build. `setIcon` neither throws nor logs, it just leaves an empty
+element, which is how the Borders button was invisible for a while. Only verified
+names are used (`bold`, `table`, `square`, `eraser`, `panel-*`, `paint-bucket`,
+`chevron-down`), and the e2e suite asserts that every button and menu item really
+rendered an `<svg>`.
 
-**Высота строк не применяется из опций.** Опция `rows: { "1": { height: 51 } }`
-принимается, но на первую отрисовку не влияет. Высоты повторно применяются
-явным `setHeight()` после инициализации — с подавлением автосохранения, иначе
-простое открытие файла помечало бы его изменённым.
+**Do not pass a second argument to `getNewFileParent()`.** Calling
+`getNewFileParent(path, "Untitled.sheet")` makes Obsidian look for a file creator
+for that extension and log an error. The first argument is enough.
 
-**`setIcon()` с неизвестным именем молча рисует пустоту.** Иконки `grid-2x2`,
-`borders`, `border-all` в наборе lucide этой сборки Obsidian **отсутствуют** —
-`setIcon` не бросает исключение и не пишет в консоль, просто оставляет пустой
-элемент. Так кнопка «Границы» какое-то время была невидимой. Используются только
-проверенные имена (`bold`, `table`, `square`, `eraser`, `panel-*`,
-`paint-bucket`, `chevron-down`), а e2e отдельно проверяет, что каждая кнопка и
-каждый пункт меню действительно отрисовали `<svg>`.
+## License
 
-**Не задавайте `getNewFileParent(path, "Untitled.sheet")`.** Второй аргумент
-заставляет Obsidian искать «file creator» для расширения и писать в консоль
-ошибку. Достаточно первого.
+MIT — see [LICENSE](LICENSE).
 
-## Лицензия
-
-MIT. Движок сетки — [Jspreadsheet CE](https://github.com/jspreadsheet/ce) 5.0.4
-(MIT), библиотека `jsuites` (MIT). Транзитивная зависимость
-`@jspreadsheet/formula` лицензию не декларирует; она поставляется автором как
-обязательная зависимость MIT-пакета.
+The grid engine is [Jspreadsheet CE](https://github.com/jspreadsheet/ce) 5.0.4
+(MIT), with `jsuites` (MIT) and the `@jspreadsheet/formula` "Formula Basic"
+engine (MIT per the vendor's banner in the distributed files). Full notices are
+in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md); the vendors' MIT banners are
+preserved in the bundle (`legalComments: "eof"`).

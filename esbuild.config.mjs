@@ -15,6 +15,20 @@ Source: https://github.com/leovale/obsidian-sheet-notes
 */
 `;
 
+// The vendors' own banners lack @license markers, so esbuild's minifier drops
+// them; MIT requires the notices to survive in redistributed copies.
+const footer = `
+/*!
+ * Bundled third-party software (see THIRD-PARTY-NOTICES.md):
+ * - jspreadsheet-ce 5.0.4 (https://github.com/jspreadsheet/ce)
+ *   MIT License, Copyright (c) 2024 Jspreadsheet Ltd
+ * - jsuites (https://github.com/jsuites/jsuites)
+ *   MIT License, Jspreadsheet Ltd / Paul Hodel
+ * - Jspreadsheet Extensions: Formula Basic (https://jspreadsheet.com)
+ *   "License: This is a free software MIT"
+ */
+`;
+
 /**
  * Obsidian only ever loads `styles.css`. esbuild emits `main.css` for imported
  * CSS and Obsidian silently ignores it, so after every build we:
@@ -79,6 +93,7 @@ const cssScopePlugin = {
 
 const context = await esbuild.context({
 	banner: { js: banner },
+	footer: { js: footer },
 	entryPoints: ["src/main.ts"],
 	bundle: true,
 	external: [
@@ -104,6 +119,8 @@ const context = await esbuild.context({
 	treeShaking: true,
 	outfile: "main.js",
 	minify: prod,
+	// MIT requires vendors' copyright notices to survive minification.
+	legalComments: "eof",
 	// Vendor CSS references SVG/PNG assets; inline them, no runtime fetches.
 	loader: { ".svg": "dataurl", ".png": "dataurl", ".gif": "dataurl" },
 	plugins: [cssScopePlugin],
