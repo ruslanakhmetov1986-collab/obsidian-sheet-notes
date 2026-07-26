@@ -1,14 +1,15 @@
 # Spreadsheet Notes
 
-Adds a new kind of note to Obsidian: a **spreadsheet**. Files with the `.sheet`
-extension open in a Google Sheets-style grid instead of the Markdown editor —
-values, formulas, resizable columns and rows, cell formatting.
+Adds a new kind of note to Obsidian: a spreadsheet. Files with the `.sheet`
+extension open in a Google Sheets-style grid instead of the Markdown editor.
+You get cells, formulas, resizable columns and rows, and basic formatting.
 
 Your data stays in your vault as plain-text JSON, so Git, Obsidian LiveSync and
-any other sync tool can see and diff it.
+any other sync tool can see it and diff it.
 
-The plugin makes **zero network requests**. Nothing is uploaded, no telemetry, no
-remote fonts or icons — the grid engine's assets are inlined into the bundle.
+The plugin makes zero network requests. Nothing is uploaded, there is no
+telemetry, no remote fonts or icons. The grid engine's assets are inlined into
+the bundle.
 
 Документация на русском: [README.ru.md](README.ru.md)
 
@@ -20,20 +21,27 @@ remote fonts or icons — the grid engine's assets are inlined into the bundle.
 
 ## Requirements
 
-Obsidian **1.7.2** or newer (the plugin relies on deferred views). Mobile is not
-blocked (`isDesktopOnly: false`), but the grid has not been tested on phones.
+Obsidian 1.7.2 or newer (the plugin relies on deferred views).
+
+Mobile works: the core loop (open, edit, type, format, save, reopen) was tested
+by hand on an Android tablet and held up, including formulas and the fill
+palette. Some touch interactions are still rough, see Limitations. Phones are
+untested.
 
 ## Install
 
-**Community plugins** (once the plugin is published): Settings → Community
-plugins → Browse → search for *Spreadsheet Notes* → Install → Enable.
+With [BRAT](https://github.com/TfTHacker/obsidian42-brat): install BRAT from
+the community catalog, run `BRAT: Add a beta plugin for testing`, paste
+`https://github.com/ruslanakhmetov1986-collab/obsidian-sheet-notes`. BRAT
+downloads the latest release and keeps it updated.
 
-**BRAT**: install the [BRAT](https://github.com/TfTHacker/obsidian42-brat)
-plugin, then *Add beta plugin* and paste this repository's GitHub URL.
+Manually: grab `main.js`, `manifest.json` and `styles.css` from the
+[latest release](https://github.com/ruslanakhmetov1986-collab/obsidian-sheet-notes/releases)
+and copy them into `<your-vault>/.obsidian/plugins/leovale-sheets/`. Enable
+Spreadsheet Notes in Settings → Community plugins. Restricted Mode has to be
+off.
 
-**Manual**: copy `main.js`, `manifest.json` and `styles.css` into
-`<your-vault>/.obsidian/plugins/leovale-sheets/`, then enable **Spreadsheet
-Notes** in Settings → Community plugins (Restricted Mode must be off).
+From the community catalog: not published there yet.
 
 ## Usage
 
@@ -41,10 +49,10 @@ Create a spreadsheet in any of three ways:
 
 - command palette: `Sheets: Create new spreadsheet`
 - the table icon in the left ribbon
-- right-click a folder in the file explorer → **New spreadsheet**
+- right-click a folder in the file explorer → New spreadsheet
 
-The file is placed according to your *Default location for new notes* setting and
-opens in a new tab straight away.
+The file lands wherever your "Default location for new notes" setting points
+and opens in a new tab.
 
 ### Working with the grid
 
@@ -58,27 +66,27 @@ opens in a new tab straight away.
 | Insert / delete rows and columns | Right-click a header |
 | Copy, paste, undo, redo | `Ctrl+C` / `Ctrl+V`, `Ctrl+Z` / `Ctrl+Y` |
 
-Column widths and row heights are stored in the file, so they survive closing and
-reopening the note.
+Column widths and row heights are stored in the file, so they survive closing
+and reopening the note.
 
 Formulas are evaluated by the bundled Jspreadsheet CE engine: `SUM`, `AVERAGE`,
 `IF`, `VLOOKUP`, `SUMIF`, `IFERROR`, `SUMPRODUCT`, `TEXTJOIN` and a few hundred
-more. **Computed results are never written to the file** — only the formula
-source is stored, and everything is recalculated on open.
+more. Computed results are never written to the file. Only the formula source
+is stored, and everything is recalculated on open.
 
 ### Formatting
 
-A single flat toolbar sits above the grid: one 36 px row of borderless 28×28 icon
-buttons, with thin separators between groups.
+A single flat toolbar sits above the grid: one 36 px row of borderless 28×28
+icon buttons with thin separators between groups.
 
 | Button | What it does |
 |---|---|
-| **B** | Bold. If any cell in the selection is not bold, all of them become bold; otherwise bold is cleared. The button highlights when the selection is bold |
+| B | Bold. If any cell in the selection is not bold, all of them become bold; otherwise bold is cleared. The button highlights when the selection is bold |
 | Font size, `18 ⌄` | Opens a native Obsidian menu: Default, 10, 12, 14, 16, 18, 24. The current size of the selection is shown on the button |
-| Fill (bucket) | A 6×2 popup palette: *No fill* plus 11 colours. A strip under the bucket shows the current colour, like in Google Sheets |
-| Borders (grid) | Menu: All borders, Outer borders, No borders, then individual sides — top / right / bottom / left |
+| Fill (bucket) | A 6×2 popup palette: no fill plus 11 colours. A strip under the bucket shows the current colour, like in Google Sheets |
+| Borders (grid) | Menu: all borders, outer borders, no borders, then individual sides |
 
-Formatting applies to the **entire selected range**, not just the active cell.
+Formatting applies to the entire selected range, not just the active cell.
 Text colour inside a filled cell is picked automatically from the fill's
 luminance, so a pale yellow background stays readable in the dark theme too.
 
@@ -116,42 +124,44 @@ Plain JSON, sparse, with a strictly fixed key order:
 
 Cell keys, always in this order:
 
-- `v` — value (string, number or boolean)
-- `f` — formula source (in which case `v` is omitted)
-- `s` — style, also fixed order: `b` (bold), `fs` (font size in px), `bg` (fill,
-  `#rrggbb`), `bd` (borders — a subset of `trbl`: top/right/bottom/left, in that
-  order)
+- `v` is the value (string, number or boolean)
+- `f` is the formula source (in which case `v` is omitted)
+- `s` is the style, also fixed order: `b` (bold), `fs` (font size in px),
+  `bg` (fill, `#rrggbb`), `bd` (borders, a subset of `trbl`:
+  top/right/bottom/left, in that order)
 
-Serialisation is tuned for sync tools, in particular **Obsidian LiveSync**, which
-resolves conflicts on non-Markdown files last-write-wins, without merging:
+The serialisation rules exist for one reason: sync. Obsidian LiveSync resolves
+conflicts on non-Markdown files last-write-wins, without merging, so the file
+had better produce small, predictable diffs:
 
-1. Key order is deterministic — sheets by array position, cells by
+1. Key order is deterministic. Sheets by array position, cells by
    `(row, column)`, subkeys fixed. The same document always serialises to
    byte-identical output.
-2. Two-space indent, **one cell per line**. Editing one cell changes exactly one
+2. Two-space indent, one cell per line. Editing one cell changes exactly one
    line, so LiveSync ships kilobytes instead of the whole file.
 3. `LF` line endings only, trailing newline, no BOM.
 4. `NaN` and `Infinity` are never written.
 5. Empty cells are omitted entirely: a 100×26 sheet with three filled cells is
    about 300 bytes.
 6. A `version` field. A file with a version newer than the plugin knows opens
-   **read-only**, so the plugin never overwrites data it does not understand.
+   read-only, so the plugin never overwrites data it does not understand.
 
-Raw CSS never reaches the file. The engine keeps styles as inline CSS, but at the
-boundary they are explicitly converted to the four normalised properties and back
-(`src/cellcss.ts`).
+Raw CSS never reaches the file. The engine keeps styles as inline CSS, but at
+the boundary they are explicitly converted to the four normalised properties
+and back (`src/cellcss.ts`).
 
 ## Data-loss protection
 
-A well-known failure mode of spreadsheet plugins for Obsidian
-(`obsidian-spreadsheets`, issues #27 and #29) is `getViewData()` returning an
-empty string and Obsidian truncating the file. Three safeguards are in place:
+A known failure mode of spreadsheet plugins for Obsidian
+(`obsidian-spreadsheets`, issues #27 and #29): `getViewData()` returns an empty
+string and Obsidian truncates the file. People lost real data to that bug.
+Three safeguards here:
 
 - `getViewData()` goes through the engine only when the document is actually
   dirty; otherwise it returns the last known-good serialisation.
 - If serialisation throws, or the result is suspiciously short, the same
   last known-good version is returned instead of an empty string.
-- If a file cannot be parsed (broken JSON, foreign format), it opens read-only
+- If a file cannot be parsed (broken JSON, foreign format), it opens read-only,
   and writing to it is impossible by construction.
 
 ## Development
@@ -168,79 +178,92 @@ Build output: `main.js` ~498 KB, `styles.css` ~91 KB.
 
 Notes on the build configuration:
 
-- Obsidian loads **only** `styles.css`. esbuild writes imported CSS to
-  `main.css`, which Obsidian silently ignores, so the `onEnd` step in
-  `esbuild.config.mjs` takes `main.css`, runs it through
-  `postcss-prefix-selector`, appends the theming layer and writes `styles.css`.
+- Obsidian loads only `styles.css`. esbuild writes imported CSS to `main.css`,
+  which Obsidian silently ignores, so the `onEnd` step in `esbuild.config.mjs`
+  takes `main.css`, runs it through `postcss-prefix-selector`, appends the
+  theming layer and writes `styles.css`.
 - The engine's CSS is scoped entirely to `.leovale-sheet-root`. `html`, `body`
-  and `:root` selectors are *replaced* rather than prefixed, otherwise
-  `:root` variables and `body { margin: 0 }` would leak into the whole app.
+  and `:root` selectors are replaced rather than prefixed, otherwise `:root`
+  variables and `body { margin: 0 }` would leak into the whole app.
 - The engine's hard-coded colours (`#fff`, `#ccc`, `#f3f3f3`) are remapped to
   Obsidian CSS variables. No `filter: invert(1)` anywhere.
 
-The e2e suite (91 assertions) launches a **separate** Obsidian instance with its
-own `--user-data-dir` on CDP port 9333, so your running Obsidian on 9222 is left
-alone. It installs and enables the plugin, creates a sheet, types values and
-formulas with real keyboard events, drags column and row edges, formats a
-selection with real toolbar clicks, waits for autosave, reads the file **from
-disk** and checks the format, reopens it, switches themes and captures the
-screenshots in `tests/shots/`.
+The e2e suite (91 assertions) launches a separate Obsidian instance with its
+own `--user-data-dir` on CDP port 9333, so your running Obsidian is left alone.
+It installs and enables the plugin, creates a sheet, types values and formulas
+with real keyboard events, drags column and row edges, formats a selection with
+real toolbar clicks, waits for autosave, reads the file from disk and checks
+the format, reopens it, switches themes and captures the screenshots in
+`tests/shots/`. Playwright is needed for e2e only: either `npm i -D playwright`
+or point `SHEETS_PLAYWRIGHT` at an existing install.
+
+## Releases
+
+Every push to master is built, tested and published as a release
+automatically, with a patch version bump. Commit message markers: `[minor]`
+and `[major]` bump the respective part, `[skip release]` builds and tests
+without releasing. See `.github/workflows/release.yml` and
+`scripts/bump-version.mjs`.
 
 ## Limitations
 
-- **Dragging columns and rows is disabled.** Order is stored by index, not by id,
+- Dragging columns and rows is disabled. Order is stored by index, not by id,
   so reordering would make the saved order a lie.
-- Formatting covers fill, font size, bold and borders only. No italics, font
+- Formatting covers fill, font size, bold and borders. No italics, font
   family, alignment or number formats. Text is left-aligned, numbers included.
 - The format supports multiple sheets per file, but there is no UI yet for
   creating a second sheet.
-- Merged cells (`merges`) are saved and restored, but there is no toolbar button
-  for them — only the engine's own context menu.
+- Merged cells (`merges`) are saved and restored, but there is no toolbar
+  button for them, only the engine's own context menu.
 - Styles are bound to cell addresses. Inserting a row or column shifts them via
   the engine; exotic scenarios (sorting with styles) are untested.
 - When the plugin is disabled, already-open `.sheet` tabs show "no view of
   type…". That is intentional: closing the user's tabs in `onunload` would
   rearrange their workspace.
-- Mobile is untested.
+- On touch devices the rough edges are: the row-number gutter scrolls away
+  horizontally, a right-swipe near the left edge opens Obsidian's sidebar
+  instead of scrolling the grid, the bottom row can hide behind the Android
+  navigation bar, long formulas clip inside the cell editor, and there is no
+  touch gesture for range selection. Single-cell editing, formulas and the
+  toolbar all work.
 
 ## Gotchas worth knowing
 
-**`dirty` is a taken name.** `TextFileView` keeps its own undocumented `dirty`
-field on the instance and resets it inside its own save logic. A `private dirty`
-field in a subclass collides with it: the flag was being cleared between our
-`scheduleSave()` and `getViewData()`, and the file silently stayed in its
-just-created state — full grid on screen, empty file on disk. Every view field is
-therefore prefixed with `sheet` (`sheetDirty`, `sheetEngine`, `sheetLastGood`, …).
-Do not rename them back.
+`dirty` is a taken name. `TextFileView` keeps its own undocumented `dirty`
+field on the instance and resets it inside its own save logic. A
+`private dirty` field in a subclass collides with it: the flag was being
+cleared between our `scheduleSave()` and `getViewData()`, and the file silently
+stayed in its just-created state. Full grid on screen, empty file on disk.
+Every view field is therefore prefixed with `sheet` (`sheetDirty`,
+`sheetEngine`, `sheetLastGood`, …). Do not rename them back.
 
-**Clicking the toolbar kills the selection.** Jspreadsheet installs a `mousedown`
-handler on `document` that clears the selection on any click outside the grid. The
-toolbar therefore captures the selection at `mousedown` time, and the engine also
-keeps the last selection from its `onselection` event.
+Clicking the toolbar kills the selection. Jspreadsheet installs a `mousedown`
+handler on `document` that clears the selection on any click outside the grid.
+The toolbar therefore captures the selection at `mousedown` time, and the
+engine also keeps the last selection from its `onselection` event.
 
-**Row heights are not applied from options.** The `rows: { "1": { height: 51 } }`
+Row heights are not applied from options. The `rows: { "1": { height: 51 } }`
 option is accepted but has no effect on the first render. Heights are reapplied
-with an explicit `setHeight()` after init, with autosave suppressed — otherwise
+with an explicit `setHeight()` after init, with autosave suppressed, otherwise
 merely opening a file would mark it modified.
 
-**`setIcon()` with an unknown name silently draws nothing.** The icons
-`grid-2x2`, `borders` and `border-all` are **absent** from the Lucide set in this
-Obsidian build. `setIcon` neither throws nor logs, it just leaves an empty
-element, which is how the Borders button was invisible for a while. Only verified
-names are used (`bold`, `table`, `square`, `eraser`, `panel-*`, `paint-bucket`,
-`chevron-down`), and the e2e suite asserts that every button and menu item really
+`setIcon()` with an unknown name silently draws nothing. The icons `grid-2x2`,
+`borders` and `border-all` are absent from the Lucide set in current Obsidian
+builds. `setIcon` neither throws nor logs, it just leaves an empty element,
+which is how the Borders button was invisible for a while. Only verified names
+are used, and the e2e suite asserts that every button and menu item really
 rendered an `<svg>`.
 
-**Do not pass a second argument to `getNewFileParent()`.** Calling
-`getNewFileParent(path, "Untitled.sheet")` makes Obsidian look for a file creator
-for that extension and log an error. The first argument is enough.
+Do not pass a second argument to `getNewFileParent()`. Calling
+`getNewFileParent(path, "Untitled.sheet")` makes Obsidian look for a file
+creator for that extension and log an error. The first argument is enough.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT, see [LICENSE](LICENSE).
 
 The grid engine is [Jspreadsheet CE](https://github.com/jspreadsheet/ce) 5.0.4
 (MIT), with `jsuites` (MIT) and the `@jspreadsheet/formula` "Formula Basic"
 engine (MIT per the vendor's banner in the distributed files). Full notices are
-in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md); the vendors' MIT banners are
-preserved in the bundle (`legalComments: "eof"`).
+in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md), and the bundle carries
+them in a footer comment in `main.js`.
