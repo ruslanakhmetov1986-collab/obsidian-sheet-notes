@@ -1,24 +1,40 @@
-name: Release Obsidian plugin
+name: Auto-release
+
+# Every push to master: build + unit tests, then automatically bump the version
+# (patch by default; put [minor] or [major] in the commit message to bump more;
+# put [skip release] to only build and test), tag it and publish a GitHub
+# release with main.js / manifest.json / styles.css - the assets BRAT and the
+# Obsidian catalog consume.
+#
+# Loop safety: the bot's own "release:" commit is filtered by the job `if`, and
+# pushes made with GITHUB_TOKEN do not retrigger workflows anyway.
 
 on:
   push:
-    tags:
-      - "*"
+    branches:
+      - master
 
 permissions:
   contents: write
 
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
-  build:
+  release:
+    if: "!startsWith(github.event.head_commit.message, 'release:')"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
 
-      - name: Build plugin
+      - name: Build
         run: |
           npm ci
           npm run build
@@ -26,12 +42,44 @@ jobs:
       - name: Unit tests
         run: npm test
 
-      - name: Create release
+      - name: Decide bump kind
+        id: bump
+        env:
+          MSG: ${{ github.event.head_commit.message }}
+        run: |
+          if echo "$MSG" | grep -qF "[skip release]"; then
+            echo "kind=skip" >> "$GITHUB_OUTPUT"
+          elif echo "$MSG" | grep -qF "[major]"; then
+            echo "kind=major" >> "$GITHUB_OUTPUT"
+          elif echo "$MSG" | grep -qF "[minor]"; then
+            echo "kind=minor" >> "$GITHUB_OUTPUT"
+          else
+            echo "kind=patch" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Bump version, commit, tag
+        if: steps.bump.outputs.kind != 'skip'
+        id: version
+        run: |
+          ver=$(node scripts/bump-version.mjs "${{ steps.bump.outputs.kind }}")
+          echo "ver=$ver" >> "$GITHUB_OUTPUT"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add manifest.json versions.json package.json package-lock.json
+          git commit -m "release: $ver"
+          git tag "$ver"
+          git push origin master --tags
+
+      - name: Rebuild with released manifest
+        if: steps.bump.outputs.kind != 'skip'
+        run: npm run build
+
+      - name: Publish release
+        if: steps.bump.outputs.kind != 'skip'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          tag="${GITHUB_REF#refs/tags/}"
-          gh release create "$tag" \
-            --title "$tag" \
+          gh release create "${{ steps.version.outputs.ver }}" \
+            --title "${{ steps.version.outputs.ver }}" \
             --generate-notes \
             main.js manifest.json styles.css
