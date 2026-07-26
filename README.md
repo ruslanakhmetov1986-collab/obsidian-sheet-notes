@@ -11,6 +11,32 @@ The plugin makes zero network requests. Nothing is uploaded, there is no
 telemetry, no remote fonts or icons. The grid engine's assets are inlined into
 the bundle.
 
+## How this differs from Sheet Plus
+
+Sheet Plus is the established spreadsheet plugin for Obsidian and it does much
+more than this one: charts, pivot tables, images in cells, Excel import. If you
+need those, use it. The differences below are the reasons this plugin exists.
+
+- **Your data survives.** A file whose `version` is newer than the plugin
+  understands opens read-only, serialization is guarded so a failure returns the
+  last known-good bytes instead of an empty string, and line endings are LF
+  only. The category leader has open data-corruption issues, including one
+  caused by CRLF handling.
+- **Plain, diffable JSON, one cell per line.** Editing one cell changes one line
+  of the file, which is what Git and Obsidian LiveSync need to sync a few
+  kilobytes instead of the whole document. Sheet Plus stores its data as a
+  single-line JSON blob, so any edit rewrites the entire file as one diff line.
+- **0.5 MB instead of 18.5 MB.** Sheet Plus exceeds Obsidian Sync's 5 MB
+  per-file limit, so Obsidian Sync cannot carry the plugin itself.
+- **Auditable in an afternoon.** MIT, one public dependency (Jspreadsheet CE),
+  and the whole save path is in this repository. Sheet Plus keeps its save path
+  in unpublished private modules and talks to a license server.
+- **Scoped CSS, no global patching.** Every selector is prefixed with
+  `.leovale-sheet-root`; nothing is added to `window` or to Obsidian's
+  prototypes.
+- **Editable on mobile.** Sheet Plus is read-only there. Here you can type,
+  enter formulas and format cells on a tablet.
+
 Документация на русском: [README.ru.md](README.ru.md)
 
 ![Spreadsheet in the light theme](tests/shots/02-filled-light.png)
@@ -19,14 +45,23 @@ the bundle.
 
 ![Fill colour palette](tests/shots/06-palette-open-light.png)
 
+![Tablet layout: 44 px controls, frozen row numbers](tests/shots/08-mobile-light.png)
+
 ## Requirements
 
 Obsidian 1.7.2 or newer (the plugin relies on deferred views).
 
 Mobile works: the core loop (open, edit, type, format, save, reopen) was tested
 by hand on an Android tablet and held up, including formulas and the fill
-palette. Some touch interactions are still rough, see Limitations. Phones are
+palette. The row-number gutter stays frozen while you scroll sideways, toolbar
+buttons and palette swatches are 44 px on touch devices, the last row is not
+covered by the Android navigation bar, and the formula bar makes long formulas
+editable. Some touch interactions are still rough, see Limitations. Phones are
 untested.
+
+The interface is English by default and switches to Russian when Obsidian's
+interface language is Russian (Settings, About, Language). Command names stay
+English, which is the Obsidian convention.
 
 ## Install
 
@@ -53,6 +88,51 @@ Create a spreadsheet in any of three ways:
 
 The file lands wherever your "Default location for new notes" setting points
 and opens in a new tab.
+
+### Which extensions open in the grid
+
+| Extension | Notes |
+|---|---|
+| `.sheet` | The preferred one. Registered unless another plugin already owns it |
+| `.lsheet` | Always registered. Identical format, used when `.sheet` is taken |
+| `.csv` | Opened in the same grid, saved back as CSV. See below |
+
+Sheet Plus, Excel and Spreadsheets all claim `.sheet`, and Obsidian gives an
+extension to exactly one view. If one of them got there first, this plugin shows
+a notice naming the owner, leaves `.sheet` alone, and creates new spreadsheets as
+`.lsheet` instead. Everything else works the same. Files you already have keep
+opening in whichever plugin owns their extension; renaming a file to `.lsheet`
+moves it here.
+
+### CSV files
+
+A `.csv` opens in the same grid and is written back as plain CSV.
+
+- The delimiter is detected from the file (`,` or `;`) and preserved on save.
+  The current one is shown as a badge on the right of the formula bar.
+- Quoting follows RFC 4180: `"` doubles inside a quoted field, and a field is
+  quoted on write only when it contains the delimiter, a quote or a newline.
+- Line endings are LF, never CRLF, with a trailing newline.
+- Formatting (bold, fill, font size, borders) applies on screen but is **not
+  saved**: a CSV file has nowhere to put it. Neither are column widths, row
+  heights or merges.
+- Typing a formula works and it recalculates live, but the file stores the
+  formula **text** (`=SUM(A1:A2)`), because that is all a CSV cell can hold.
+  Open the same file in Excel and you get a real formula; open it in pandas and
+  you get the string.
+- Emptying every cell of a CSV does not write an empty file. That is the
+  anti-truncation guard; delete the file instead.
+
+The deterministic JSON serializer described below applies to `.sheet` and
+`.lsheet` only.
+
+### Formula bar
+
+Above the toolbar sits one line: the address of the active cell and its raw
+content. A cell holding `=SUM(B2:B3)` shows the formula there while the grid
+shows `7`. Type into it and press `Enter` to commit; `Escape` reverts. It is the
+primary way to edit formulas on a tablet, where the in-cell editor is only as
+wide as the cell.
 
 ### Working with the grid
 
@@ -170,11 +250,11 @@ Three safeguards here:
 npm install          # node_modules ~40 MB
 npm run build        # tsc --noEmit + esbuild production -> main.js, styles.css
 npm run dev          # esbuild --watch
-npm test             # 36 unit tests for the format and styles (node --test)
+npm test             # 74 unit tests: format, styles, CSV, i18n (node --test)
 npm run e2e          # e2e in a sandboxed Obsidian, screenshots into tests/shots/
 ```
 
-Build output: `main.js` ~498 KB, `styles.css` ~91 KB.
+Build output: `main.js` ~520 KB, `styles.css` ~99 KB.
 
 Notes on the build configuration:
 
@@ -188,14 +268,19 @@ Notes on the build configuration:
 - The engine's hard-coded colours (`#fff`, `#ccc`, `#f3f3f3`) are remapped to
   Obsidian CSS variables. No `filter: invert(1)` anywhere.
 
-The e2e suite (91 assertions) launches a separate Obsidian instance with its
+The e2e suite (164 assertions) launches a separate Obsidian instance with its
 own `--user-data-dir` on CDP port 9333, so your running Obsidian is left alone.
 It installs and enables the plugin, creates a sheet, types values and formulas
 with real keyboard events, drags column and row edges, formats a selection with
-real toolbar clicks, waits for autosave, reads the file from disk and checks
-the format, reopens it, switches themes and captures the screenshots in
-`tests/shots/`. Playwright is needed for e2e only: either `npm i -D playwright`
-or point `SHEETS_PLAYWRIGHT` at an existing install.
+real toolbar clicks, edits a formula through the formula bar, checks that the
+row-number gutter stays put during a horizontal scroll, waits for autosave,
+reads the file from disk and checks the format, reopens it, switches themes and
+locales, emulates the tablet (800x1340, `mobile: true`, `body.is-mobile`) to
+measure touch targets, round-trips a semicolon-delimited CSV through the real
+view, and finally pretends a foreign plugin owns `.sheet` to check the notice
+and the `.lsheet` fallback. Screenshots land in `tests/shots/`. Playwright is
+needed for e2e only: either `npm i -D playwright` or point `SHEETS_PLAYWRIGHT`
+at an existing install.
 
 ## Releases
 
@@ -220,12 +305,15 @@ without releasing. See `.github/workflows/release.yml` and
 - When the plugin is disabled, already-open `.sheet` tabs show "no view of
   type…". That is intentional: closing the user's tabs in `onunload` would
   rearrange their workspace.
-- On touch devices the rough edges are: the row-number gutter scrolls away
-  horizontally, a right-swipe near the left edge opens Obsidian's sidebar
-  instead of scrolling the grid, the bottom row can hide behind the Android
-  navigation bar, long formulas clip inside the cell editor, and there is no
-  touch gesture for range selection. Single-cell editing, formulas and the
-  toolbar all work.
+- CSV files keep values only. Formatting, column widths, row heights and merges
+  are not saved for them, and a formula is stored as its text.
+- The formula bar edits the anchor cell of the selection, one cell at a time.
+  There is no range editing and no autocomplete for function names.
+- On touch devices the remaining rough edges are: no gesture for selecting a
+  range (drag scrolls, as it should), and a swipe that starts on Obsidian's own
+  edge zone still opens the sidebar. The gutter now stays frozen, the bottom row
+  clears the navigation bar, controls are 44 px, and long formulas are edited in
+  the formula bar. Fixed on an Android tablet at 800x1340; phones untested.
 
 ## Gotchas worth knowing
 
@@ -253,6 +341,20 @@ builds. `setIcon` neither throws nor logs, it just leaves an empty element,
 which is how the Borders button was invisible for a while. Only verified names
 are used, and the e2e suite asserts that every button and menu item really
 rendered an `<svg>`.
+
+`freezeColumns` does not freeze the row numbers. The engine's own freeze reads
+`instance.content.scrollLeft`, i.e. its internal scroller, which only exists with
+`tableOverflow: true`; here the whole grid scrolls inside our own wrapper. And it
+freezes data columns, not the gutter. The gutter is `position: sticky; left: 0`
+in our theme layer instead, with the corner cell sticky on both axes.
+
+Swallowing `touchmove` arms a hidden trap. Obsidian mobile reads a horizontal
+pan as "open the left drawer", so the grid stops `touchmove` from bubbling. But
+the engine's `touchstart` (registered on `document`) arms a 500 ms timer that
+opens the in-cell editor, and it cancels that timer from its own `touchmove`
+listener, which is exactly the event we now eat. Without cancelling it
+explicitly, a half-second scroll pops the editor open. `touchstart` itself must
+keep bubbling, or tapping a cell stops selecting it.
 
 Do not pass a second argument to `getNewFileParent()`. Calling
 `getNewFileParent(path, "Untitled.sheet")` makes Obsidian look for a file

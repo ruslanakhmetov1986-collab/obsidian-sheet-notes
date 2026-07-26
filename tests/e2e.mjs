@@ -129,13 +129,24 @@ async function main() {
 		step("install + enable the plugin");
 		const enabled = await page.evaluate(async (id) => {
 			window.app.plugins.setEnable(true); // leave Restricted Mode
+			// The plugin follows Obsidian's interface language. Pin it to English so
+			// the assertions below do not depend on the machine's locale (this one
+			// reports ru, which is exactly what the i18n step re-checks later).
+			const langBefore = {
+				stored: window.localStorage.getItem("language"),
+				moment: window.moment?.locale?.(),
+			};
+			window.localStorage.setItem("language", "en");
 			await window.app.plugins.loadManifests();
 			if (window.app.plugins.plugins[id]) await window.app.plugins.disablePlugin(id);
 			await window.app.plugins.enablePluginAndSave(id);
 			await new Promise((r) => setTimeout(r, 1200));
 			return {
+				langBefore,
 				loaded: !!window.app.plugins.plugins[id],
 				extOwner: window.app.viewRegistry.getTypeByExtension("sheet"),
+				lsheetOwner: window.app.viewRegistry.getTypeByExtension("lsheet"),
+				csvOwner: window.app.viewRegistry.getTypeByExtension("csv"),
 				commands: Object.keys(window.app.commands.commands).filter((c) => c.startsWith(id)),
 				ribbon: !!document.querySelector('.side-dock-ribbon-action[aria-label*="spreadsheet" i]'),
 			};
@@ -154,6 +165,10 @@ async function main() {
 		console.log("  ", enabled);
 		check("plugin instance is live", enabled.loaded);
 		check(".sheet extension is owned by our view", enabled.extOwner === "leovale-sheet-view");
+		check(".lsheet fallback is always registered too", enabled.lsheetOwner === "leovale-sheet-view",
+			String(enabled.lsheetOwner));
+		check(".csv is registered to the same view", enabled.csvOwner === "leovale-sheet-view",
+			String(enabled.csvOwner));
 		check("create command registered", enabled.commands.includes(`${PLUGIN_ID}:create-sheet`));
 		check("ribbon icon present", enabled.ribbon);
 
@@ -239,6 +254,120 @@ async function main() {
 		check("=SUM(B2:B3) computed to 7", b4 === "7", String(b4));
 		check("=B2*2 computed to 6", c2 === "6", String(c2));
 		check('=IF(B4>5,...) computed to "big"', c4 === "big", String(c4));
+
+		step("formula bar");
+		const fb = ".leovale-sheet-formulabar";
+		check("formula bar is present", (await page.locator(fb).count()) === 1);
+		const fbLook = await page.evaluate(() => {
+			const bar = document.querySelector(".leovale-sheet-formulabar");
+			const input = document.querySelector(".leovale-sheet-fb-input");
+			const content = document.querySelector(".leovale-sheet-content");
+			return {
+				// the bar has to sit ABOVE the toolbar
+				firstChild: content?.firstElementChild?.className,
+				height: Math.round(bar.getBoundingClientRect().height),
+				inputs: document.querySelectorAll(".leovale-sheet-fb-input").length,
+				mono: getComputedStyle(input).fontFamily.length > 0,
+				badge: document.querySelectorAll(".leovale-sheet-fb-badge").length,
+			};
+		});
+		console.log("  formula bar:", fbLook);
+		check("formula bar is the first strip in the view", fbLook.firstChild === "leovale-sheet-formulabar", String(fbLook.firstChild));
+		check("formula bar is one line", fbLook.height > 20 && fbLook.height < 40, String(fbLook.height));
+		check("exactly one input", fbLook.inputs === 1, String(fbLook.inputs));
+		check("no CSV badge on a .sheet file", fbLook.badge === 0, String(fbLook.badge));
+
+		// selecting a formula cell must show the SOURCE, not the result
+		await page.click('.leovale-sheet-root td[data-x="1"][data-y="3"]');
+		await page.waitForTimeout(200);
+		const barOnB4 = await page.evaluate(() => ({
+			ref: document.querySelector(".leovale-sheet-fb-ref").textContent,
+			value: document.querySelector(".leovale-sheet-fb-input").value,
+			cellShows: document.querySelector('.leovale-sheet-root td[data-x="1"][data-y="3"]').textContent,
+		}));
+		console.log("  bar on B4:", barOnB4);
+		check("bar names the active cell", barOnB4.ref === "B4", barOnB4.ref);
+		check("bar shows the formula source", barOnB4.value === "=SUM(B2:B3)", barOnB4.value);
+		check("the cell itself still shows the result", barOnB4.cellShows === "7", barOnB4.cellShows);
+
+		// a range shows as A1:C1
+		const a1r = await page.locator('.leovale-sheet-root td[data-x="0"][data-y="0"]').boundingBox();
+		const c1r = await page.locator('.leovale-sheet-root td[data-x="2"][data-y="0"]').boundingBox();
+		await page.mouse.move(a1r.x + a1r.width / 2, a1r.y + a1r.height / 2);
+		await page.mouse.down();
+		await page.mouse.move(c1r.x + c1r.width / 2, c1r.y + c1r.height / 2, { steps: 6 });
+		await page.mouse.up();
+		await page.waitForTimeout(200);
+		check(
+			"bar labels a range",
+			(await page.locator(`${fb} .leovale-sheet-fb-ref`).innerText()).trim() === "A1:C1",
+			await page.locator(`${fb} .leovale-sheet-fb-ref`).innerText(),
+		);
+
+		// type a formula THROUGH THE BAR into D6 and commit with Enter
+		await page.click('.leovale-sheet-root td[data-x="3"][data-y="5"]');
+		await page.waitForTimeout(150);
+		await page.click(`${fb} .leovale-sheet-fb-input`);
+		await page.keyboard.type("=SUM(B2:B3)*10", { delay: 12 });
+		await page.keyboard.press("Enter");
+		await page.waitForTimeout(400);
+		const barCommit = await page.evaluate(() => ({
+			cell: document.querySelector('.leovale-sheet-root td[data-x="3"][data-y="5"]').textContent,
+			raw: window.sheetView().sheetEngine.getRawValue("D6"),
+			dirty: window.sheetView().sheetDirty,
+		}));
+		console.log("  after bar commit:", barCommit);
+		check("grid computed the formula typed in the bar", barCommit.cell === "70", String(barCommit.cell));
+		check("cell keeps the formula source", barCommit.raw === "=SUM(B2:B3)*10", String(barCommit.raw));
+		check("the bar edit marked the document dirty (autosave path)", barCommit.dirty === true);
+
+		// Escape reverts instead of committing
+		await page.click(`${fb} .leovale-sheet-fb-input`);
+		await page.keyboard.press("Control+A");
+		await page.keyboard.type("=1+1");
+		await page.keyboard.press("Escape");
+		await page.waitForTimeout(250);
+		check(
+			"Escape leaves the cell alone",
+			(await page.evaluate(() => window.sheetView().sheetEngine.getRawValue("D6"))) ===
+				"=SUM(B2:B3)*10",
+		);
+
+		step("frozen row-number gutter (sticky during horizontal scroll)");
+		const sticky = await page.evaluate(() => {
+			const wrapper = document.querySelector(".leovale-sheet-wrapper");
+			const rowHead = document.querySelector(
+				'.leovale-sheet-root tbody tr:nth-child(3) td.jss_row',
+			);
+			const corner = document.querySelector(".leovale-sheet-root thead td:first-child");
+			const dataCell = document.querySelector('.leovale-sheet-root td[data-x="4"][data-y="2"]');
+			const rs = getComputedStyle(rowHead);
+			const before = { row: rowHead.getBoundingClientRect().left, data: dataCell.getBoundingClientRect().left };
+			wrapper.scrollLeft = 260;
+			void wrapper.offsetWidth;
+			const after = { row: rowHead.getBoundingClientRect().left, data: dataCell.getBoundingClientRect().left };
+			const scrolled = wrapper.scrollLeft;
+			wrapper.scrollLeft = 0;
+			return {
+				position: rs.position,
+				left: rs.left,
+				zIndex: rs.zIndex,
+				cornerPos: getComputedStyle(corner).position,
+				cornerZ: getComputedStyle(corner).zIndex,
+				scrolled,
+				rowMoved: Math.abs(after.row - before.row),
+				dataMoved: Math.abs(after.data - before.data),
+			};
+		});
+		console.log("  gutter:", sticky);
+		check("row headers are position:sticky", sticky.position === "sticky", sticky.position);
+		check("pinned to the left edge", sticky.left === "0px", sticky.left);
+		check("above the data cells", Number(sticky.zIndex) >= 3, sticky.zIndex);
+		check("corner cell is sticky on both axes", sticky.cornerPos === "sticky" && Number(sticky.cornerZ) >= 4,
+			`${sticky.cornerPos} z=${sticky.cornerZ}`);
+		check("the grid really scrolled horizontally", sticky.scrolled > 200, String(sticky.scrolled));
+		check("data cells moved with the scroll", sticky.dataMoved > 200, String(sticky.dataMoved));
+		check("row numbers stayed put", sticky.rowMoved < 2, String(sticky.rowMoved));
 
 		step("column resize (real mouse drag on the header border)");
 		const headA = await page.locator('.leovale-sheet-root thead td[data-x="0"]').boundingBox();
@@ -390,7 +519,7 @@ async function main() {
 			menuIcons.length === 7 && menuIcons.every((i) => i.svg),
 			JSON.stringify(menuIcons),
 		);
-		await page.click('.menu .menu-item:has(.menu-item-title:text-is("Все границы"))');
+		await page.click('.menu .menu-item:has(.menu-item-title:text-is("All borders"))');
 		await page.waitForTimeout(300);
 
 		const fmt = await page.evaluate(() => {
@@ -431,7 +560,7 @@ async function main() {
 		await page.waitForTimeout(150);
 		await page.click(`${tb} .leovale-sheet-tb-border`);
 		await page.waitForTimeout(250);
-		await page.click('.menu .menu-item:has(.menu-item-title:text-is("Внешние границы"))');
+		await page.click('.menu .menu-item:has(.menu-item-title:text-is("Outer borders"))');
 		await page.waitForTimeout(300);
 		const outline = await page.evaluate(() => {
 			const e = window.sheetView().sheetEngine;
@@ -686,6 +815,309 @@ async function main() {
 		console.log("  ", guard);
 		check("getViewData falls back to lastGood when serialization throws", guard.len > 100 && guard.startsOk);
 		check("file untouched by the guard test", fs.readFileSync(diskPath, "utf8") === before);
+
+		step("i18n: English by default, Russian when Obsidian is Russian");
+		const enMenu = await page.evaluate(async () => {
+			document.querySelector(".leovale-sheet-tb-border").click();
+			await new Promise((r) => setTimeout(r, 250));
+			const items = [...document.querySelectorAll(".menu .menu-item-title")].map((i) => i.textContent);
+			document.body.click();
+			return {
+				items,
+				bold: document.querySelector(".leovale-sheet-tb-bold").getAttribute("aria-label"),
+				placeholder: document.querySelector(".leovale-sheet-fb-input").placeholder,
+			};
+		});
+		console.log("  en:", enMenu);
+		check("border menu is English", enMenu.items[0] === "All borders", JSON.stringify(enMenu.items));
+		check("outer/none are English too",
+			enMenu.items[1] === "Outer borders" && enMenu.items[2] === "No borders", JSON.stringify(enMenu.items));
+		check("button tooltips are English", enMenu.bold === "Bold", String(enMenu.bold));
+		check("formula bar placeholder is English", enMenu.placeholder === "Value or formula", enMenu.placeholder);
+
+		const ruMenu = await page.evaluate(async () => {
+			window.localStorage.setItem("language", "ru");
+			// Strings are read at build time of each control: re-render the view.
+			const view = window.sheetView();
+			view.setViewData(view.getViewData(), false);
+			await new Promise((r) => setTimeout(r, 400));
+			document.querySelector(".leovale-sheet-tb-border").click();
+			await new Promise((r) => setTimeout(r, 250));
+			const items = [...document.querySelectorAll(".menu .menu-item-title")].map((i) => i.textContent);
+			document.body.click();
+			const out = {
+				items,
+				bold: document.querySelector(".leovale-sheet-tb-bold").getAttribute("aria-label"),
+				placeholder: document.querySelector(".leovale-sheet-fb-input").placeholder,
+			};
+			window.localStorage.setItem("language", "en");
+			view.setViewData(view.getViewData(), false);
+			await new Promise((r) => setTimeout(r, 400));
+			return out;
+		});
+		console.log("  ru:", ruMenu);
+		check("ru locale switches the menu", ruMenu.items[0] === "Все границы", JSON.stringify(ruMenu.items));
+		check("ru locale switches tooltips", ruMenu.bold === "Жирный", String(ruMenu.bold));
+		check("ru locale switches the placeholder", ruMenu.placeholder === "Значение или формула", ruMenu.placeholder);
+		check(
+			"back to English after restoring the locale",
+			(await page.locator(".leovale-sheet-tb-bold").getAttribute("aria-label")) === "Bold",
+		);
+
+		step("mobile emulation: 800x1340, mobile:true, body.is-mobile");
+		// Everything mobile-specific is CSS gated on `body.is-mobile` (Obsidian's
+		// own class) so it can be exercised here. What this pass CANNOT prove is
+		// the actual touch behaviour: Obsidian's sidebar swipe handler and
+		// env(safe-area-inset-bottom) only exist on a real device.
+		const cdp = await ctx.newCDPSession(page);
+		await cdp.send("Emulation.setDeviceMetricsOverride", {
+			width: 800,
+			height: 1340,
+			deviceScaleFactor: 2,
+			mobile: true,
+		});
+		await cdp.send("Emulation.setTouchEmulationEnabled", { enabled: true, maxTouchPoints: 5 });
+		await page.evaluate(() => document.body.classList.add("is-mobile"));
+		await page.waitForTimeout(700);
+		await page.click(".leovale-sheet-root td[data-x=\"0\"][data-y=\"0\"]");
+		await page.waitForTimeout(200);
+		await page.click(".leovale-sheet-toolbar .leovale-sheet-tb-fillbtn");
+		await page.waitForTimeout(400);
+		const mob = await page.evaluate(() => {
+			const q = (s) => document.querySelector(s);
+			const box = (el) => el.getBoundingClientRect();
+			const wrapper = q(".leovale-sheet-wrapper");
+			const btn = q(".leovale-sheet-toolbar .leovale-sheet-tb-btn");
+			const swatch = q(".leovale-sheet-swatch");
+			const bar = q(".leovale-sheet-formulabar");
+			const input = q(".leovale-sheet-fb-input");
+			const rowHead = q('.leovale-sheet-root tbody tr:nth-child(4) td.jss_row');
+			const beforeLeft = box(rowHead).left;
+			wrapper.scrollLeft = 320;
+			void wrapper.offsetWidth;
+			const afterLeft = box(rowHead).left;
+			const scrolled = wrapper.scrollLeft;
+			wrapper.scrollLeft = 0;
+			return {
+				viewport: [window.innerWidth, window.innerHeight],
+				btn: [Math.round(box(btn).width), Math.round(box(btn).height)],
+				swatch: [Math.round(box(swatch).width), Math.round(box(swatch).height)],
+				barHeight: Math.round(box(bar).height),
+				inputHeight: Math.round(box(input).height),
+				toolbarHeight: Math.round(box(q(".leovale-sheet-toolbar")).height),
+				padBottom: parseFloat(getComputedStyle(wrapper).paddingBottom),
+				touchAction: getComputedStyle(wrapper).touchAction,
+				scrolled,
+				rowMoved: Math.abs(afterLeft - beforeLeft),
+			};
+		});
+		console.log("  mobile metrics:", mob);
+		check("emulated viewport is the tablet's", mob.viewport[0] === 800, JSON.stringify(mob.viewport));
+		check("toolbar buttons are >= 44x44", mob.btn[0] >= 44 && mob.btn[1] >= 44, JSON.stringify(mob.btn));
+		check("toolbar row grew to fit them", mob.toolbarHeight >= 48, String(mob.toolbarHeight));
+		check("palette swatches are >= 44x44", mob.swatch[0] >= 44 && mob.swatch[1] >= 44, JSON.stringify(mob.swatch));
+		check("formula bar is >= 44 tall", mob.barHeight >= 44, String(mob.barHeight));
+		check("its input is a comfortable target", mob.inputHeight >= 32, String(mob.inputHeight));
+		check("bottom safe-area padding is applied", mob.padBottom >= 12, String(mob.padBottom));
+		check("grid owns both pan directions", /pan-x/.test(mob.touchAction), mob.touchAction);
+		check("row numbers stay frozen on the narrow viewport", mob.scrolled > 200 && mob.rowMoved < 2,
+			`scrolled=${mob.scrolled} moved=${mob.rowMoved}`);
+		await shot(page, "08-mobile-light");
+		await page.click(".leovale-sheet-toolbar .leovale-sheet-tb-fillbtn");
+		await setBaseTheme(page, "obsidian");
+		await page.waitForTimeout(900);
+		await shot(page, "09-mobile-dark");
+		await setBaseTheme(page, "moonstone");
+		await page.evaluate(() => document.body.classList.remove("is-mobile"));
+		await cdp.send("Emulation.setTouchEmulationEnabled", { enabled: false });
+		await cdp.send("Emulation.clearDeviceMetricsOverride");
+		await page.waitForTimeout(800);
+
+		step("csv: open, edit, autosave, delimiter and quoting preserved");
+		const CSV_PATH = "data.csv";
+		const csvDisk = path.join(VAULT, CSV_PATH);
+		const CSV_SOURCE = 'name;note\nWidget;"red; large"\nGadget;plain\n';
+		await page.evaluate(
+			async ([p, text]) => {
+				const app = window.app;
+				app.workspace.detachLeavesOfType("leovale-sheet-view");
+				const old = app.vault.getAbstractFileByPath(p);
+				if (old) await app.vault.delete(old);
+				const f = await app.vault.create(p, text);
+				await app.workspace.getLeaf(true).openFile(f);
+			},
+			[CSV_PATH, CSV_SOURCE],
+		);
+		await page.waitForTimeout(2200);
+		const csvOpen = await page.evaluate(() => {
+			const v = window.sheetView();
+			const q = (x, y) =>
+				document.querySelector(`.leovale-sheet-root td[data-x="${x}"][data-y="${y}"]`)?.textContent;
+			return {
+				viewType: window.app.workspace.activeLeaf?.view?.getViewType?.(),
+				mode: v?.sheetMode,
+				delimiter: v?.sheetDelimiter,
+				badge: document.querySelector(".leovale-sheet-fb-badge")?.textContent,
+				a1: q(0, 0),
+				b1: q(1, 0),
+				a2: q(0, 1),
+				b2: q(1, 1),
+				a3: q(0, 2),
+				b3: q(1, 2),
+			};
+		});
+		console.log("  csv opened:", csvOpen);
+		check("a .csv opens in our grid", csvOpen.viewType === "leovale-sheet-view", String(csvOpen.viewType));
+		check("the view switched to csv mode", csvOpen.mode === "csv", String(csvOpen.mode));
+		check("the semicolon delimiter was detected", csvOpen.delimiter === ";", String(csvOpen.delimiter));
+		check("the badge names the delimiter", csvOpen.badge === "CSV ;", String(csvOpen.badge));
+		check("header row parsed", csvOpen.a1 === "name" && csvOpen.b1 === "note", JSON.stringify(csvOpen));
+		check(
+			"a quoted field with the delimiter inside parsed as one cell",
+			csvOpen.b2 === "red; large",
+			String(csvOpen.b2),
+		);
+		check("second data row parsed", csvOpen.a3 === "Gadget" && csvOpen.b3 === "plain", JSON.stringify(csvOpen));
+
+		// edit a cell; the comma in it must NOT be quoted in a semicolon file
+		await typeInCell(page, 2, 1, "a,b");
+		// formatting is allowed in memory but must not reach the file
+		await page.click('.leovale-sheet-root td[data-x="0"][data-y="0"]');
+		await page.waitForTimeout(150);
+		await page.click(".leovale-sheet-toolbar .leovale-sheet-tb-bold");
+		await page.waitForTimeout(200);
+		check(
+			"formatting still applies in memory for csv",
+			(await page.evaluate(() => window.sheetView().sheetEngine.getStyleAt("A1").b)) === true,
+		);
+		await page.waitForTimeout(5000);
+		const csvSaved = fs.readFileSync(csvDisk, "utf8");
+		console.log("  ---- csv on disk ----");
+		console.log(csvSaved.split("\n").map((l) => "  | " + l).join("\n"));
+		check("LF only, never CRLF", !csvSaved.includes("\r"));
+		check("trailing newline", csvSaved.endsWith("\n"));
+		check("the detected delimiter is what was written", csvSaved.startsWith("name;note"), csvSaved.slice(0, 20));
+		check('quoting preserved for "red; large"', csvSaved.includes('"red; large"'), csvSaved);
+		check(
+			"a comma needs no quoting in a semicolon file",
+			/;a,b(\n|$)/.test(csvSaved),
+			csvSaved,
+		);
+		check(
+			"rows are padded to a rectangle",
+			csvSaved === 'name;note;\nWidget;"red; large";a,b\nGadget;plain;\n',
+			JSON.stringify(csvSaved),
+		);
+		check("no styles leaked into the csv", !/font-weight|"s":|bold|#fff/.test(csvSaved));
+		check("no JSON envelope in the csv", !csvSaved.includes('"format"'));
+
+		// reopen: values come back, formatting does not (by design)
+		await page.evaluate(async (p) => {
+			window.app.workspace.detachLeavesOfType("leovale-sheet-view");
+			await new Promise((r) => setTimeout(r, 400));
+			const f = window.app.vault.getAbstractFileByPath(p);
+			await window.app.workspace.getLeaf(true).openFile(f);
+		}, CSV_PATH);
+		await page.waitForTimeout(2200);
+		const csvReopened = await page.evaluate(() => {
+			const q = (x, y) =>
+				document.querySelector(`.leovale-sheet-root td[data-x="${x}"][data-y="${y}"]`)?.textContent;
+			return {
+				b2: q(1, 1),
+				c2: q(2, 1),
+				delimiter: window.sheetView()?.sheetDelimiter,
+				boldA1: window.sheetView().sheetEngine.getStyleAt("A1").b,
+			};
+		});
+		console.log("  csv reopened:", csvReopened);
+		check("quoted value restored", csvReopened.b2 === "red; large", String(csvReopened.b2));
+		check("edited value restored", csvReopened.c2 === "a,b", String(csvReopened.c2));
+		check("delimiter still ;", csvReopened.delimiter === ";", String(csvReopened.delimiter));
+		check("styles are NOT persisted for csv (documented)", csvReopened.boldA1 === undefined,
+			String(csvReopened.boldA1));
+		check("the file is unchanged by reopening", fs.readFileSync(csvDisk, "utf8") === csvSaved);
+		await shot(page, "10-csv-light");
+
+		step(".sheet owned by another plugin -> notice + .lsheet fallback");
+		const fallback = await page.evaluate(async (id) => {
+			const app = window.app;
+			app.workspace.detachLeavesOfType("leovale-sheet-view");
+			await app.plugins.disablePlugin(id);
+			await new Promise((r) => setTimeout(r, 400));
+			// Pretend Sheet Plus got there first.
+			try {
+				app.viewRegistry.unregisterExtensions(["sheet"]);
+			} catch {
+				/* already free after our plugin was disabled */
+			}
+			app.viewRegistry.registerExtensions(["sheet"], "foreign-sheet-plus-view");
+			document.querySelectorAll(".notice").forEach((n) => n.remove());
+			await app.plugins.enablePlugin(id);
+			await new Promise((r) => setTimeout(r, 1500));
+			const plugin = app.plugins.plugins[id];
+			return {
+				owned: plugin?.sheetExtOwned,
+				sheetOwner: app.viewRegistry.getTypeByExtension("sheet"),
+				lsheetOwner: app.viewRegistry.getTypeByExtension("lsheet"),
+				csvOwner: app.viewRegistry.getTypeByExtension("csv"),
+				notices: [...document.querySelectorAll(".notice")].map((n) => n.textContent),
+			};
+		}, PLUGIN_ID);
+		console.log("  fallback:", fallback);
+		check("the plugin still loaded", fallback.lsheetOwner === "leovale-sheet-view");
+		check("it knows it does not own .sheet", fallback.owned === false, String(fallback.owned));
+		check(".sheet was left to the other plugin", fallback.sheetOwner === "foreign-sheet-plus-view",
+			String(fallback.sheetOwner));
+		check(".csv is still registered", fallback.csvOwner === "leovale-sheet-view", String(fallback.csvOwner));
+		const notice = fallback.notices.join(" | ");
+		check("a notice was shown", fallback.notices.length >= 1, notice);
+		check("the notice names the extension", notice.includes(".sheet"), notice);
+		check("the notice names the owner", notice.includes("foreign-sheet-plus-view"), notice);
+		check("the notice names the fallback extension", notice.includes(".lsheet"), notice);
+
+		await page.evaluate((id) => window.app.commands.executeCommandById(`${id}:create-sheet`), PLUGIN_ID);
+		await page.waitForTimeout(2000);
+		const lsheet = await page.evaluate(() => ({
+			path: window.app.workspace.getActiveFile()?.path,
+			viewType: window.app.workspace.activeLeaf?.view?.getViewType?.(),
+			grid: !!document.querySelector(".leovale-sheet-root table.jss_worksheet"),
+			mode: window.sheetView()?.sheetMode,
+		}));
+		console.log("  lsheet:", lsheet);
+		check("the create command used .lsheet", lsheet.path === "Untitled.lsheet", String(lsheet.path));
+		check(".lsheet opened in the same grid", lsheet.viewType === "leovale-sheet-view" && lsheet.grid);
+		check(".lsheet keeps the JSON format", lsheet.mode === "sheet", String(lsheet.mode));
+		const lsheetDisk = fs.readFileSync(path.join(VAULT, "Untitled.lsheet"), "utf8");
+		check(
+			".lsheet on disk is our deterministic JSON",
+			lsheetDisk.startsWith('{\n  "format": "leovale-sheet",\n  "version": 1,'),
+			lsheetDisk.slice(0, 40),
+		);
+
+		const restored = await page.evaluate(async (id) => {
+			const app = window.app;
+			app.workspace.detachLeavesOfType("leovale-sheet-view");
+			await new Promise((r) => setTimeout(r, 400));
+			for (const f of app.vault.getFiles()) {
+				if (f.extension === "lsheet") await app.vault.delete(f);
+			}
+			await app.plugins.disablePlugin(id);
+			await new Promise((r) => setTimeout(r, 400));
+			try {
+				app.viewRegistry.unregisterExtensions(["sheet"]);
+			} catch {
+				/* nothing to release */
+			}
+			await app.plugins.enablePlugin(id);
+			await new Promise((r) => setTimeout(r, 1500));
+			return {
+				sheetOwner: app.viewRegistry.getTypeByExtension("sheet"),
+				owned: app.plugins.plugins[id]?.sheetExtOwned,
+			};
+		}, PLUGIN_ID);
+		console.log("  restored:", restored);
+		check("with .sheet free again the plugin takes it", restored.sheetOwner === "leovale-sheet-view" &&
+			restored.owned === true, JSON.stringify(restored));
 
 		const realErrors = pageErrors.filter(
 			(e) =>

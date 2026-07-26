@@ -118,6 +118,12 @@ function docToWorksheets(doc: SheetDoc, readOnly: boolean): Record<string, unkno
 export interface EngineOptions {
 	/** Called after every mutation (cell edit, resize, style, insert, undo). */
 	onChange: () => void;
+	/**
+	 * Called whenever the grid's selection changes, including by touch. The
+	 * toolbar and the formula bar hang off this instead of mouse/key events,
+	 * which a tablet never sends.
+	 */
+	onSelection?: () => void;
 	/** Future-version documents render read-only so we never write them back. */
 	readOnly?: boolean;
 }
@@ -164,6 +170,11 @@ export class SheetEngine {
 				const rect = [x1, y1, x2, y2];
 				if (rect.every((n) => typeof n === "number" && Number.isFinite(n))) {
 					this.lastSelection = [x1, y1, x2, y2];
+				}
+				try {
+					opts.onSelection?.();
+				} catch (e) {
+					console.error("leovale-sheets: selection listener failed", e);
 				}
 			},
 			onafterchanges: notify,
@@ -281,6 +292,39 @@ export class SheetEngine {
 		return refs;
 	}
 
+	/* -------------------------------------------------------- raw cell value */
+
+	/**
+	 * The cell's RAW content: the formula source for a formula cell, the literal
+	 * otherwise. `getValue(ref, false)` reads `options.data`, not the rendered
+	 * result, which is exactly what the formula bar has to show.
+	 */
+	getRawValue(ref: string): CellValue | null {
+		const ws = this.first();
+		if (!ws) return null;
+		try {
+			const v = ws.getValue(ref, false);
+			if (v === null || v === undefined) return null;
+			if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") return v;
+			return String(v);
+		} catch {
+			return null;
+		}
+	}
+
+	/** Write raw text into a cell (formula source included) and mark dirty. */
+	setRawValue(ref: string, value: string): void {
+		const ws = this.first();
+		if (!ws || this.readOnly) return;
+		try {
+			ws.setValue(ref, value as JssCellValue);
+		} catch (e) {
+			console.error("leovale-sheets: setValue failed", e);
+			return;
+		}
+		this.notify();
+	}
+
 	/** Current normalized style of a single cell. */
 	getStyleAt(ref: string): CellStyle {
 		const ws = this.first();
@@ -325,6 +369,28 @@ export class SheetEngine {
 	focus(): void {
 		const first = this.host.querySelector<HTMLElement>("tbody td[data-x]");
 		first?.click();
+	}
+
+	/**
+	 * Cancel the engine's pending long-press-to-edit timer.
+	 *
+	 * `touchstart` on a cell arms a 500 ms timer that opens the in-cell editor;
+	 * the engine cancels it from its own `touchmove` listener on `document`. We
+	 * stop `touchmove` from bubbling out of the grid (otherwise Obsidian reads a
+	 * horizontal pan as "open the left drawer"), which also hides the event from
+	 * that listener, so the timer has to be cancelled here instead. Without this
+	 * a half-second scroll would pop the cell editor open.
+	 */
+	cancelTouchHold(): void {
+		const base = jspreadsheet as unknown as {
+			timeControl?: ReturnType<typeof setTimeout> | null;
+			tmpElement?: unknown;
+		};
+		if (base.timeControl) {
+			clearTimeout(base.timeControl);
+			base.timeControl = null;
+			base.tmpElement = null;
+		}
 	}
 
 	/* ------------------------------------------------------------ reading */

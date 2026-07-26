@@ -11,35 +11,36 @@
 import { Menu, setIcon } from "obsidian";
 import type { SheetEngine } from "./engine";
 import { type CellStyle, MAX_FONT_SIZE, MIN_FONT_SIZE, parseRef } from "./format";
+import { type StringKey, t } from "./i18n";
 
 export const FONT_SIZES = [10, 12, 14, 16, 18, 24];
 
 /** Palette laid out as a 6x2 grid, Google-Sheets style. */
-export const FILL_COLORS: { value: string | null; label: string }[] = [
-	{ value: null, label: "Без заливки" },
-	{ value: "#ffffff", label: "Белый" },
-	{ value: "#fff2cc", label: "Жёлтый" },
-	{ value: "#fce5cd", label: "Оранжевый" },
-	{ value: "#ffe0e0", label: "Красный" },
-	{ value: "#f4d9e8", label: "Розовый" },
-	{ value: "#e2f0d9", label: "Зелёный" },
-	{ value: "#d0e8e4", label: "Бирюзовый" },
-	{ value: "#deebf7", label: "Голубой" },
-	{ value: "#e6e0f8", label: "Сиреневый" },
-	{ value: "#d9d9d9", label: "Серый" },
-	{ value: "#434343", label: "Тёмный" },
+export const FILL_COLORS: { value: string | null; label: StringKey }[] = [
+	{ value: null, label: "fillNone" },
+	{ value: "#ffffff", label: "fillWhite" },
+	{ value: "#fff2cc", label: "fillYellow" },
+	{ value: "#fce5cd", label: "fillOrange" },
+	{ value: "#ffe0e0", label: "fillRed" },
+	{ value: "#f4d9e8", label: "fillPink" },
+	{ value: "#e2f0d9", label: "fillGreen" },
+	{ value: "#d0e8e4", label: "fillTeal" },
+	{ value: "#deebf7", label: "fillBlue" },
+	{ value: "#e6e0f8", label: "fillPurple" },
+	{ value: "#d9d9d9", label: "fillGrey" },
+	{ value: "#434343", label: "fillDark" },
 ];
 
 export type BorderMode = "none" | "all" | "outline" | "t" | "r" | "b" | "l";
 
-const BORDER_ITEMS: { value: BorderMode; label: string; icon: string }[] = [
-	{ value: "all", label: "Все границы", icon: "table" },
-	{ value: "outline", label: "Внешние границы", icon: "square" },
-	{ value: "none", label: "Без границ", icon: "eraser" },
-	{ value: "t", label: "Сверху", icon: "panel-top" },
-	{ value: "r", label: "Справа", icon: "panel-right" },
-	{ value: "b", label: "Снизу", icon: "panel-bottom" },
-	{ value: "l", label: "Слева", icon: "panel-left" },
+const BORDER_ITEMS: { value: BorderMode; label: StringKey; icon: string }[] = [
+	{ value: "all", label: "borderAll", icon: "table" },
+	{ value: "outline", label: "borderOutline", icon: "square" },
+	{ value: "none", label: "borderNone", icon: "eraser" },
+	{ value: "t", label: "borderTop", icon: "panel-top" },
+	{ value: "r", label: "borderRight", icon: "panel-right" },
+	{ value: "b", label: "borderBottom", icon: "panel-bottom" },
+	{ value: "l", label: "borderLeft", icon: "panel-left" },
 ];
 
 export class SheetToolbar {
@@ -104,12 +105,12 @@ export class SheetToolbar {
 		// --- group 1: bold + font size --------------------------------------
 		const group1 = this.el.createDiv({ cls: "leovale-sheet-tb-group" });
 
-		this.boldButton = this.iconButton(group1, "leovale-sheet-tb-bold", "bold", "Жирный");
+		this.boldButton = this.iconButton(group1, "leovale-sheet-tb-bold", "bold", t("tbBold"));
 		this.boldButton.onclick = () => this.toggleBold();
 
 		this.sizeButton = group1.createEl("button", {
 			cls: "leovale-sheet-tb-btn leovale-sheet-tb-size is-wide",
-			attr: { type: "button", title: "Размер шрифта", "aria-label": "Размер шрифта" },
+			attr: { type: "button", title: t("tbFontSize"), "aria-label": t("tbFontSize") },
 		});
 		this.sizeLabel = this.sizeButton.createSpan({ cls: "leovale-sheet-tb-value", text: "—" });
 		this.caret(this.sizeButton);
@@ -123,19 +124,20 @@ export class SheetToolbar {
 			group2,
 			"leovale-sheet-tb-fillbtn",
 			"paint-bucket",
-			"Заливка ячейки",
+			t("tbFill"),
 		);
 		// Google Sheets shows the current colour as a bar under the bucket.
 		this.fillSwatch = this.fillButton.createSpan({ cls: "leovale-sheet-tb-swatch is-empty" });
 
 		this.palette = group2.createDiv({ cls: "leovale-sheet-palette" });
 		for (const { value, label } of FILL_COLORS) {
+			const text = t(label);
 			const swatch = this.palette.createEl("button", {
 				cls: `leovale-sheet-swatch${value ? "" : " is-none"}`,
 				attr: {
 					type: "button",
-					title: label,
-					"aria-label": label,
+					title: text,
+					"aria-label": text,
 					"data-color": value ?? "none",
 				},
 			});
@@ -154,7 +156,7 @@ export class SheetToolbar {
 			group3,
 			"leovale-sheet-tb-border is-wide",
 			"table",
-			"Границы ячеек",
+			t("tbBorders"),
 		);
 		this.caret(this.borderButton);
 		this.borderButton.onclick = () => this.openBorderMenu();
@@ -286,7 +288,7 @@ export class SheetToolbar {
 		const menu = new Menu();
 		menu.addItem((item) =>
 			item
-				.setTitle("По умолчанию")
+				.setTitle(t("sizeDefault"))
 				.setChecked(current === undefined)
 				.onClick(() => this.applySize(undefined)),
 		);
@@ -309,7 +311,7 @@ export class SheetToolbar {
 			if (i === 3) menu.addSeparator();
 			menu.addItem((item) =>
 				item
-					.setTitle(label)
+					.setTitle(t(label))
 					.setIcon(icon)
 					.onClick(() => this.applyBorders(value)),
 			);

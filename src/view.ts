@@ -1,6 +1,14 @@
-import { Notice, TextFileView, type TFile, type WorkspaceLeaf } from "obsidian";
+import { Notice, Platform, TextFileView, type TFile, type WorkspaceLeaf } from "obsidian";
 import { SheetEngine } from "./engine";
 import { SheetToolbar } from "./toolbar";
+import { SheetFormulaBar } from "./formulabar";
+import {
+	type CsvDelimiter,
+	DEFAULT_DELIMITER,
+	csvToDoc,
+	docToCsv,
+} from "./csv";
+import { t } from "./i18n";
 import {
 	MIN_VALID,
 	type SheetDoc,
@@ -11,6 +19,12 @@ import {
 } from "./format";
 
 export const VIEW_TYPE_SHEET = "leovale-sheet-view";
+
+/** Which on-disk shape the open file has. */
+export type SheetMode = "sheet" | "csv";
+
+/** Extensions that carry our deterministic JSON. Everything else is CSV. */
+export const JSON_EXTENSIONS = ["sheet", "lsheet"];
 
 /** Quiet time before we ask Obsidian to save (Obsidian then debounces ~2 s more). */
 const SAVE_DEBOUNCE_MS = 1500;
@@ -28,12 +42,17 @@ const SAVE_DEBOUNCE_MS = 1500;
 export class SheetView extends TextFileView {
 	private sheetEngine: SheetEngine | null = null;
 	private sheetToolbar: SheetToolbar | null = null;
+	private sheetFormulaBar: SheetFormulaBar | null = null;
 	private sheetWrapper: HTMLElement | null = null;
 	/** Last serialization we trust; the anti-truncation floor for getViewData(). */
 	private sheetLastGood: string | null = null;
 	private sheetDirty = false;
 	private sheetSaveTimer: number | null = null;
 	private sheetReadOnly = false;
+	/** `.sheet`/`.lsheet` keep JSON; `.csv` keeps CSV. Decided per opened file. */
+	private sheetMode: SheetMode = "sheet";
+	/** Delimiter sniffed from the CSV we loaded; preserved on every write. */
+	private sheetDelimiter: CsvDelimiter = DEFAULT_DELIMITER;
 
 	constructor(leaf: WorkspaceLeaf) {
 		super(leaf);
@@ -60,9 +79,21 @@ export class SheetView extends TextFileView {
 	setViewData(data: string, clear: boolean): void {
 		if (clear) this.clear();
 
-		this.sheetLastGood = data && data.trim().length > 0 ? data : null;
+		const ext = (this.file?.extension ?? "").toLowerCase();
+		this.sheetMode = JSON_EXTENSIONS.includes(ext) || ext === "" ? "sheet" : "csv";
 		this.sheetDirty = false;
 		this.sheetReadOnly = false;
+
+		if (this.sheetMode === "csv") {
+			// An empty CSV is a legitimate file, so "" counts as known-good here.
+			this.sheetLastGood = data ?? "";
+			const parsed = csvToDoc(data ?? "");
+			this.sheetDelimiter = parsed.delimiter;
+			this.renderSheet(parsed.doc);
+			return;
+		}
+
+		this.sheetLastGood = data && data.trim().length > 0 ? data : null;
 
 		let doc: SheetDoc;
 		try {
@@ -71,15 +102,13 @@ export class SheetView extends TextFileView {
 			// Unparseable file: show it read-only so getViewData() can never
 			// overwrite the user's bytes with an empty grid.
 			console.error("leovale-sheets: parse failed", e);
-			new Notice(`Sheets: не удалось разобрать файл (${(e as Error).message}). Только чтение.`);
+			new Notice(t("parseFailed", { message: (e as Error).message }));
 			doc = newSheetDoc();
 			this.sheetReadOnly = true;
 		}
 
 		if (!isSupportedVersion(doc)) {
-			new Notice(
-				`Sheets: файл версии ${doc.version} новее, чем понимает плагин. Открыт только для чтения.`,
-			);
+			new Notice(t("futureVersion", { version: doc.version }));
 			this.sheetReadOnly = true;
 		}
 
@@ -90,6 +119,8 @@ export class SheetView extends TextFileView {
 		const fallback = () => this.sheetLastGood ?? this.data ?? "";
 		if (!this.sheetEngine || !this.sheetDirty || this.sheetReadOnly) return fallback();
 
+		if (this.sheetMode === "csv") return this.getCsvViewData(fallback);
+
 		let out: string;
 		try {
 			out = serializeSheet(this.sheetEngine.readDoc());
@@ -99,6 +130,29 @@ export class SheetView extends TextFileView {
 		}
 		if (!out || out.length < MIN_VALID) {
 			console.error("leovale-sheets: refusing to write a suspiciously short document");
+			return fallback();
+		}
+		this.sheetLastGood = out;
+		this.sheetDirty = false;
+		return out;
+	}
+
+	/**
+	 * CSV write path. Same guards as the JSON one minus the length floor (a
+	 * three-cell CSV is legitimately 12 bytes), plus one rule of its own: a file
+	 * that had content is never replaced with an empty one. Clearing every cell
+	 * of a CSV is not a supported operation, deleting the file is.
+	 */
+	private getCsvViewData(fallback: () => string): string {
+		let out: string;
+		try {
+			out = docToCsv((this.sheetEngine as SheetEngine).readDoc(), this.sheetDelimiter);
+		} catch (e) {
+			console.error("leovale-sheets: csv serialize failed", e);
+			return fallback();
+		}
+		if (out.trim().length === 0 && (this.sheetLastGood ?? "").trim().length > 0) {
+			console.error("leovale-sheets: refusing to blank a non-empty csv file");
 			return fallback();
 		}
 		this.sheetLastGood = out;
@@ -121,6 +175,17 @@ export class SheetView extends TextFileView {
 		// views setViewData() can land before the first onOpen() paint.
 		this.contentEl.empty();
 		this.contentEl.addClass("leovale-sheet-content");
+		// Obsidian puts `.is-mobile` on <body>; mirroring it on our own root keeps
+		// the touch-target rules testable in a desktop sandbox too.
+		this.contentEl.toggleClass("is-mobile", Platform.isMobile);
+		this.contentEl.toggleClass("is-csv", this.sheetMode === "csv");
+
+		// Formula bar first: on a tablet the in-cell editor is as wide as the
+		// cell, so it is the only usable way to read or edit a long formula.
+		this.sheetFormulaBar = new SheetFormulaBar(this.contentEl, {
+			getEngine: () => this.sheetEngine,
+			badge: this.sheetMode === "csv" ? `CSV ${this.sheetDelimiter}` : undefined,
+		});
 		this.sheetToolbar = new SheetToolbar(this.contentEl, () => this.sheetEngine);
 		this.sheetWrapper = this.contentEl.createDiv({ cls: "leovale-sheet-wrapper" });
 		if (this.sheetReadOnly) this.sheetWrapper.addClass("is-readonly");
@@ -128,6 +193,7 @@ export class SheetView extends TextFileView {
 		try {
 			this.sheetEngine = new SheetEngine(this.sheetWrapper, doc, {
 				onChange: () => this.scheduleSave(),
+				onSelection: () => this.syncChrome(),
 				readOnly: this.sheetReadOnly,
 			});
 		} catch (e) {
@@ -136,17 +202,44 @@ export class SheetView extends TextFileView {
 			this.sheetReadOnly = true;
 			this.sheetWrapper.createDiv({
 				cls: "leovale-sheet-error",
-				text: `Не удалось построить таблицу: ${(e as Error).message}`,
+				text: t("engineFailed", { message: (e as Error).message }),
 			});
 		}
 
-		// Keep the toolbar in sync with whatever the user selects in the grid.
-		this.registerDomEvent(this.sheetWrapper, "mouseup", () => this.sheetToolbar?.sync());
-		this.registerDomEvent(this.sheetWrapper, "keyup", () => this.sheetToolbar?.sync());
-		this.sheetToolbar.sync();
+		// Keep the toolbar and the formula bar in sync with the grid selection.
+		this.registerDomEvent(this.sheetWrapper, "mouseup", () => this.syncChrome());
+		this.registerDomEvent(this.sheetWrapper, "keyup", () => this.syncChrome());
+		// Obsidian mobile treats a horizontal pan as "open the left drawer" and
+		// listens for it on an ancestor. Inside the grid the pan belongs to the
+		// grid, so the gesture stops here. Never preventDefault(): the scroll
+		// itself is exactly what we want to keep.
+		//
+		// `touchstart` deliberately still bubbles: the engine selects the tapped
+		// cell from a listener on `document`. Its long-press timer normally dies
+		// on the engine's own `touchmove`, which we are now swallowing, so cancel
+		// it explicitly.
+		this.registerDomEvent(this.sheetWrapper, "touchmove", (e: TouchEvent) => {
+			this.sheetEngine?.cancelTouchHold();
+			e.stopPropagation();
+		});
+		this.syncChrome();
+	}
+
+	/** Refresh both chrome strips from the current grid selection. */
+	private syncChrome(): void {
+		this.sheetToolbar?.sync();
+		this.sheetFormulaBar?.sync();
 	}
 
 	private destroyEngine(): void {
+		if (this.sheetFormulaBar) {
+			try {
+				this.sheetFormulaBar.destroy();
+			} catch (e) {
+				console.error("leovale-sheets: formula bar teardown failed", e);
+			}
+			this.sheetFormulaBar = null;
+		}
 		if (this.sheetToolbar) {
 			try {
 				this.sheetToolbar.destroy();

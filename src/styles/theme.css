@@ -24,12 +24,95 @@
 	width: 100%;
 	overflow: auto;
 	background-color: var(--background-primary);
+	/* Both directions belong to the grid. This also kills double-tap zoom, which
+	   on a tablet only ever fought with double-tap-to-edit. */
+	touch-action: pan-x pan-y;
+	/* The last row must not hide behind the Android navigation bar. The plain
+	   value is the fallback for engines without env(); the calc() wins where
+	   env() resolves. Bottom padding of a scroll container is part of the
+	   scrollable area, so this really does free the last row. */
+	padding-bottom: 0;
+}
+
+/* Mobile: `.is-mobile` comes from Obsidian's own <body> class, and the view
+   mirrors it onto its root from Platform.isMobile. */
+body.is-mobile .leovale-sheet-wrapper,
+.leovale-sheet-content.is-mobile .leovale-sheet-wrapper {
+	padding-bottom: 12px;
+	padding-bottom: calc(12px + env(safe-area-inset-bottom, 0px));
 }
 
 .leovale-sheet-error {
 	padding: 1em;
 	color: var(--text-error);
 	font-family: var(--font-interface);
+}
+
+/* ---- formula bar -------------------------------------------------------
+ * One line above the toolbar: the active cell's address, then its RAW content.
+ * On a tablet the in-cell editor is only as wide as the cell, so this is the
+ * only place a long formula is actually readable.
+ * ---------------------------------------------------------------------- */
+
+.leovale-sheet-formulabar {
+	flex: 0 0 auto;
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	height: 30px;
+	padding: 0 6px;
+	background-color: var(--background-primary);
+	border-bottom: 1px solid var(--background-modifier-border);
+	font-family: var(--font-interface);
+	font-size: var(--font-ui-smaller);
+}
+
+.leovale-sheet-fb-ref {
+	flex: 0 0 auto;
+	min-width: 42px;
+	padding-right: 6px;
+	border-right: 1px solid var(--background-modifier-border);
+	color: var(--text-muted);
+	font-variant-numeric: tabular-nums;
+	text-align: center;
+	user-select: none;
+}
+
+.leovale-sheet-formulabar .leovale-sheet-fb-input {
+	flex: 1 1 auto;
+	min-width: 0;
+	height: 22px;
+	padding: 0 4px;
+	border: none;
+	border-radius: 4px;
+	background-color: transparent;
+	box-shadow: none;
+	color: var(--text-normal);
+	font-family: var(--font-monospace);
+	font-size: var(--font-ui-smaller);
+	user-select: text;
+}
+
+.leovale-sheet-formulabar .leovale-sheet-fb-input:focus,
+.leovale-sheet-formulabar .leovale-sheet-fb-input:focus-visible {
+	background-color: var(--background-modifier-form-field, var(--background-primary-alt));
+	box-shadow: 0 0 0 1px var(--interactive-accent) inset;
+	outline: none;
+}
+
+.leovale-sheet-formulabar .leovale-sheet-fb-input[disabled] {
+	opacity: 0.5;
+}
+
+/* CSV files get a badge naming the delimiter that will be written back. */
+.leovale-sheet-fb-badge {
+	flex: 0 0 auto;
+	padding: 1px 6px;
+	border-radius: 4px;
+	background-color: var(--background-modifier-border);
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	user-select: none;
 }
 
 /* ---- formatting toolbar ------------------------------------------------
@@ -287,10 +370,38 @@
 	color: var(--text-normal);
 }
 
-/* row headers (1, 2, 3 ...) */
+/* row headers (1, 2, 3 ...) — the frozen gutter
+ *
+ * The vendor makes the column headers sticky (thead td, top: 0, z-index 2) but
+ * leaves the row numbers scrolling away horizontally, which on a tablet means
+ * you lose track of the row two swipes in. The engine's own freezeColumns is no
+ * help here: it drives off its INTERNAL scroller (tableOverflow) and freezes
+ * data columns, not the gutter. We scroll the whole grid in
+ * .leovale-sheet-wrapper instead, so plain sticky is the right tool.
+ *
+ * The vendor rule sets position: relative on this cell for the row-resize
+ * handle (::before). Sticky is also a positioning context, so the handle keeps
+ * working. Background must stay opaque or cells show through while scrolling.
+ */
 .leovale-sheet-root .jss_worksheet > tbody > tr > td:first-child {
+	position: sticky;
+	left: 0;
+	z-index: 3;
 	background-color: var(--background-secondary);
 	color: var(--text-muted);
+	/* The vendor already reserves a 1px transparent right border, so colouring it
+	   costs no layout. It gives the frozen gutter a stable edge: without it the
+	   cells sliding underneath have nothing to end against. */
+	border-right-color: var(--background-modifier-border);
+}
+
+/* the corner cell has to beat both sticky axes */
+.leovale-sheet-root .jss_worksheet > thead > tr > td:first-child {
+	position: sticky;
+	top: 0;
+	left: 0;
+	z-index: 4;
+	border-right-color: var(--background-modifier-border);
 }
 
 /* data cells */
@@ -416,6 +527,68 @@
 	padding: 4px 8px;
 	color: var(--text-warning, var(--text-muted));
 	font-size: var(--font-ui-smaller);
+}
+
+/* ---- touch targets -----------------------------------------------------
+ * Android's 48dp guideline is 44 CSS px at the tablet's 213 dpi. Below that the
+ * 28px desktop buttons and the 22px palette swatches are a coin toss with a
+ * fingertip. Desktop sizing is untouched: every rule here is class-gated.
+ * ---------------------------------------------------------------------- */
+
+body.is-mobile .leovale-sheet-toolbar,
+.leovale-sheet-content.is-mobile .leovale-sheet-toolbar {
+	height: 52px;
+	gap: 4px;
+	padding: 0 8px;
+}
+
+body.is-mobile .leovale-sheet-toolbar .leovale-sheet-tb-btn,
+.leovale-sheet-content.is-mobile .leovale-sheet-toolbar .leovale-sheet-tb-btn {
+	width: 44px;
+	height: 44px;
+}
+
+body.is-mobile .leovale-sheet-toolbar .leovale-sheet-tb-btn.is-wide,
+.leovale-sheet-content.is-mobile .leovale-sheet-toolbar .leovale-sheet-tb-btn.is-wide {
+	width: auto;
+	min-width: 56px;
+}
+
+body.is-mobile .leovale-sheet-tb-icon .svg-icon,
+.leovale-sheet-content.is-mobile .leovale-sheet-tb-icon .svg-icon {
+	width: 20px;
+	height: 20px;
+}
+
+body.is-mobile .leovale-sheet-palette,
+.leovale-sheet-content.is-mobile .leovale-sheet-palette {
+	grid-template-columns: repeat(6, 44px);
+	gap: 6px;
+}
+
+body.is-mobile .leovale-sheet-toolbar .leovale-sheet-swatch,
+.leovale-sheet-content.is-mobile .leovale-sheet-toolbar .leovale-sheet-swatch {
+	width: 44px;
+	height: 44px;
+}
+
+body.is-mobile .leovale-sheet-formulabar,
+.leovale-sheet-content.is-mobile .leovale-sheet-formulabar {
+	height: 44px;
+	gap: 8px;
+	padding: 0 8px;
+}
+
+body.is-mobile .leovale-sheet-formulabar .leovale-sheet-fb-input,
+.leovale-sheet-content.is-mobile .leovale-sheet-formulabar .leovale-sheet-fb-input {
+	height: 36px;
+	font-size: var(--font-ui-small);
+}
+
+body.is-mobile .leovale-sheet-fb-ref,
+.leovale-sheet-content.is-mobile .leovale-sheet-fb-ref {
+	min-width: 52px;
+	font-size: var(--font-ui-small);
 }
 
 /* ---- hide vendor branding --------------------------------------------- */
