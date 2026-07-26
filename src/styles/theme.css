@@ -1,0 +1,425 @@
+/* ------------------------------------------------------------------------
+ * leovale-sheets theme bridge.
+ *
+ * Everything here is scoped to `.leovale-sheet-root` (the vendor CSS above it
+ * in styles.css is machine-prefixed with the same class). No rule may target
+ * html/body/:root, or it leaks into the rest of Obsidian.
+ *
+ * The vendor stylesheet hardcodes #fff / #ccc / #f3f3f3 / rgba(0,0,0,.05),
+ * which is unreadable on dark themes. We remap them onto Obsidian variables
+ * instead of the `filter: invert(1)` hack the other plugins use.
+ * ---------------------------------------------------------------------- */
+
+.leovale-sheet-content {
+	padding: 0 !important;
+	overflow: hidden;
+	display: flex;
+	flex-direction: column;
+}
+
+.leovale-sheet-wrapper {
+	flex: 1 1 auto;
+	min-height: 0;
+	height: 100%;
+	width: 100%;
+	overflow: auto;
+	background-color: var(--background-primary);
+}
+
+.leovale-sheet-error {
+	padding: 1em;
+	color: var(--text-error);
+	font-family: var(--font-interface);
+}
+
+/* ---- formatting toolbar ------------------------------------------------
+ * Flat single row in the spirit of the Google Sheets bar: no button borders,
+ * no shadows, borderless 28px icon buttons with a subtle rounded hover, thin
+ * group separators. Colours come from Obsidian variables only, so it reads
+ * correctly in light and dark themes; the palette swatches are the sole
+ * hardcoded colours (they ARE the content).
+ * ---------------------------------------------------------------------- */
+
+.leovale-sheet-toolbar {
+	flex: 0 0 auto;
+	display: flex;
+	align-items: center;
+	gap: 2px;
+	height: 36px;
+	padding: 0 6px;
+	background-color: var(--background-primary);
+	border-bottom: 1px solid var(--background-modifier-border);
+	font-family: var(--font-interface);
+	font-size: var(--font-ui-smaller);
+	color: var(--text-muted);
+	user-select: none;
+}
+
+.leovale-sheet-tb-group {
+	display: flex;
+	align-items: center;
+	gap: 2px;
+	position: relative;
+}
+
+.leovale-sheet-tb-sep {
+	width: 1px;
+	height: 60%;
+	margin: 0 6px;
+	flex: 0 0 auto;
+	background-color: var(--background-modifier-border);
+}
+
+/* ---- buttons ----------------------------------------------------------- */
+
+.leovale-sheet-toolbar .leovale-sheet-tb-btn {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: 2px;
+	position: relative;
+	width: 28px;
+	height: 28px;
+	padding: 0;
+	border: none;
+	border-radius: 4px;
+	background-color: transparent;
+	box-shadow: none;
+	color: var(--text-normal);
+	cursor: pointer;
+	line-height: 1;
+	-webkit-appearance: none;
+	appearance: none;
+}
+
+.leovale-sheet-toolbar .leovale-sheet-tb-btn.is-wide {
+	width: auto;
+	min-width: 44px;
+	padding: 0 4px;
+}
+
+.leovale-sheet-toolbar .leovale-sheet-tb-btn:hover:not([disabled]) {
+	background-color: var(--background-modifier-hover);
+	box-shadow: none;
+}
+
+.leovale-sheet-toolbar .leovale-sheet-tb-btn:active:not([disabled]),
+.leovale-sheet-toolbar .leovale-sheet-tb-btn:focus-visible {
+	box-shadow: none;
+	outline: none;
+}
+
+.leovale-sheet-toolbar .leovale-sheet-tb-btn[disabled] {
+	opacity: 0.4;
+	cursor: default;
+}
+
+/* toggled / open state: tinted background + accent glyph, no border */
+.leovale-sheet-toolbar .leovale-sheet-tb-btn.is-active {
+	background-color: var(--background-modifier-active-hover, var(--background-modifier-hover));
+	color: var(--text-accent);
+}
+
+.leovale-sheet-tb-icon {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+}
+
+.leovale-sheet-tb-icon .svg-icon {
+	width: 16px;
+	height: 16px;
+	color: currentColor;
+}
+
+.leovale-sheet-tb-caret {
+	display: inline-flex;
+	align-items: center;
+	color: var(--text-faint);
+}
+
+.leovale-sheet-tb-caret .svg-icon {
+	width: 12px;
+	height: 12px;
+}
+
+.leovale-sheet-tb-value {
+	font-size: var(--font-ui-smaller);
+	color: var(--text-normal);
+	min-width: 18px;
+	text-align: center;
+	font-variant-numeric: tabular-nums;
+}
+
+/* ---- fill button: bucket with the current colour underneath ------------ */
+
+.leovale-sheet-tb-fillbtn {
+	flex-direction: column;
+	gap: 0 !important;
+}
+
+.leovale-sheet-tb-fillbtn .leovale-sheet-tb-icon {
+	margin-top: 1px;
+}
+
+.leovale-sheet-tb-swatch {
+	display: block;
+	width: 16px;
+	height: 3px;
+	margin-top: 2px;
+	border-radius: 1px;
+	background-color: transparent;
+}
+
+.leovale-sheet-tb-swatch.is-empty {
+	background-color: var(--background-modifier-border);
+}
+
+/* ---- fill palette popover ---------------------------------------------- */
+
+.leovale-sheet-palette {
+	display: none;
+	position: absolute;
+	top: calc(100% + 6px);
+	left: 0;
+	z-index: var(--layer-menu, 50);
+	grid-template-columns: repeat(6, 22px);
+	gap: 5px;
+	padding: 8px;
+	background-color: var(--background-secondary);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 6px;
+	box-shadow: var(--shadow-s);
+}
+
+.leovale-sheet-palette.is-open {
+	display: grid;
+}
+
+.leovale-sheet-toolbar .leovale-sheet-swatch {
+	width: 22px;
+	height: 22px;
+	padding: 0;
+	/* --text-faint sits between the popover background and the darkest swatch in
+	   both themes; --background-modifier-border loses #434343 on dark. */
+	border: 1px solid var(--text-faint);
+	border-radius: 4px;
+	background-color: transparent;
+	box-shadow: none;
+	cursor: pointer;
+	-webkit-appearance: none;
+	appearance: none;
+}
+
+.leovale-sheet-toolbar .leovale-sheet-swatch:hover {
+	border-color: var(--interactive-accent);
+	box-shadow: 0 0 0 1px var(--interactive-accent);
+}
+
+/* "no fill" swatch: empty square crossed by a red diagonal */
+.leovale-sheet-toolbar .leovale-sheet-swatch.is-none {
+	background-color: var(--background-primary);
+	background-image: linear-gradient(
+		to top right,
+		transparent calc(50% - 1px),
+		var(--text-error) calc(50% - 1px),
+		var(--text-error) calc(50% + 1px),
+		transparent calc(50% + 1px)
+	);
+}
+
+.leovale-sheet-root {
+	/* colour of a user-set cell border; the grid's own lines use the softer
+	   --background-modifier-border */
+	--leovale-sheet-border-strong: var(--text-normal);
+	--jss-border-color: var(--background-modifier-border);
+	display: block;
+	width: max-content;
+	min-width: 100%;
+	color: var(--text-normal);
+	font-family: var(--font-interface);
+	font-size: var(--font-ui-small);
+	background-color: var(--background-primary);
+	user-select: none;
+}
+
+.leovale-sheet-host {
+	display: block;
+}
+
+/* ---- container / scroll ------------------------------------------------ */
+
+.leovale-sheet-root .jss_container,
+.leovale-sheet-root .jss_content,
+.leovale-sheet-root .jss_spreadsheet {
+	background-color: var(--background-primary);
+	color: var(--text-normal);
+	max-width: none;
+}
+
+.leovale-sheet-root .jss_content::-webkit-scrollbar-thumb {
+	background-color: var(--background-modifier-border);
+}
+
+/* ---- the grid ---------------------------------------------------------- */
+
+.leovale-sheet-root .jss_worksheet {
+	background-color: var(--background-primary);
+	color: var(--text-normal);
+	border-right-color: var(--background-modifier-border);
+	border-bottom-color: var(--background-modifier-border);
+}
+
+/* column headers (A, B, C ...) */
+.leovale-sheet-root .jss_worksheet > thead > tr > td,
+.leovale-sheet-root .jss_worksheet > tfoot > tr > td {
+	background-color: var(--background-secondary);
+	color: var(--text-muted);
+	border-top-color: var(--background-modifier-border);
+	border-left-color: var(--background-modifier-border);
+	font-weight: var(--font-medium, 500);
+	text-align: center;
+}
+
+.leovale-sheet-root .jss_worksheet > thead > tr > td.selected,
+.leovale-sheet-root .jss_worksheet > tbody > tr.selected > td:first-child {
+	background-color: var(--background-modifier-hover);
+	color: var(--text-normal);
+}
+
+/* row headers (1, 2, 3 ...) */
+.leovale-sheet-root .jss_worksheet > tbody > tr > td:first-child {
+	background-color: var(--background-secondary);
+	color: var(--text-muted);
+}
+
+/* data cells */
+.leovale-sheet-root .jss_worksheet > tbody > tr > td {
+	border-top-color: var(--background-modifier-border);
+	border-left-color: var(--background-modifier-border);
+	color: var(--text-normal);
+	line-height: 1.4em;
+	padding: 4px 6px;
+}
+
+.leovale-sheet-root .jss_worksheet > tbody > tr > td.readonly {
+	color: var(--text-faint);
+}
+
+.leovale-sheet-root .jss_worksheet > tbody > tr.dragging > td {
+	background-color: var(--background-modifier-hover);
+}
+
+/* ---- selection --------------------------------------------------------- */
+
+.leovale-sheet-root .jss_worksheet .highlight {
+	background-color: var(--text-selection);
+}
+
+.leovale-sheet-root .jss_worksheet .highlight-top {
+	border-top: 1px solid var(--interactive-accent);
+	box-shadow: 0 -1px var(--interactive-accent);
+}
+
+.leovale-sheet-root .jss_worksheet .highlight-left {
+	border-left: 1px solid var(--interactive-accent);
+	box-shadow: -1px 0 var(--interactive-accent);
+}
+
+.leovale-sheet-root .jss_worksheet .highlight-right {
+	border-right: 1px solid var(--interactive-accent);
+	box-shadow: 1px 0 var(--interactive-accent);
+}
+
+.leovale-sheet-root .jss_worksheet .highlight-bottom {
+	border-bottom: 1px solid var(--interactive-accent);
+	box-shadow: 0 1px var(--interactive-accent);
+}
+
+.leovale-sheet-root .jss_worksheet .highlight-top.highlight-left {
+	box-shadow: -1px -1px var(--interactive-accent);
+}
+
+.leovale-sheet-root .jss_corner {
+	background-color: var(--interactive-accent);
+	border-color: var(--background-primary);
+}
+
+/* ---- in-cell editor ---------------------------------------------------- */
+
+.leovale-sheet-root .jss_worksheet > tbody > tr > td > input,
+.leovale-sheet-root .jss_worksheet > tbody > tr > td > textarea,
+.leovale-sheet-root .jss_worksheet > tbody > tr > td > select {
+	color: var(--text-normal);
+	background-color: var(--background-primary);
+	font-family: var(--font-interface);
+	font-size: var(--font-ui-small);
+	caret-color: var(--text-normal);
+	user-select: text;
+}
+
+.leovale-sheet-root .jss_worksheet > tbody > tr > td.editor {
+	background-color: var(--background-primary);
+	box-shadow: 0 0 0 2px var(--interactive-accent) inset;
+}
+
+/* ---- worksheet tabs ---------------------------------------------------- */
+
+.leovale-sheet-root .jtabs-headers,
+.leovale-sheet-root .jtabs-headers > div {
+	background-color: var(--background-secondary);
+	color: var(--text-muted);
+	border-color: var(--background-modifier-border);
+}
+
+.leovale-sheet-root .jtabs-headers > div.jtabs-selected {
+	background-color: var(--background-primary);
+	color: var(--text-normal);
+}
+
+/* ---- context menu / dropdowns (rendered inside the root) --------------- */
+
+.leovale-sheet-root .jcontextmenu,
+.leovale-sheet-root .jss_contextmenu,
+.leovale-sheet-root .jdropdown-container,
+.leovale-sheet-root .jcalendar-container {
+	background-color: var(--background-secondary);
+	color: var(--text-normal);
+	border: 1px solid var(--background-modifier-border);
+	box-shadow: var(--shadow-s);
+	font-family: var(--font-interface);
+}
+
+.leovale-sheet-root .jcontextmenu > div a,
+.leovale-sheet-root .jss_contextmenu > div a {
+	color: var(--text-normal);
+}
+
+.leovale-sheet-root .jcontextmenu > div:hover,
+.leovale-sheet-root .jss_contextmenu > div:hover {
+	background-color: var(--background-modifier-hover);
+}
+
+.leovale-sheet-root .jcontextmenu span {
+	color: var(--text-faint);
+}
+
+/* ---- read-only documents (unknown future format version) --------------- */
+
+.leovale-sheet-wrapper.is-readonly .leovale-sheet-root {
+	opacity: 0.85;
+}
+
+.leovale-sheet-wrapper.is-readonly .leovale-sheet-root::before {
+	content: "read-only";
+	display: block;
+	padding: 4px 8px;
+	color: var(--text-warning, var(--text-muted));
+	font-size: var(--font-ui-smaller);
+}
+
+/* ---- hide vendor branding --------------------------------------------- */
+
+.leovale-sheet-root .jss_about {
+	display: none !important;
+}

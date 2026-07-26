@@ -1,0 +1,29 @@
+{
+  "name": "leovale-sheets",
+  "version": "0.1.0",
+  "description": "Spreadsheet notes stored as .sheet files in your Obsidian vault.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
+    "test": "node tests/build-format.mjs && node --test tests/format.test.mjs",
+    "e2e": "node tests/e2e.mjs"
+  },
+  "keywords": [],
+  "author": "Ruslan Akhmetov",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "builtin-modules": "^4.0.0",
+    "esbuild": "0.25.5",
+    "obsidian": "^1.13.1",
+    "postcss": "^8.4.47",
+    "postcss-prefix-selector": "^2.1.0",
+    "tslib": "^2.6.3",
+    "typescript": "^5.8.3"
+  },
+  "dependencies": {
+    "jspreadsheet-ce": "5.0.4"
+  }
+}

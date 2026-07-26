@@ -1,0 +1,9 @@
+{
+  "id": "leovale-sheets",
+  "name": "Sheets",
+  "version": "0.1.0",
+  "minAppVersion": "1.7.2",
+  "description": "Spreadsheet notes stored as .sheet files in your vault.",
+  "author": "Ruslan Akhmetov",
+  "isDesktopOnly": false
+}

@@ -1,0 +1,8 @@
+node_modules/
+.sandbox/
+tests/.build/
+main.js
+main.css
+styles.css
+*.log
+.npmrc
