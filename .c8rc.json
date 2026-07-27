@@ -1,0 +1,28 @@
+{
+	"$comment": [
+		"Coverage of the UNIT-testable modules. The tests import tests/.build/*.mjs,",
+		"which esbuild produces from src/*.ts (see tests/build-format.mjs), so the",
+		"numbers are attributed to the BUILT files rather than to the sources: one",
+		"built module is one src module, bundled with nothing but its own siblings,",
+		"and the line numbers differ from the .ts only by the type annotations",
+		"esbuild stripped. There is no source map in the test build on purpose - it",
+		"is thrown away and rebuilt on every run.",
+		"",
+		"'exclude' is deliberately EMPTY: c8's default exclude list drops anything",
+		"under tests/, which is exactly where the built modules live, and with the",
+		"defaults in place every file came out at 0%.",
+		"",
+		"The thresholds are the level the suite actually reached when they were set",
+		"(95.9 lines, 90.77 functions, 86.45 branches), rounded down. They are a",
+		"REGRESSION gate, not a target: raise them when the real number rises."
+	],
+	"all": true,
+	"include": ["tests/.build/*.mjs"],
+	"exclude": [],
+	"reporter": ["text", "lcov"],
+	"check-coverage": true,
+	"lines": 95,
+	"statements": 95,
+	"functions": 90,
+	"branches": 85
+}

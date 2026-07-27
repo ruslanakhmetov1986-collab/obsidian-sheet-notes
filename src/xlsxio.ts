@@ -7,9 +7,92 @@
 import { type App, Notice, TFile, type TFolder, normalizePath } from "obsidian";
 import { type SheetDoc, newSheetDoc, serializeSheet } from "./format";
 import { loadXlsx, readXlsx, writeXlsx } from "./xlsx";
+import { isTouchUi } from "./platform";
 import { t } from "./i18n";
 
 export const XLSX_EXT = "xlsx";
+
+/* --------------------------------------------------------- the save dialog */
+
+/** What Electron's `showSaveDialog` answers, narrowed to what we read. */
+interface SaveDialogResult {
+	canceled: boolean;
+	filePath?: string;
+}
+
+interface ElectronDialog {
+	showSaveDialog: (options: Record<string, unknown>) => Promise<SaveDialogResult>;
+}
+
+/**
+ * Electron's own save dialog, or `null` where there is no Electron.
+ *
+ * Resolved at CALL time rather than at import time, for two reasons. On mobile
+ * `require` does not exist at all and a module-level lookup would throw while
+ * the plugin is loading, taking the whole plugin with it. And on the desktop
+ * this is the seam the e2e uses: the suite replaces
+ * `require("@electron/remote").dialog.showSaveDialog` with a stub that answers a
+ * temp path, which works precisely because nothing is cached here. A native
+ * dialog cannot be driven by a test, and a test that opened one would hang the
+ * suite until somebody walked over to the machine.
+ *
+ * `@electron/remote` first, `electron.remote` after it: Obsidian has shipped
+ * both over the years and either one is the same dialog.
+ */
+export function electronSaveDialog(): ElectronDialog | null {
+	const load = (name: string): unknown => {
+		try {
+			const req = (globalThis as unknown as { require?: (id: string) => unknown }).require;
+			return typeof req === "function" ? req(name) : null;
+		} catch {
+			return null;
+		}
+	};
+	const remote = load("@electron/remote") as { dialog?: ElectronDialog } | null;
+	if (remote?.dialog?.showSaveDialog) return remote.dialog;
+	const electron = load("electron") as { remote?: { dialog?: ElectronDialog } } | null;
+	if (electron?.remote?.dialog?.showSaveDialog) return electron.remote.dialog;
+	return null;
+}
+
+/** Node's `fs`, or null on a platform that has none (mobile). */
+function nodeFs(): { promises: { writeFile: (p: string, data: Uint8Array) => Promise<void> } } | null {
+	try {
+		const req = (globalThis as unknown as { require?: (id: string) => unknown }).require;
+		const fs = typeof req === "function" ? req("fs") : null;
+		return (fs as { promises?: { writeFile?: unknown } })?.promises?.writeFile
+			? (fs as { promises: { writeFile: (p: string, data: Uint8Array) => Promise<void> } })
+			: null;
+	} catch {
+		return null;
+	}
+}
+
+/** The vault's own folder on disk, or "" when the adapter does not expose one. */
+function vaultBasePath(app: App): string {
+	const adapter = app.vault.adapter as unknown as {
+		basePath?: string;
+		getBasePath?: () => string;
+	};
+	try {
+		return adapter.basePath ?? adapter.getBasePath?.() ?? "";
+	} catch {
+		return "";
+	}
+}
+
+/** Compare two OS paths: separators and case are not meaningful on Windows. */
+function samePathRoot(base: string, candidate: string): boolean {
+	if (!base) return false;
+	const norm = (s: string) => s.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+	return `${norm(candidate)}/`.startsWith(`${norm(base)}/`);
+}
+
+/** An absolute path inside the vault, as a vault-relative one. */
+function vaultRelative(base: string, abs: string): string {
+	const cut = abs.replace(/\\/g, "/").slice(base.replace(/\\/g, "/").replace(/\/+$/, "").length + 1);
+	return normalizePath(cut);
+}
 
 /** The folder a path lives in, as a prefix ready to concatenate. */
 function dirOf(path: string): string {
@@ -35,12 +118,39 @@ function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
 	return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
 }
 
+/** Put the bytes in the vault, at a vault-relative path, replacing what is there. */
+async function writeIntoVault(app: App, path: string, bytes: Uint8Array): Promise<void> {
+	const existing = app.vault.getAbstractFileByPath(path);
+	if (existing instanceof TFile) {
+		await app.vault.modifyBinary(existing, toArrayBuffer(bytes));
+	} else {
+		await app.vault.createBinary(path, toArrayBuffer(bytes));
+	}
+}
+
 /**
- * Write a document next to its own file as `name.xlsx`.
+ * Export a document as a workbook, ASKING where it should go.
  *
- * An existing `name.xlsx` is REPLACED: it is this sheet's export, exporting
- * twice should give one file rather than a numbered pile, and the source of
- * truth is the `.sheet` that was just exported from.
+ * The export used to write `name.xlsx` silently next to the `.sheet`, which is
+ * the one place a user exporting a spreadsheet usually does NOT want it: a
+ * workbook is made to be sent somewhere, and the vault is not a Downloads
+ * folder. So the desktop gets Electron's own save dialog, with the sheet's name
+ * and its folder filled in, and anywhere on disk is a legal answer - that is the
+ * point of asking.
+ *
+ * Two ways of writing, chosen by WHERE the answer lands:
+ *
+ *   - inside the vault: through the vault API, so Obsidian indexes the file and
+ *     shows it in the explorer straight away (a raw `fs.writeFile` there leaves
+ *     a file the app does not know about until the next rescan);
+ *   - outside it: `fs`, because the vault API cannot address that at all.
+ *
+ * Cancelling writes nothing and says nothing - a cancelled dialog is not an
+ * error, and a Notice about it would be noise.
+ *
+ * Where there is no dialog (mobile, or an Electron that does not expose one) the
+ * old behaviour stands - the file lands next to the sheet - and the Notice says
+ * so, because on that platform the user was never asked.
  */
 export async function exportDocAsXlsx(
 	app: App,
@@ -50,15 +160,45 @@ export async function exportDocAsXlsx(
 	try {
 		const XLSX = await loadXlsx();
 		const bytes = writeXlsx(XLSX, doc);
-		const path = xlsxPathFor(file);
-		const existing = app.vault.getAbstractFileByPath(path);
-		if (existing instanceof TFile) {
-			await app.vault.modifyBinary(existing, toArrayBuffer(bytes));
-		} else {
-			await app.vault.createBinary(path, toArrayBuffer(bytes));
+		// A touch interface gets no file dialog even where Electron would offer
+		// one: on a phone or a tablet there is no filesystem to browse, Obsidian
+		// itself never opens one, and `body.is-mobile` is the signal the whole
+		// plugin already uses for "this is a touch UI" (see platform.ts). It is
+		// also how the e2e drives this branch on a desktop.
+		const dialog = isTouchUi() ? null : electronSaveDialog();
+		const fs = nodeFs();
+		const base = vaultBasePath(app);
+
+		// No dialog on this platform: next to the sheet, and say as much.
+		if (!dialog) {
+			const path = xlsxPathFor(file);
+			await writeIntoVault(app, path, bytes);
+			new Notice(t("xlsxExportedNextTo", { path }));
+			return path;
 		}
-		new Notice(t("xlsxExported", { path }));
-		return path;
+
+		const suggested = `${file.basename}.${XLSX_EXT}`;
+		const folder = base ? `${base}/${dirOf(file.path)}`.replace(/\\/g, "/") : "";
+		const result = await dialog.showSaveDialog({
+			title: t("xlsxSaveTitle"),
+			defaultPath: `${folder}${suggested}`,
+			filters: [{ name: t("xlsxSaveFilter"), extensions: [XLSX_EXT] }],
+			properties: ["createDirectory", "showOverwriteConfirmation"],
+		});
+		if (result?.canceled || !result?.filePath) return null;
+
+		const chosen = result.filePath;
+		if (samePathRoot(base, chosen)) {
+			const path = vaultRelative(base, chosen);
+			await writeIntoVault(app, path, bytes);
+			new Notice(t("xlsxExported", { path }));
+			return path;
+		}
+
+		if (!fs) throw new Error("no filesystem access outside the vault");
+		await fs.promises.writeFile(chosen, bytes);
+		new Notice(t("xlsxExported", { path: chosen }));
+		return chosen;
 	} catch (e) {
 		console.error("leovale-sheets: xlsx export failed", e);
 		new Notice(t("xlsxExportFailed", { message: (e as Error).message }), 8000);

@@ -351,6 +351,9 @@ underneath it becomes a real boolean.
   the box would vanish on the next save.
 - A box is drawn in the middle of its cell, so a horizontal alignment set on a
   checkbox cell does not show.
+- The tick itself is Obsidian's own — the same mark as in a task list — so it
+  follows your theme's checkbox colours. Only the box around it is drawn by this
+  plugin, because the grid engine's stylesheet paints over a plain one.
 - Fills, borders and the rest still apply, and a checkbox column exports to
   `.xlsx` as Excel's own TRUE/FALSE.
 
@@ -409,13 +412,21 @@ Two commands move a whole document between this plugin and Excel, LibreOffice,
 Google Sheets or anything else that speaks `.xlsx`.
 
 **`Sheets: Export as .xlsx`** (also on the right-click menu of a `.sheet` or
-`.lsheet` file) writes `name.xlsx` next to the sheet and tells you where it
-landed. It carries values, formulas, bold, font size, fills, borders, number
+`.lsheet` file) opens a **save dialog**: the sheet's own name and folder are
+filled in, and anywhere on disk is a legal answer — Downloads, a memory stick, a
+shared folder. A workbook is made to be sent somewhere, and the vault is not a
+Downloads folder. Cancelling writes nothing and says nothing. If the file you
+choose is inside the vault it is written through Obsidian, so it appears in the
+file explorer straight away; outside the vault it is simply written to disk.
+
+On a phone or a tablet there is no file dialog, so the export lands next to the
+sheet as `name.xlsx` and the notice says so.
+
+The export carries values, formulas, bold, font size, fills, borders, number
 formats, alignment, text wrapping, column widths, row heights, merged cells, and
-one worksheet per page. An existing `name.xlsx` is replaced: it is this sheet's
-export, and exporting twice should leave one file rather than a numbered pile.
-Exporting a file that is open in a tab exports what is IN the tab, including the
-last second of typing that has not been saved yet.
+one worksheet per page. A file you overwrite is replaced whole. Exporting a file
+that is open in a tab exports what is IN the tab, including the last second of
+typing that has not been saved yet.
 
 **`Sheets: Import .xlsx as sheet`** asks for a file anywhere on disk; the
 right-click menu of an `.xlsx` already in the vault does the same for that one.
@@ -681,8 +692,41 @@ npm run build        # tsc --noEmit + esbuild production -> main.js, styles.css
 npm run dev          # esbuild --watch
 npm test             # 200 unit tests: format, styles, masks, CSV, embeds, i18n,
                      # sort/filter/markdown, wiki links, the xlsx round trip
+npm run test:coverage  # the same tests under c8, with the threshold gate
 npm run e2e          # e2e in a sandboxed Obsidian, screenshots into tests/shots/
 ```
+
+### Coverage
+
+`npm run test:coverage` runs the unit suite under [c8] and prints a per-file
+table. It is a **gate**: the thresholds in `.c8rc.json` are the level the suite
+actually reached when they were last set, rounded down (lines and statements
+95%, functions 90%, branches 85%, measured 95.9 / 90.77 / 86.45), so the command
+fails when coverage DROPS and never asks for a number nobody has reached. Both CI
+workflows run it.
+
+The numbers are attributed to `tests/.build/*.mjs`, not to `src/*.ts`. That is
+where the tests import from: `tests/build-format.mjs` compiles the engine-free
+modules with esbuild so `node --test` can load them, one built file per source
+file, and the line numbers differ from the TypeScript only by the annotations
+esbuild stripped. `exclude` in `.c8rc.json` is deliberately empty — c8's default
+list drops everything under `tests/`, which is exactly where the built modules
+live, and every file came out at 0% until it was cleared.
+
+Only the modules that can run without Obsidian and without the grid engine are
+in there (format, CSV, masks, i18n, embed refs, sort/filter, links, xlsx
+mapping). Everything else — the view, the engine wrapper, the toolbar, the
+embeds — is covered by the e2e suite instead, which drives the real app.
+
+**The policy: every user-reported bug gets a test before the fix.** A unit test
+where the module allows one, an e2e assertion where it does not - and the
+assertion has to fail on the old code. The checkbox that rendered as an
+unreadable dash is the example to keep in mind: it was `:checked`, its
+pseudo-element was there, its computed style looked right, and every assertion
+available at the time was green. The test that now guards it samples the pixels
+the compositor actually painted (`paintedRatio` in `tests/e2e.mjs`).
+
+[c8]: https://github.com/bcoe/c8
 
 Build output: `main.js` ~1.07 MB, `styles.css` ~121 KB.
 
@@ -708,7 +752,7 @@ Notes on the build configuration:
 - The engine's hard-coded colours (`#fff`, `#ccc`, `#f3f3f3`) are remapped to
   Obsidian CSS variables. No `filter: invert(1)` anywhere.
 
-The e2e suite (665 assertions) launches a separate Obsidian instance with its
+The e2e suite (709 assertions) launches a separate Obsidian instance with its
 own `--user-data-dir` on CDP port 9333, so your running Obsidian is left alone.
 It installs and enables the plugin, creates a sheet, types values and formulas
 with real keyboard events, drags column and row edges, formats a selection with
@@ -744,7 +788,13 @@ and finally drives every one of the toolbar's controls - the fill palette, the
 size, borders, number-format, alignment, sort, filter and freeze menus, the find
 strip, the column-width dialog, merge, checkbox, bold and wrap - in four
 contexts: the main window, both halves of a split, an Obsidian pop-out window,
-and by tap with touch emulation on. Each control has to open somewhere the user
+and by tap with touch emulation on. Since 1.4.x it also samples the PIXELS of a
+ticked checkbox in both themes (a tick that is present in the DOM and invisible
+on screen is the bug this suite exists for), drives the whole keyboard inside a
+pop-out window - arrows, Tab, Home, typing, a formula, F2, Ctrl+D - and reads the
+file back to prove the edits went to the right sheet, exports an `.xlsx` through
+a stubbed save dialog to a path outside the vault, to one inside it and to a
+cancelled one, and measures an empty row inside an embedded range. Each control has to open somewhere the user
 can actually see it (`document.elementFromPoint`, not a class name), to open in
 that window and in no other, and to still do its work. Screenshots land in
 `tests/shots/`, and the printed PDF next to them as `22-print.pdf`. Playwright is needed for e2e only: either
@@ -760,18 +810,38 @@ window that ends up behind another one is reported as hidden, rendering stops,
 and every click times out on "waiting for element to be stable" with the grid
 perfectly present in the DOM.
 
+## Pull requests
+
+Master takes no direct pushes. Work arrives as a pull request, and
+`.github/workflows/ci.yml` runs the whole thing on it — build, unit tests, the
+coverage gate and the full e2e suite against a real headless Obsidian. The job
+is called `test` and it is the required status check.
+
+**With a squash merge the pull request TITLE becomes the commit message on
+master**, and that message is what the release workflow reads. So the version
+marker goes in the PR title:
+
+| PR title | what master does |
+|---|---|
+| `Fix the checkbox tick` | patch release |
+| `Save dialog for the .xlsx export [minor]` | minor release |
+| `New file format [major]` | major release |
+| `Tidy up the comments [skip release]` | builds and tests, no release |
+
 ## Releases
 
-Every push to master is built, tested and published as a release
-automatically, with a patch version bump. Commit message markers: `[minor]`
-and `[major]` bump the respective part, `[skip release]` builds and tests
-without releasing. See `.github/workflows/release.yml` and
-`scripts/bump-version.mjs`.
+Every push to master (in practice: every merged pull request) is built, tested
+and published as a release automatically, with a patch version bump. Commit
+message markers: `[minor]` and `[major]` bump the respective part,
+`[skip release]` builds and tests without releasing. See
+`.github/workflows/release.yml` and `scripts/bump-version.mjs`.
 
-"Tested" now means the e2e suite too, and it is a gate: the workflow downloads
-a pinned Obsidian AppImage (cached by version, unpacked because the runner has
-no FUSE), runs it under `xvfb` against the sandbox vault and drives the whole
-suite. Nothing is tagged or published if it fails. The reason for the gate is in
+"Tested" now means the e2e suite and the coverage gate too, and both are gates:
+the workflow downloads a pinned Obsidian AppImage (cached by version, unpacked
+because the runner has no FUSE), runs it under `xvfb` against the sandbox vault
+and drives the whole suite. Nothing is tagged or published if it fails. The same
+steps run on the pull request beforehand; the release keeps its own copy because
+a commit can reach master without one (the version bot pushes its own). The reason for the gate is in
 "Gotchas" below: the fill palette shipped invisible in three releases because
 nothing drove the real app between the unit tests and the tag.
 
@@ -862,13 +932,51 @@ coordinates measured in the pop-out; and the grid engine binds its pointer
 handlers to the global `document` unless it is given a `root`, so a sheet in a
 pop-out could not be selected at all - which made every toolbar action a silent
 no-op on an empty selection. All three are fixed by naming the view's own
-document. One gap is left, and it belongs to the vendor: its `setEvents()` binds
-every pointer handler to the `root` it is given but `keydown` to the global
-`document` regardless, so in a pop-out the arrow keys do not move the selection
-and typing on the grid writes nothing. Measured: a click selects, the toolbar
-and the menus work, a double click opens the in-cell editor, and the plugin's
-own formula bar (whose listeners are on its own input) writes the value - so a
-pop-out is usable, just not from the keyboard on the grid itself.
+document. The fourth belonged to the vendor and is now bridged: its `setEvents()`
+binds every pointer handler to the `root` it is given but `keydown` to the global
+`document` regardless, so in a pop-out the arrow keys moved nothing and typing on
+the grid wrote nothing. Since 1.4.x the engine listens on the pop-out's own
+document and CARRIES the keystroke to where the handler is - a copy of the event
+is dispatched on the main window's `body`, and if the handler consumed it the
+original is consumed too. Rather than reimplementing navigation, typing entry,
+Tab, Enter and the clipboard shortcuts a second time (one of the two copies only
+ever exercised in a pop-out), the pop-out behaves exactly like the main window by
+construction. Two details are load-bearing: the bridge only fires while the
+engine's global `current` instance is one of THIS grid's worksheets, or typing in
+a pop-out would drive whatever grid was last clicked in another window; and the
+copy is dispatched on `body`, not on the document, because the vendor's handler
+ends in a branch that reads `e.target.classList` and a Document has none.
+Measured, with the view's own scope handlers counted: one Ctrl+D in a pop-out
+calls `fillDown` exactly once - Obsidian's keymap does not act on an untrusted
+event, the vendor does.
+
+A longer selector replaces the properties it MENTIONS, and nothing else. The
+checked checkbox shipped as an accent square with an unreadable dash in it.
+Obsidian draws its tick as a check-shaped `-webkit-mask-image` over a coloured
+block; our rule was more specific and replaced the geometry - width, height,
+transform, borders - but never mentioned the mask, so Obsidian's mask stayed on
+and clipped our 4x7 px rotated corner down to a few pixels. Everything the DOM
+could be asked was correct: the input was `:checked`, the pseudo-element existed,
+the computed style read plausibly. The fix is to stop drawing a second tick at
+all: the box is ours, the tick is Obsidian's, and the box is sized through
+`--checkbox-size` because that is the variable Obsidian's rule measures the tick
+with, so the two cannot drift apart at any size. The lesson generalises to every
+override in this plugin's theme layer - when a rule fights a vendor's, either
+replace ALL of it or none of it.
+
+An empty `<td>` has no line box, and therefore no height. In the main grid this
+never shows because the row-number gutter always holds a row open with its
+number. An embed can hide that gutter (`|plain` does), and an empty row inside
+the used range then rendered as a 10 px sliver between two 32 px rows. The fix
+is a zero-size strut in `td:empty` - it creates the line box the text would have
+created, so an empty row is exactly as tall as a full one and no taller, while a
+row height from the file (written inline on the `<tr>`) still wins.
+
+Column letters are centred by a rule with `!important`, and it needs it. The
+grid engine writes `text-align: left` INLINE on every header cell it builds,
+mirroring the `align` option we set for the DATA columns, and no stylesheet rule
+beats an inline declaration. The row numbers were centred by the vendor all
+along, so until 1.4.x the two gutters did not match.
 
 Obsidian eats F2 and Ctrl+F before the grid ever sees them. Its keymap listens on
 `window` in the capture phase, and `F2` is "Rename file" while `Ctrl+F` is

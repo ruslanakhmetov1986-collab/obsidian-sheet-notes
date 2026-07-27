@@ -373,6 +373,9 @@ export class SheetEngine {
 		timer: number | null;
 	} | null = null;
 	private touchHandlers: [string, EventListener, boolean][] = [];
+	/** The pop-out key bridge, and the document it listens on; see {@link installKeyBridge}. */
+	private keyBridge: ((e: KeyboardEvent) => void) | null = null;
+	private keyBridgeDoc: Document | null = null;
 
 	constructor(parent: HTMLElement, doc: SheetDoc, opts: EngineOptions) {
 		this.readOnly = !!opts.readOnly;
@@ -488,6 +491,101 @@ export class SheetEngine {
 		this.syncDecor();
 		this.observeResize();
 		this.installTouchGestures();
+		this.installKeyBridge();
+	}
+
+	/* ------------------------------------------------------ pop-out keyboard */
+
+	/**
+	 * Deliver keystrokes to the grid engine when the grid lives in a POP-OUT
+	 * window.
+	 *
+	 * The vendor's `setEvents` is careful with the pointer - it binds `mouseup`,
+	 * `mousedown`, `mousemove` and the touch events to the document it is
+	 * configured with, which is why passing `root: ownerDocument` above made a
+	 * sheet in a pop-out clickable. The keyboard is not: the same function ends
+	 * with a bare
+	 *
+	 *     document.addEventListener("keydown", keyDownControls)
+	 *
+	 * and that `document` is the module's own, i.e. the MAIN window's, whatever
+	 * the configuration says. A pop-out is a different Document in the same JS
+	 * realm, so its `keydown` events never reach the handler at all. Measured:
+	 * in a pop-out the arrow keys moved nothing and typing on a selected cell
+	 * opened no editor, while the same keys worked in the main window.
+	 *
+	 * Rather than reimplement navigation, typing entry, Tab, Enter, Escape and
+	 * the clipboard shortcuts a second time (two implementations, one of them
+	 * only ever exercised in a pop-out), the event is CARRIED to where the
+	 * handler is listening: a copy of the keystroke is dispatched on the main
+	 * document, and if the handler consumed it, the original is consumed too.
+	 * The pop-out then behaves exactly like the main window, by construction,
+	 * including anything the vendor adds later.
+	 *
+	 * The gate is ownership. `jspreadsheet.current` is the grid the engine acts
+	 * on, and it is global: without the check, typing in a pop-out would drive
+	 * whatever grid was last clicked in ANOTHER window. So the bridge only fires
+	 * while the current instance is one of ours - which is exactly when the user
+	 * has clicked a cell in this grid, and is the same condition the vendor's own
+	 * handler applies before it does anything.
+	 *
+	 * Bubble phase, on the document, so that everything which deliberately stops
+	 * a keystroke on its way up (the find box, the formula bar, our dialogs -
+	 * each of which calls `stopPropagation` precisely to hide typing from this
+	 * handler) keeps working unchanged.
+	 *
+	 * The copy travels through the main window, where Obsidian's own keymap is
+	 * also listening, so the obvious worry is a keystroke being acted on twice -
+	 * once in the pop-out, once here. Measured, with the view's own scope
+	 * handlers counted: one Ctrl+D in a pop-out calls `fillDown` exactly once,
+	 * one Home calls `moveToRowStart` exactly once, the same as in the main
+	 * window. Obsidian does not act on an untrusted event; the vendor, which
+	 * reads only the key fields, does.
+	 */
+	private installKeyBridge(): void {
+		const doc = this.root.ownerDocument;
+		// The main window: the vendor is already listening on this very document.
+		if (!doc || doc === document) return;
+
+		const bridge = (e: KeyboardEvent) => {
+			const current = (jspreadsheet as unknown as { current?: unknown }).current;
+			if (!current || !this.worksheets?.includes(current as WorksheetInstance)) return;
+			// A synthesized keydown carrying the legacy fields too: the vendor reads
+			// `which`/`keyCode` for navigation and `key` for typing entry.
+			const copy = new KeyboardEvent("keydown", {
+				key: e.key,
+				code: e.code,
+				location: e.location,
+				ctrlKey: e.ctrlKey,
+				shiftKey: e.shiftKey,
+				altKey: e.altKey,
+				metaKey: e.metaKey,
+				repeat: e.repeat,
+				isComposing: e.isComposing,
+				charCode: e.charCode,
+				keyCode: e.keyCode,
+				which: e.which,
+				bubbles: true,
+				cancelable: true,
+			});
+			// Dispatched on the BODY, not on the document itself, and that is not
+			// cosmetic: the vendor's handler ends in a branch that reads
+			// `e.target.classList` (it is looking for its own search box), and a
+			// Document has no `classList`. With the event dispatched on the
+			// document the target WAS the document, and every keystroke that
+			// arrived while the engine had no current instance threw
+			// "Cannot read properties of undefined (reading 'contains')" into the
+			// console. A real keystroke's target is an element; so is this one.
+			(document.body ?? document.documentElement).dispatchEvent(copy);
+			// The handler answers "handled" the only way it can: it prevents the
+			// default. Mirroring that back is what stops the pop-out window from
+			// also scrolling on an arrow key or moving focus on Tab.
+			if (copy.defaultPrevented) e.preventDefault();
+		};
+
+		doc.addEventListener("keydown", bridge);
+		this.keyBridge = bridge;
+		this.keyBridgeDoc = doc;
 	}
 
 	/* --------------------------------------------------------- touch gestures */
@@ -2230,6 +2328,11 @@ export class SheetEngine {
 			this.root.removeEventListener(type, fn, capture);
 		}
 		this.touchHandlers = [];
+		if (this.keyBridge && this.keyBridgeDoc) {
+			this.keyBridgeDoc.removeEventListener("keydown", this.keyBridge);
+		}
+		this.keyBridge = null;
+		this.keyBridgeDoc = null;
 		if (this.freezeTimer !== null) {
 			window.clearTimeout(this.freezeTimer);
 			this.freezeTimer = null;

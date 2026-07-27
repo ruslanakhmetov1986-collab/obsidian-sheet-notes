@@ -18,6 +18,7 @@ const { chromium } = await import(process.env.SHEETS_PLAYWRIGHT ?? "playwright")
 import {
 	CDP_PORT,
 	PLUGIN_ID,
+	SANDBOX,
 	SHOTS,
 	VAULT,
 	assertSandboxTarget,
@@ -303,6 +304,95 @@ function menuTitles(page, cls = ".leovale-sheet-menu") {
 		(c) => [...document.querySelectorAll(`.menu${c} .menu-item-title`)].map((i) => i.textContent),
 		cls,
 	);
+}
+
+/* --------------------------------------------- is it really PAINTED there? */
+
+/**
+ * What share of an element's interior is not its own background colour.
+ *
+ * The question this answers is "did the mark inside this box actually get
+ * painted", and no DOM property can answer it. The checked checkbox shipped for
+ * a release as an accent-coloured square with an unreadable dash in it: the
+ * input was `:checked`, the pseudo-element was there, its computed style looked
+ * plausible, and Obsidian's own `-webkit-mask-image` - which our rule did not
+ * mention and therefore did not replace - was quietly clipping the tick down to
+ * a few pixels. Every assertion available at the time was green.
+ *
+ * So this one goes through the compositor: `Page.captureScreenshot` with a clip
+ * on the element (scale 4, so a 15px box is 60px of evidence), decoded back into
+ * pixels through a canvas in the page, and the interior counted against the most
+ * common colour in it - which is the fill. A tick is a fat share of that
+ * interior; nothing, or a stray fragment, is not.
+ *
+ * Measured on the bug and on the fix, at the same 4x zoom: the broken tick moved
+ * 4% of the interior pixels, the real one 25.6%, an empty box 0%.
+ */
+async function paintedRatio(cdp, page, selector, nth = 0, scale = 4) {
+	const rect = await page.evaluate(
+		([sel, i]) => {
+			const el = document.querySelectorAll(sel)[i];
+			if (!el) return null;
+			const r = el.getBoundingClientRect();
+			if (r.width < 2 || r.height < 2) return null;
+			return { x: r.left, y: r.top, width: r.width, height: r.height };
+		},
+		[selector, nth],
+	);
+	if (!rect) return null;
+	const { data } = await cdp.send("Page.captureScreenshot", {
+		format: "png",
+		clip: { ...rect, scale },
+		captureBeyondViewport: false,
+	});
+	return page.evaluate(async (b64) => {
+		const img = new Image();
+		img.src = `data:image/png;base64,${b64}`;
+		await img.decode();
+		const canvas = document.createElement("canvas");
+		canvas.width = img.width;
+		canvas.height = img.height;
+		const ctx = canvas.getContext("2d", { willReadFrequently: true });
+		ctx.drawImage(img, 0, 0);
+		const { data: px, width: w, height: h } = ctx.getImageData(0, 0, canvas.width, canvas.height);
+		// The outer fifth is the border, the rounded corners and their
+		// antialiasing - none of which is the mark.
+		const x0 = Math.round(w * 0.22);
+		const x1 = Math.round(w * 0.78);
+		const y0 = Math.round(h * 0.22);
+		const y1 = Math.round(h * 0.78);
+		const at = (x, y) => {
+			const i = (y * w + x) * 4;
+			return [px[i], px[i + 1], px[i + 2]];
+		};
+		const counts = new Map();
+		for (let y = y0; y < y1; y++) {
+			for (let x = x0; x < x1; x++) {
+				const [r, g, b] = at(x, y);
+				const key = `${r >> 3},${g >> 3},${b >> 3}`;
+				counts.set(key, (counts.get(key) ?? 0) + 1);
+			}
+		}
+		let fillKey = null;
+		let best = -1;
+		for (const [key, n] of counts) {
+			if (n > best) {
+				best = n;
+				fillKey = key;
+			}
+		}
+		const fill = fillKey.split(",").map((n) => Number(n) * 8 + 4);
+		let differ = 0;
+		let total = 0;
+		for (let y = y0; y < y1; y++) {
+			for (let x = x0; x < x1; x++) {
+				const [r, g, b] = at(x, y);
+				total++;
+				if (Math.abs(r - fill[0]) + Math.abs(g - fill[1]) + Math.abs(b - fill[2]) > 120) differ++;
+			}
+		}
+		return { ratio: total > 0 ? differ / total : 0, fill, px: total };
+	}, data);
 }
 
 /* ------------------------------------------------- is it really on screen? */
@@ -2997,6 +3087,65 @@ async function main() {
 		check("the brackets are gone from the cell's own text", decor.c2Text === "Linked note",
 			String(decor.c2Text));
 
+		// ---- the tick is PAINTED, not merely `:checked` ---------------------
+		// The 1.4.1 bug: a ticked box was an accent square with an unreadable
+		// dash in it, because our `::after` replaced Obsidian's tick geometry
+		// but not its `-webkit-mask-image`, which then clipped what we drew.
+		// Everything that could be asserted from the DOM was correct at the
+		// time, so what is asserted here is the compositor's own output.
+		const CB_SEL = ".leovale-sheet-content input.leovale-sheet-cb";
+		const cbGeom = await page.evaluate((sel) => {
+			const boxes = [...document.querySelectorAll(sel)];
+			return boxes.map((b) => {
+				const after = getComputedStyle(b, "::after");
+				const box = b.getBoundingClientRect();
+				return {
+					checked: b.checked,
+					box: [Math.round(box.width), Math.round(box.height)],
+					afterW: after.width,
+					afterH: after.height,
+					mask: (after.maskImage || after.webkitMaskImage || "none").slice(0, 24),
+					marker: after.backgroundColor,
+					transform: after.transform,
+				};
+			});
+		}, CB_SEL);
+		console.log("  checkbox geometry:", JSON.stringify(cbGeom));
+		const ticked = cbGeom.find((b) => b.checked);
+		check(
+			"the tick is drawn by Obsidian's own masked pseudo-element",
+			ticked?.mask.startsWith("url(") && ticked?.transform === "none",
+			JSON.stringify(ticked),
+		);
+		check(
+			"and it covers the whole box, so nothing can clip it to a fragment",
+			ticked && parseFloat(ticked.afterW) === ticked.box[0] &&
+				parseFloat(ticked.afterH) === ticked.box[1],
+			JSON.stringify(ticked),
+		);
+
+		const cbPaint = async (label) => {
+			const off = await paintedRatio(cdp, page, CB_SEL, 0);
+			const on = await paintedRatio(cdp, page, CB_SEL, 1);
+			console.log(`  checkbox paint (${label}):`, JSON.stringify({ off, on }));
+			check(
+				`${label}: a ticked checkbox has a tick painted inside it`,
+				!!on && on.ratio >= 0.12,
+				JSON.stringify(on),
+			);
+			check(
+				`${label}: an unticked one is an empty box`,
+				!!off && off.ratio <= 0.03,
+				JSON.stringify(off),
+			);
+			check(
+				`${label}: the two states differ on screen, not only in the DOM`,
+				!!on && !!off && on.ratio > off.ratio + 0.1,
+				JSON.stringify([off?.ratio, on?.ratio]),
+			);
+		};
+		await cbPaint("light");
+
 		step("1.4.0: a click on a checkbox writes a boolean and autosaves");
 		await page.click(`${xCell(1, 1)} input.leovale-sheet-cb`);
 		await page.waitForTimeout(300);
@@ -3052,8 +3201,53 @@ async function main() {
 		await setBaseTheme(page, "obsidian");
 		await page.waitForTimeout(700);
 		await shot(page, "20-links-checkboxes-dark");
+		// The dark theme paints the tick in a DIFFERENT colour (the marker is
+		// `--checkbox-marker-color`, which follows the background), so it is worth
+		// its own pass through the compositor rather than an assumption.
+		await cbPaint("dark");
 		await setBaseTheme(page, "moonstone");
 		await page.waitForTimeout(500);
+
+		step("1.4.x: the column letters are centred, like the row numbers");
+		const headerAlign = await page.evaluate(() => {
+			const root = document.querySelector(".leovale-sheet-content .leovale-sheet-root");
+			const heads = [...root.querySelectorAll(".jss_worksheet > thead > tr > td")].slice(1, 5);
+			const rows = [...root.querySelectorAll(".jss_worksheet > tbody > tr > td:first-child")].slice(
+				0,
+				3,
+			);
+			const centred = (el) => {
+				// Not the computed property alone: the vendor writes `text-align:
+				// left` INLINE on every header cell, so this is also a check that our
+				// rule beat the inline one. The geometry is what the user sees.
+				const box = el.getBoundingClientRect();
+				const range = document.createRange();
+				range.selectNodeContents(el);
+				const text = range.getBoundingClientRect();
+				range.detach?.();
+				if (!text.width) return null;
+				const left = text.left - box.left;
+				const right = box.right - text.right;
+				return { align: getComputedStyle(el).textAlign, off: Math.round(left - right) };
+			};
+			return { heads: heads.map(centred), rows: rows.map(centred) };
+		});
+		console.log("  header alignment:", JSON.stringify(headerAlign));
+		check(
+			"every column letter computes to centre",
+			headerAlign.heads.every((h) => h?.align === "center"),
+			JSON.stringify(headerAlign.heads),
+		);
+		check(
+			"and really sits in the middle of its header cell",
+			headerAlign.heads.every((h) => h && Math.abs(h.off) <= 2),
+			JSON.stringify(headerAlign.heads),
+		);
+		check(
+			"the row numbers are centred too, so the two gutters match",
+			headerAlign.rows.every((r) => r && Math.abs(r.off) <= 2),
+			JSON.stringify(headerAlign.rows),
+		);
 
 		step("1.4.0: clicking a link opens the note");
 		await page.click(".leovale-sheet-content a.leovale-sheet-link");
@@ -3211,22 +3405,124 @@ async function main() {
 			cmds14.join(", "),
 		);
 		if (fs.existsSync(X_XLSX)) fs.rmSync(X_XLSX);
-		await page.evaluate(
-			(id) => window.app.commands.executeCommandById(`${id}:export-xlsx`),
-			PLUGIN_ID,
+
+		/* ---- the export asks WHERE, and writes there -----------------------
+		 *
+		 * The save dialog is Electron's own and a native modal cannot be driven
+		 * from here - a test that opened one would hang until somebody walked
+		 * over to the machine. So the dialog itself is stubbed, at the exact
+		 * seam the plugin resolves at call time
+		 * (`require("@electron/remote").dialog.showSaveDialog`), and what is
+		 * asserted is everything around it: the options the plugin asks with,
+		 * the bytes landing at the CHOSEN path, and cancelling writing nothing.
+		 */
+		const stubSaveDialog = (answer) =>
+			page.evaluate((reply) => {
+				const remote = require("@electron/remote");
+				window.__saveDialogOriginal ??= remote.dialog.showSaveDialog;
+				window.__saveDialogCalls = [];
+				remote.dialog.showSaveDialog = async (options) => {
+					window.__saveDialogCalls.push(options);
+					return reply;
+				};
+			}, answer);
+		const saveDialogCalls = () => page.evaluate(() => window.__saveDialogCalls ?? []);
+		const restoreSaveDialog = () =>
+			page.evaluate(() => {
+				if (!window.__saveDialogOriginal) return;
+				require("@electron/remote").dialog.showSaveDialog = window.__saveDialogOriginal;
+			});
+		const runExport = async () => {
+			await page.evaluate(
+				(id) => window.app.commands.executeCommandById(`${id}:export-xlsx`),
+				PLUGIN_ID,
+			);
+			await page.waitForTimeout(2500);
+		};
+		const notices = () =>
+			page.evaluate(() =>
+				[...document.querySelectorAll(".notice")].map((n) => n.textContent).join(" | "),
+			);
+
+		// 1. Somewhere else entirely: a folder OUTSIDE the vault, which is the
+		//    whole point of asking (Downloads, a stick, a shared drive).
+		const OUTSIDE_DIR = path.join(SANDBOX, "exports");
+		fs.rmSync(OUTSIDE_DIR, { recursive: true, force: true });
+		fs.mkdirSync(OUTSIDE_DIR, { recursive: true });
+		const OUTSIDE_XLSX = path.join(OUTSIDE_DIR, "Chosen name.xlsx");
+		await stubSaveDialog({ canceled: false, filePath: OUTSIDE_XLSX });
+		await runExport();
+		const askedWith = (await saveDialogCalls())[0];
+		console.log("  save dialog options:", JSON.stringify(askedWith));
+		check("the export opened a save dialog", !!askedWith, JSON.stringify(askedWith));
+		check(
+			"it suggests the sheet's own name, in the sheet's own folder",
+			(askedWith?.defaultPath ?? "").replace(/\\/g, "/").endsWith("Exchange14.xlsx") &&
+				(askedWith?.defaultPath ?? "").replace(/\\/g, "/").includes("test-vault"),
+			String(askedWith?.defaultPath),
 		);
-		await page.waitForTimeout(2500);
-		const exportNotice = await page.evaluate(() =>
-			[...document.querySelectorAll(".notice")].map((n) => n.textContent).join(" | "),
+		check(
+			"and filters to .xlsx, with a title of its own",
+			askedWith?.filters?.[0]?.extensions?.includes("xlsx") && !!askedWith?.title,
+			JSON.stringify([askedWith?.filters, askedWith?.title]),
 		);
-		console.log("  export notice:", exportNotice);
-		check("a notice names the file that was written", /Exchange14\.xlsx/.test(exportNotice),
-			exportNotice);
-		check("the .xlsx landed next to the sheet", fs.existsSync(X_XLSX));
+		check("the workbook landed at the CHOSEN path, outside the vault",
+			fs.existsSync(OUTSIDE_XLSX), OUTSIDE_XLSX);
+		check("and nothing was written next to the sheet", !fs.existsSync(X_XLSX));
+		const outsideBytes = fs.existsSync(OUTSIDE_XLSX)
+			? fs.readFileSync(OUTSIDE_XLSX)
+			: Buffer.alloc(0);
+		check("it is a real zip container", outsideBytes.slice(0, 2).toString() === "PK",
+			outsideBytes.slice(0, 4).toString("hex"));
+		check("and not a stub", outsideBytes.length > 2000, String(outsideBytes.length));
+		check("a notice names the file that was written",
+			/Chosen name\.xlsx/.test(await notices()), await notices());
+
+		// 2. Cancelled: no file, no error.
+		await page.evaluate(() => document.querySelectorAll(".notice").forEach((n) => n.remove()));
+		const CANCELLED_XLSX = path.join(OUTSIDE_DIR, "Never written.xlsx");
+		await stubSaveDialog({ canceled: true, filePath: CANCELLED_XLSX });
+		await runExport();
+		check("a cancelled dialog writes no file", !fs.existsSync(CANCELLED_XLSX));
+		check("and says nothing about it", (await notices()).trim() === "", await notices());
+
+		// 3. Inside the vault: written through the vault API, so Obsidian knows
+		//    about the file straight away instead of at the next rescan.
+		const INSIDE_REL = "Exported inside.xlsx";
+		await stubSaveDialog({ canceled: false, filePath: path.join(VAULT, INSIDE_REL) });
+		await runExport();
+		const indexed = await page.evaluate(
+			(p) => !!window.app.vault.getAbstractFileByPath(p),
+			INSIDE_REL,
+		);
+		check("a path inside the vault is written there", fs.existsSync(path.join(VAULT, INSIDE_REL)));
+		check("and Obsidian has it indexed, not just on disk", indexed);
+
+		// 4. No dialog at all (a phone, a tablet): the old behaviour, said out
+		//    loud. `body.is-mobile` is the switch the whole plugin uses for
+		//    "touch UI", so the desktop can be put in that shape here.
+		//
+		// The stub stays in place for this one, answering "cancelled": if the
+		// touch path ever asked for a dialog anyway, the call is RECORDED and
+		// the check below fails - where restoring the real dialog first would
+		// have opened a native modal on the runner and hung the suite.
+		await stubSaveDialog({ canceled: true });
+		await page.evaluate(() => document.body.classList.add("is-mobile"));
+		await page.waitForTimeout(300);
+		await runExport();
+		const mobileNotice = await notices();
+		console.log("  mobile export notice:", mobileNotice);
+		check("with no dialog the file lands next to the sheet", fs.existsSync(X_XLSX));
+		check("nothing tried to open a dialog on a touch UI",
+			(await saveDialogCalls()).length === 0, JSON.stringify(await saveDialogCalls()));
+		check("and the notice says where it went", /Exchange14\.xlsx/.test(mobileNotice), mobileNotice);
+		await page.evaluate(() => document.body.classList.remove("is-mobile"));
+		await page.waitForTimeout(300);
+		await restoreSaveDialog();
+
 		const xlsxBytes = fs.existsSync(X_XLSX) ? fs.readFileSync(X_XLSX) : Buffer.alloc(0);
-		check("it is a real zip container", xlsxBytes.slice(0, 2).toString() === "PK",
+		check("the fallback file is a real workbook too", xlsxBytes.slice(0, 2).toString() === "PK",
 			xlsxBytes.slice(0, 4).toString("hex"));
-		check("and not a stub", xlsxBytes.length > 2000, String(xlsxBytes.length));
 
 		step("1.4.0: the file menu of a .sheet and of an .xlsx");
 		// The context menu of the file explorer is driven through the workspace
@@ -3758,6 +4054,139 @@ async function main() {
 		);
 		await shot(page, "12-embed-light");
 
+		/* ---- an empty row inside the used range is still a row -------------
+		 *
+		 * A `<td>` with nothing in it generates no line box, so it is as tall as
+		 * its padding and no taller. In the main grid the row-number gutter
+		 * always holds a row open; an embed can hide that gutter (`|plain`
+		 * does), and an empty row between two filled ones then rendered as a
+		 * 10px sliver against their 32px - reported as "the row disappeared".
+		 * Empty COLUMNS were never affected (they carry an explicit width) and
+		 * are checked here so that stays true.
+		 */
+		step("embeds: an empty row keeps the standard row height");
+		const GAP_SHEET = "Gaps.sheet";
+		const GAP_NOTE = "GapsNote.md";
+		const gapSeed = JSON.stringify(
+			{
+				format: "leovale-sheet",
+				version: 4,
+				sheets: [
+					{
+						name: "Sheet1",
+						rows: 12,
+						cols: 5,
+						colWidths: { 0: 120, 2: 140 },
+						rowHeights: { 3: 60 },
+						merges: {},
+						view: {},
+						freeze: {},
+						cells: {
+							A1: { v: "Item" },
+							C1: { v: "Cost" },
+							A2: { v: "first" },
+							C2: { v: 10 },
+							// row 3 (index 2) is empty on purpose, and so is column B
+							A4: { v: "after the gap" },
+							C4: { v: 20 },
+						},
+					},
+				],
+			},
+			null,
+			2,
+		);
+		await page.evaluate(
+			async ([sheet, note, seed]) => {
+				const app = window.app;
+				for (const p of [sheet, note]) {
+					const old = app.vault.getAbstractFileByPath(p);
+					if (old) await app.vault.delete(old);
+				}
+				await app.vault.create(sheet, seed);
+				await app.vault.create(
+					note,
+					`# Gaps\n\nwith chrome:\n\n![[${sheet}]]\n\nplain:\n\n![[${sheet}|plain]]\n`,
+				);
+				const leaf = app.workspace.getLeavesOfType("markdown")[0] ?? app.workspace.getLeaf(true);
+				await leaf.openFile(app.vault.getAbstractFileByPath(note));
+				await leaf.setViewState({
+					type: "markdown",
+					state: { file: note, mode: "preview", source: false },
+				});
+			},
+			[GAP_SHEET, GAP_NOTE, gapSeed],
+		);
+		await page.waitForTimeout(3500);
+		const gaps = await page.evaluate(() => {
+			const root = document.querySelector(".markdown-reading-view");
+			return [...root.querySelectorAll(".leovale-sheet-embed")].map((em) => ({
+				plain: em.classList.contains("is-plain"),
+				rows: [...em.querySelectorAll(".jss_worksheet > tbody > tr")]
+					.filter((tr) => getComputedStyle(tr).display !== "none")
+					.map((tr) => ({
+						y: Number(tr.getAttribute("data-y")),
+						h: Math.round(tr.getBoundingClientRect().height),
+					})),
+				cols: [...em.querySelectorAll('.jss_worksheet > tbody > tr:nth-child(1) > td[data-x]')]
+					.filter((td) => getComputedStyle(td).display !== "none")
+					.map((td) => Math.round(td.getBoundingClientRect().width)),
+			}));
+		});
+		console.log("  embed gaps:", JSON.stringify(gaps));
+		check("both embeds mounted", gaps.length === 2, String(gaps.length));
+		for (const em of gaps) {
+			const label = em.plain ? "plain embed" : "embed";
+			const filled = em.rows.filter((r) => r.y !== 2 && r.y !== 3).map((r) => r.h);
+			const empty = em.rows.find((r) => r.y === 2)?.h ?? 0;
+			const tall = em.rows.find((r) => r.y === 3)?.h ?? 0;
+			const standard = Math.max(...filled, 0);
+			check(
+				`${label}: the empty row is as tall as a filled one`,
+				empty >= standard - 1,
+				`${empty} against ${standard}`,
+			);
+			check(
+				`${label}: and no taller`,
+				empty <= standard + 1,
+				`${empty} against ${standard}`,
+			);
+			check(
+				`${label}: a row height from the file still wins over the minimum`,
+				tall >= 58,
+				String(tall),
+			);
+			check(
+				`${label}: the empty COLUMN keeps its width`,
+				(em.cols[1] ?? 0) >= 60,
+				JSON.stringify(em.cols),
+			);
+		}
+		const gapHeaders = await page.evaluate(() => {
+			const em = document.querySelector(".markdown-reading-view .leovale-sheet-embed");
+			return [...em.querySelectorAll(".jss_worksheet > thead > tr > td")]
+				.slice(1, 4)
+				.map((td) => getComputedStyle(td).textAlign);
+		});
+		check(
+			"embeds centre their column letters too",
+			gapHeaders.every((a) => a === "center"),
+			JSON.stringify(gapHeaders),
+		);
+		await page.evaluate(
+			async ([sheet, note]) => {
+				const app = window.app;
+				for (const p of [sheet, note]) {
+					const f = app.vault.getAbstractFileByPath(p);
+					if (f) await app.vault.delete(f);
+				}
+			},
+			[GAP_SHEET, GAP_NOTE],
+		);
+		await page.waitForTimeout(600);
+		await openNote("preview");
+		await page.waitForTimeout(2500);
+
 		step("an embed follows the source file");
 		const embedRefresh = await page.evaluate(async (p) => {
 			const app = window.app;
@@ -4039,6 +4468,100 @@ async function main() {
 				JSON.stringify(popoutPalette));
 			await shot(popout, "28-palette-open-popout");
 			await popout.keyboard.press("Escape");
+
+			/* ---- the keyboard, in a window the engine does not listen to -----
+			 *
+			 * The grid engine binds its `keydown` to the MAIN window's document,
+			 * whatever document it is configured with, so in a pop-out the arrow
+			 * keys moved nothing and typing on a cell opened no editor - while
+			 * the mouse, the toolbar and the menus all worked. What follows is
+			 * the whole keyboard contract, in the window where it used to be
+			 * missing: navigation, typing, a formula, Tab, and the 1.3.0 keys
+			 * that go through the view's own scope (F2, Home/End, Ctrl+D).
+			 */
+			await popout.waitForTimeout(400);
+			await installViewIndex(popout);
+			const popCell = (x, y) =>
+				`.leovale-sheet-content .leovale-sheet-root td[data-x="${x}"][data-y="${y}"]`;
+			const popSel = () =>
+				popout.evaluate(() => {
+					const cur = window.engineAt(0)?.activeCell?.();
+					return cur ? `${cur.row},${cur.col}` : "none";
+				});
+			const popText = (x, y) =>
+				popout.evaluate((sel) => document.querySelector(sel)?.textContent, popCell(x, y));
+
+			await popout.click(popCell(0, 0));
+			await popout.waitForTimeout(250);
+			check("pop-out: a click selects a cell (it always did)", (await popSel()) === "0,0",
+				await popSel());
+
+			for (const key of ["ArrowDown", "ArrowDown", "ArrowRight"]) {
+				await popout.keyboard.press(key);
+				await popout.waitForTimeout(150);
+			}
+			check("pop-out: the arrow keys move the selection", (await popSel()) === "2,1",
+				await popSel());
+
+			await popout.keyboard.press("Tab");
+			await popout.waitForTimeout(200);
+			check("pop-out: Tab moves one column right", (await popSel()) === "2,2", await popSel());
+			await popout.keyboard.press("Home");
+			await popout.waitForTimeout(200);
+			check("pop-out: Home goes to the start of the row", (await popSel()) === "2,0",
+				await popSel());
+
+			await popout.click(popCell(1, 2));
+			await popout.waitForTimeout(200);
+			await popout.keyboard.type("42");
+			await popout.waitForTimeout(250);
+			const popEditing = await popout.evaluate(
+				() => !!document.querySelector(".leovale-sheet-root .jss_worksheet td.editor"),
+			);
+			check("pop-out: typing a character opens the cell editor", popEditing);
+			await popout.keyboard.press("Enter");
+			await popout.waitForTimeout(400);
+			check("pop-out: and the value is committed", (await popText(1, 2)) === "42",
+				await popText(1, 2));
+
+			await popout.click(popCell(1, 3));
+			await popout.waitForTimeout(200);
+			await popout.keyboard.type("=1+2");
+			await popout.keyboard.press("Enter");
+			await popout.waitForTimeout(500);
+			check("pop-out: a formula is entered and computed", (await popText(1, 3)) === "3",
+				await popText(1, 3));
+
+			await popout.click(popCell(1, 2));
+			await popout.waitForTimeout(200);
+			await popout.keyboard.press("F2");
+			await popout.waitForTimeout(350);
+			check(
+				"pop-out: F2 opens the editor on the selected cell",
+				await popout.evaluate(() => !!document.querySelector(".leovale-sheet-root td.editor")),
+			);
+			await popout.keyboard.press("Escape");
+			await popout.waitForTimeout(250);
+
+			// Ctrl+D fills down from the cell above, which is the 42 just typed.
+			await popout.click(popCell(1, 4));
+			await popout.waitForTimeout(200);
+			await popout.keyboard.press("Control+d");
+			await popout.waitForTimeout(400);
+			console.log("  pop-out fill down:", await popText(1, 4));
+			check("pop-out: Ctrl+D fills down", (await popText(1, 4) ?? "").length > 0,
+				String(await popText(1, 4)));
+
+			// The typing must have gone into the pop-out's file and nowhere else.
+			await popout.waitForTimeout(5000);
+			const popDisk = fs.readFileSync(path.join(VAULT, MATRIX_PATH), "utf8");
+			check("pop-out: the edits reached the file on disk", /"B3":\s*\{\s*"v":\s*42/.test(popDisk),
+				popDisk.split("\n").filter((l) => l.includes("B3")).join(" | "));
+			check(
+				"pop-out: the OTHER sheet was not touched by any of it",
+				!/42/.test(fs.readFileSync(path.join(VAULT, MATRIX2_PATH), "utf8")),
+			);
+
 			check("nothing threw inside the pop-out", popoutErrors.length === 0, popoutErrors.join(" | "));
 			await page.evaluate(() => {
 				for (const l of window.app.workspace.getLeavesOfType("leovale-sheet-view")) l.detach();
