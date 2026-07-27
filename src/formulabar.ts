@@ -61,6 +61,16 @@ export class SheetFormulaBar {
 	 * writing the typed text into the newly clicked cell would be data loss.
 	 */
 	private editingRef: string | null = null;
+	/**
+	 * The engine this bar is allowed to write to, captured when the field took
+	 * focus. Reloading a file builds a NEW engine while the old bar may still be
+	 * focused with text in it, and a blur that arrives after the swap would then
+	 * commit a value from the previous document into a cell of the new one. That
+	 * is the "old value resurfaced in a cell" failure; the identity check and the
+	 * `destroyed` flag below are what make it impossible.
+	 */
+	private editingEngine: SheetEngine | null = null;
+	private destroyed = false;
 
 	constructor(parent: HTMLElement, opts: FormulaBarOptions) {
 		this.getEngine = opts.getEngine;
@@ -72,6 +82,11 @@ export class SheetFormulaBar {
 				type: "text",
 				spellcheck: "false",
 				autocomplete: "off",
+				// Gboard capitalizes the first letter of every field it can, which
+				// turns `=sum(a1:a2)` into `=Sum(...)` and a value into a proper noun.
+				autocapitalize: "off",
+				autocorrect: "off",
+				inputmode: "text",
 				placeholder: t("fbPlaceholder"),
 				"aria-label": t("fbAria"),
 			},
@@ -82,13 +97,15 @@ export class SheetFormulaBar {
 
 		this.input.addEventListener("focus", () => {
 			this.editingRef = this.activeRef;
+			this.editingEngine = this.getEngine();
 		});
 		this.input.addEventListener("keydown", (e) => this.onKeyDown(e));
 		// Losing focus must not silently discard what was typed.
 		this.input.addEventListener("blur", () => {
 			this.commit(false);
 			this.editingRef = null;
-			this.sync(true);
+			this.editingEngine = null;
+			if (!this.destroyed) this.sync(true);
 		});
 	}
 
@@ -113,9 +130,12 @@ export class SheetFormulaBar {
 
 	/** Write the field back into the grid. `explicit` = the user pressed Enter. */
 	private commit(explicit: boolean): void {
+		if (this.destroyed) return;
 		const engine = this.getEngine();
 		const ref = this.editingRef ?? this.activeRef;
 		if (!engine || engine.isReadOnly || !ref) return;
+		// Never write into an engine other than the one this edit started in.
+		if (this.editingEngine && this.editingEngine !== engine) return;
 		const next = barValue(this.input.value);
 		const current = barText(engine.getRawValue(ref));
 		if (next === current) return;
@@ -148,6 +168,11 @@ export class SheetFormulaBar {
 	}
 
 	destroy(): void {
+		// Disarm first: detaching a focused input can still run our blur handler,
+		// and by then the view may already be mounting another document.
+		this.destroyed = true;
+		this.editingRef = null;
+		this.editingEngine = null;
 		this.el.detach();
 	}
 }

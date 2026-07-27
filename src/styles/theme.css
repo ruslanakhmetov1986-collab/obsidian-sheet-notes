@@ -35,11 +35,17 @@
 }
 
 /* Mobile: `.is-mobile` comes from Obsidian's own <body> class, and the view
-   mirrors it onto its root from Platform.isMobile. */
+   mirrors it onto its root from Platform.isMobile.
+
+   `env(safe-area-inset-bottom)` resolves to 0px inside Obsidian's Android
+   WebView - measured on a tablet, where the real inset is 47.32px - so the last
+   row sat under the navigation bar and tapping it opened Recents. Obsidian
+   publishes the true value as its own custom property, so that one goes first
+   and env() stays as the fallback for platforms that do implement it. */
 body.is-mobile .leovale-sheet-wrapper,
 .leovale-sheet-content.is-mobile .leovale-sheet-wrapper {
 	padding-bottom: 12px;
-	padding-bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+	padding-bottom: calc(12px + var(--safe-area-inset-bottom, env(safe-area-inset-bottom, 0px)));
 }
 
 .leovale-sheet-error {
@@ -80,7 +86,11 @@ body.is-mobile .leovale-sheet-wrapper,
 
 .leovale-sheet-formulabar .leovale-sheet-fb-input {
 	flex: 1 1 auto;
+	/* Both are needed for the badge to keep its place: without min-width the
+	   input claims its intrinsic width and pushes the CSV badge off the strip,
+	   which on a tablet looked like the badge sitting on top of the text. */
 	min-width: 0;
+	text-overflow: ellipsis;
 	height: 22px;
 	padding: 0 4px;
 	border: none;
@@ -107,6 +117,8 @@ body.is-mobile .leovale-sheet-wrapper,
 /* CSV files get a badge naming the delimiter that will be written back. */
 .leovale-sheet-fb-badge {
 	flex: 0 0 auto;
+	white-space: nowrap;
+	margin-left: 2px;
 	padding: 1px 6px;
 	border-radius: 4px;
 	background-color: var(--background-modifier-border);
@@ -197,10 +209,18 @@ body.is-mobile .leovale-sheet-wrapper,
 	cursor: default;
 }
 
-/* toggled / open state: tinted background + accent glyph, no border */
+/* toggled state: tinted background + accent glyph, no border */
 .leovale-sheet-toolbar .leovale-sheet-tb-btn.is-active {
 	background-color: var(--background-modifier-active-hover, var(--background-modifier-hover));
 	color: var(--text-accent);
+}
+
+/* A button whose menu is open. Separate from `is-active` (which means "the
+   selection has this formatting") and removed when the menu hides, however it
+   was dismissed - on a tablet an Escape used to leave the button lit for good,
+   because a tap also leaves :hover and :focus behind. */
+.leovale-sheet-toolbar .leovale-sheet-tb-btn.is-open {
+	background-color: var(--background-modifier-hover);
 }
 
 .leovale-sheet-tb-icon {
@@ -362,6 +382,10 @@ body.is-mobile .leovale-sheet-wrapper,
 	border-left-color: var(--background-modifier-border);
 	font-weight: var(--font-medium, 500);
 	text-align: center;
+	/* Stated rather than inherited: inside an embed the wrappers carry
+	   `line-height: 0` (they must, or a stray whitespace text node adds a strip of
+	   background under the last row), and the column letters collapsed to 6px. */
+	line-height: 1.4em;
 }
 
 .leovale-sheet-root .jss_worksheet > thead > tr > td.selected,
@@ -415,6 +439,17 @@ body.is-mobile .leovale-sheet-wrapper,
 
 .leovale-sheet-root .jss_worksheet > tbody > tr > td.readonly {
 	color: var(--text-faint);
+}
+
+/* Wrapped cells (`wrap` in the file). The flag itself is stored as
+   `overflow-wrap: break-word` in the cell's inline style and the engine wrapper
+   mirrors it onto this class; the wrapping cannot be inline because the engine
+   assigns `style.whiteSpace` on every cell update and would erase it. See
+   src/cellcss.ts. */
+.leovale-sheet-root .jss_worksheet > tbody > tr > td.leovale-sheet-wrap {
+	white-space: pre-wrap;
+	overflow-wrap: break-word;
+	word-break: break-word;
 }
 
 .leovale-sheet-root .jss_worksheet > tbody > tr.dragging > td {
@@ -589,6 +624,199 @@ body.is-mobile .leovale-sheet-fb-ref,
 .leovale-sheet-content.is-mobile .leovale-sheet-fb-ref {
 	min-width: 52px;
 	font-size: var(--font-ui-small);
+}
+
+/* ---- embedded sheets in notes ------------------------------------------
+ * `![[Budget.sheet]]` in a Markdown note. Obsidian's own element is a <span>
+ * inside a <p> (reading view) or a <div> (live preview), so the block layout is
+ * forced here rather than assumed. Read-only: no toolbar, no formula bar.
+ *
+ * `|plain` drops every piece of chrome - frame, header, column letters, row
+ * numbers, background - which is what people embedding a small table into prose
+ * actually want.
+ * ---------------------------------------------------------------------- */
+
+.leovale-sheet-embed {
+	display: block;
+	margin: 0.6em 0;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 6px;
+	overflow: hidden;
+	background-color: var(--background-primary);
+}
+
+.leovale-sheet-embed.is-plain {
+	border: none;
+	border-radius: 0;
+	background-color: transparent;
+}
+
+/* A caption, not a title bar: one slim row, muted, out of the way. */
+.leovale-sheet-embed-header {
+	display: flex;
+	align-items: center;
+	gap: 5px;
+	height: 24px;
+	padding: 0 6px;
+	background-color: var(--background-secondary);
+	border-bottom: 1px solid var(--background-modifier-border);
+	color: var(--text-muted);
+	font-family: var(--font-interface);
+	font-size: var(--font-smaller, var(--font-ui-smaller));
+	line-height: 1;
+	cursor: pointer;
+	user-select: none;
+}
+
+.leovale-sheet-embed-header:hover {
+	color: var(--text-normal);
+}
+
+.leovale-sheet-embed-icon,
+.leovale-sheet-embed-open {
+	display: inline-flex;
+	align-items: center;
+	flex: 0 0 auto;
+}
+
+.leovale-sheet-embed-icon .svg-icon,
+.leovale-sheet-embed-open .svg-icon {
+	width: 12px;
+	height: 12px;
+	color: currentColor;
+}
+
+.leovale-sheet-embed-title {
+	flex: 1 1 auto;
+	min-width: 0;
+	overflow: hidden;
+	white-space: nowrap;
+	text-overflow: ellipsis;
+}
+
+.leovale-sheet-embed-badge {
+	flex: 0 0 auto;
+	padding: 0 5px;
+	border-radius: 4px;
+	background-color: var(--background-modifier-border);
+	white-space: nowrap;
+}
+
+.leovale-sheet-embed-open {
+	padding: 1px;
+	border: none;
+	border-radius: 4px;
+	background-color: transparent;
+	box-shadow: none;
+	color: inherit;
+	cursor: pointer;
+}
+
+.leovale-sheet-embed-open:hover {
+	background-color: var(--background-modifier-hover);
+}
+
+/* The grid scrolls inside the embed: a 100-row sheet must not push the rest of
+   the note off the screen. */
+.leovale-sheet-embed-body {
+	max-height: 60vh;
+	overflow: auto;
+	padding: 0;
+}
+
+/* Flush and full width.
+ *
+ * Two things fight this. Obsidian styles every table inside `.markdown-rendered`
+ * and gives it `margin: 1em 0`, which showed as a 16px gap above and below the
+ * grid INSIDE the embed frame; and the grid's own width is `max-content`, which
+ * left the rest of the embed empty to the right of the last column. The table
+ * therefore stretches to the embed, and `min-width: max-content` keeps it from
+ * being squeezed in a narrow one - it scrolls sideways instead. */
+.leovale-sheet-embed .leovale-sheet-root {
+	width: 100%;
+	min-width: 0;
+}
+
+.leovale-sheet-embed .leovale-sheet-root .jss_container,
+.leovale-sheet-embed .leovale-sheet-root .jss_content,
+.leovale-sheet-embed .leovale-sheet-root .jtabs-content {
+	padding: 0;
+	width: 100%;
+	/* These wrappers hold no text of their own, but they do establish line boxes,
+	   and the inline-level table inside them then sits on a baseline: that was a
+	   5px strip of background under the last row. Cells set their own
+	   line-height, so zeroing it here costs nothing. */
+	line-height: 0;
+}
+
+/* The engine keeps a hidden <textarea> after the table for clipboard work. It is
+   10px tall and in the flow, which put a strip of empty background under the
+   last row of an embed. Out of the flow, still there for Ctrl+C. */
+.leovale-sheet-embed .leovale-sheet-root .jss_textarea {
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	opacity: 0;
+	pointer-events: none;
+}
+
+.leovale-sheet-embed .leovale-sheet-root table.jss_worksheet {
+	margin: 0;
+	width: 100%;
+	min-width: max-content;
+	/* The engine's table is inline-level, so the line box under it added a few
+	   pixels of descender space between the last row and the embed's edge. */
+	display: table;
+	vertical-align: top;
+}
+
+.leovale-sheet-embed-error {
+	padding: 8px;
+	color: var(--text-error);
+	font-family: var(--font-interface);
+	font-size: var(--font-ui-smaller);
+}
+
+/* An embedded grid is not editable, so the editing affordances go away. */
+.leovale-sheet-embed .leovale-sheet-root .jss_worksheet > tbody > tr > td.readonly {
+	color: var(--text-normal);
+}
+
+/* Obsidian styles tables inside `.markdown-rendered`, and an embedded grid IS a
+   table inside it: its alternate-column rule (`td:nth-child(2n+2)`) would stripe
+   the spreadsheet in whatever colour the user's theme sets. A cell fill is an
+   inline style and still wins over this. */
+.leovale-sheet-embed .leovale-sheet-root .jss_worksheet > tbody > tr > td {
+	background-color: transparent;
+}
+
+/* ...and the row-number gutter keeps its own background, which the rule above
+   would otherwise have taken away from it. */
+.leovale-sheet-embed .leovale-sheet-root .jss_worksheet > tbody > tr > td:first-child {
+	background-color: var(--background-secondary);
+}
+
+.leovale-sheet-embed .leovale-sheet-root .jss_corner {
+	display: none;
+}
+
+/* `|plain`: no column letters, no row numbers.
+ *
+ * The row-number gutter has a <col> of its own in the engine's colgroup, and
+ * hiding only the cells shifts every column onto the previous <col>: the first
+ * data column inherited the gutter's 50px and showed "It..." instead of "Item".
+ * The engine's own hidden-index rule hides the <col> as well, and so does this. */
+.leovale-sheet-embed.is-plain .leovale-sheet-root .jss_worksheet > thead,
+.leovale-sheet-embed.is-plain .leovale-sheet-root .jss_worksheet > tbody > tr > td:first-child,
+.leovale-sheet-embed.is-plain .leovale-sheet-root .jss_worksheet > colgroup > col:first-child {
+	display: none;
+}
+
+.leovale-sheet-embed.is-plain .leovale-sheet-root,
+.leovale-sheet-embed.is-plain .leovale-sheet-root .jss_worksheet,
+.leovale-sheet-embed.is-plain .leovale-sheet-root .jss_container,
+.leovale-sheet-embed.is-plain .leovale-sheet-root .jss_content {
+	background-color: transparent;
 }
 
 /* ---- hide vendor branding --------------------------------------------- */

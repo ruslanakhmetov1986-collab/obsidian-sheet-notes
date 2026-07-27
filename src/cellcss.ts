@@ -6,11 +6,20 @@
  * "off" value. `setStyle` merges rather than replaces, so an omitted property
  * would leave a stale declaration behind; and turning a border off has to
  * restore the normal gridline instead of erasing it.
+ *
+ * WHAT IS NOT HERE: `nf`. A mask can contain `:` and `;` (`yyyy-mm-dd hh:mm`),
+ * and the engine's `setStyle` parses the string it is given by splitting on
+ * exactly those two characters, so a mask smuggled through CSS would arrive
+ * truncated. Masks live in a `data-nf` attribute on the cell instead - which is
+ * the same storage class as the inline style, i.e. the engine moves it along
+ * when rows or columns are inserted. See `SheetEngine`.
  */
 
 import {
 	BORDER_SIDES,
 	type CellStyle,
+	type HAlign,
+	type VAlign,
 	normalizeColor,
 	normalizeSides,
 	normalizeStyle,
@@ -28,6 +37,35 @@ const SIDE_CSS: Record<string, { prop: string; off: string }> = {
 	r: { prop: "border-right", off: BORDER_OFF },
 	b: { prop: "border-bottom", off: BORDER_OFF },
 };
+
+/**
+ * `ha` -> `text-align`. The off value is `left`, which is also what the engine
+ * writes on every cell it creates (`columns[].align`), so "align left" and "no
+ * alignment set" are the same thing and `ha: "l"` is never persisted.
+ */
+export const H_ALIGN_CSS: Record<HAlign, string> = { l: "left", c: "center", r: "right" };
+
+/**
+ * `va` -> `vertical-align`. The off value is `inherit`, NOT `middle`: a table
+ * cell inherits `middle` from the table anyway, so `inherit` reproduces the
+ * default look while leaving `middle` free to mean "the user asked for middle".
+ */
+export const V_ALIGN_CSS: Record<VAlign, string> = { t: "top", m: "middle", b: "bottom" };
+
+/**
+ * `wrap` -> `overflow-wrap`, and that property is the STORAGE for the flag.
+ *
+ * The obvious property, `white-space`, cannot be: the engine assigns
+ * `element.style.whiteSpace` directly on every cell update (`""` normally,
+ * `pre-wrap` for content over 200 characters), so it both erases ours and
+ * fakes it on long text. `overflow-wrap` is never touched by the engine, and
+ * the wrapping itself is done by a stylesheet rule keyed on the class the
+ * engine wrapper puts on wrapped cells.
+ */
+export const WRAP_ON = "break-word";
+export const WRAP_OFF = "normal";
+/** Class the engine adds to a wrapped cell; the theme layer does the wrapping. */
+export const WRAP_CLASS = "leovale-sheet-wrap";
 
 /**
  * Text colour for a user-set fill, derived from the fill's relative luminance.
@@ -60,6 +98,9 @@ export function styleToCss(style: CellStyle | undefined): string {
 		if (!def) continue;
 		decls.push(`${def.prop}: ${sides.includes(side) ? BORDER_ON : def.off}`);
 	}
+	decls.push(`text-align: ${s.ha ? H_ALIGN_CSS[s.ha] : H_ALIGN_CSS.l}`);
+	decls.push(`vertical-align: ${s.va ? V_ALIGN_CSS[s.va] : "inherit"}`);
+	decls.push(`overflow-wrap: ${s.wrap ? WRAP_ON : WRAP_OFF}`);
 	return decls.join("; ") + ";";
 }
 
@@ -72,7 +113,7 @@ export function cssToStyle(css: unknown): CellStyle | undefined {
 		const i = decl.indexOf(":");
 		if (i < 0) continue;
 		const prop = decl.slice(0, i).trim().toLowerCase();
-		const value = decl.slice(i + 1).trim();
+		const value = decl.slice(i + 1).trim().toLowerCase();
 		if (prop === "font-weight") {
 			if (/^(bold|bolder|[6-9]00)$/.test(value)) out.b = true;
 		} else if (prop === "font-size") {
@@ -81,6 +122,17 @@ export function cssToStyle(css: unknown): CellStyle | undefined {
 		} else if (prop === "background-color" || prop === "background") {
 			const c = normalizeColor(value);
 			if (c) out.bg = c;
+		} else if (prop === "text-align") {
+			// `left` is the engine's own default on every cell, so it carries no
+			// information and must not turn into a persisted `ha`.
+			if (value === "center") out.ha = "c";
+			else if (value === "right") out.ha = "r";
+		} else if (prop === "vertical-align") {
+			if (value === "top") out.va = "t";
+			else if (value === "middle") out.va = "m";
+			else if (value === "bottom") out.va = "b";
+		} else if (prop === "overflow-wrap" || prop === "word-wrap") {
+			if (value === WRAP_ON) out.wrap = true;
 		} else if (prop.startsWith("border-")) {
 			const key = prop.slice(7).charAt(0);
 			if (BORDER_SIDES.includes(key) && value.includes("--leovale-sheet-border-strong")) {

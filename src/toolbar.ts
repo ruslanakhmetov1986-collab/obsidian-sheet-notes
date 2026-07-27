@@ -10,10 +10,54 @@
 
 import { Menu, setIcon } from "obsidian";
 import type { SheetEngine } from "./engine";
-import { type CellStyle, MAX_FONT_SIZE, MIN_FONT_SIZE, parseRef } from "./format";
+import {
+	type CellStyle,
+	type HAlign,
+	MAX_FONT_SIZE,
+	MIN_FONT_SIZE,
+	type VAlign,
+	parseRef,
+} from "./format";
 import { type StringKey, t } from "./i18n";
 
 export const FONT_SIZES = [10, 12, 14, 16, 18, 24];
+
+/**
+ * Number-format presets, in menu order. `mask: null` is "Auto", i.e. no format
+ * at all: the cell shows its raw value, which is also what an unformatted cell
+ * does, so picking Auto removes the key from the file instead of storing a
+ * do-nothing mask.
+ *
+ * The masks are excel-like strings and go into the file verbatim, so a file
+ * written on a Russian machine renders the same everywhere. The currency order
+ * follows the toolbar author's own habit; all three are always offered.
+ */
+export const NUMBER_FORMATS: { mask: string | null; label: StringKey }[] = [
+	{ mask: null, label: "nfAuto" },
+	{ mask: "0.00", label: "nfTwoDecimals" },
+	{ mask: "#,##0", label: "nfThousands" },
+	{ mask: "#,##0.00", label: "nfThousands2" },
+	{ mask: "0%", label: "nfPercent" },
+	{ mask: "$#,##0.00", label: "nfUsd" },
+	{ mask: "€#,##0.00", label: "nfEur" },
+	{ mask: "#,##0.00 ₽", label: "nfRub" },
+	{ mask: "yyyy-mm-dd", label: "nfDate" },
+	{ mask: "yyyy-mm-dd hh:mm", label: "nfDateTime" },
+];
+
+/** Horizontal alignment menu items. `null` clears the key (= left). */
+const H_ALIGN_ITEMS: { value: HAlign | null; label: StringKey; icon: string }[] = [
+	{ value: null, label: "alignLeft", icon: "align-left" },
+	{ value: "c", label: "alignCenter", icon: "align-center" },
+	{ value: "r", label: "alignRight", icon: "align-right" },
+];
+
+/** Vertical alignment menu items. `null` clears the key (= the cell default). */
+const V_ALIGN_ITEMS: { value: VAlign | null; label: StringKey; icon: string }[] = [
+	{ value: "t", label: "alignTop", icon: "arrow-up" },
+	{ value: null, label: "alignMiddleDefault", icon: "minus" },
+	{ value: "b", label: "alignBottom", icon: "arrow-down" },
+];
 
 /** Palette laid out as a 6x2 grid, Google-Sheets style. */
 export const FILL_COLORS: { value: string | null; label: StringKey }[] = [
@@ -53,7 +97,13 @@ export class SheetToolbar {
 	private fillSwatch!: HTMLElement;
 	private palette!: HTMLElement;
 	private borderButton!: HTMLButtonElement;
+	private numberButton!: HTMLButtonElement;
+	private numberLabel!: HTMLElement;
+	private alignButton!: HTMLButtonElement;
+	private alignIcon!: HTMLElement;
+	private wrapButton!: HTMLButtonElement;
 	private onPointerDown: (e: MouseEvent) => void;
+	private onKeyDown: (e: KeyboardEvent) => void;
 	/** Selection snapshot taken before a toolbar click can clear the grid's own. */
 	private pendingRefs: string[] = [];
 
@@ -72,6 +122,13 @@ export class SheetToolbar {
 			this.closePalette();
 		};
 		document.addEventListener("mousedown", this.onPointerDown, true);
+
+		// Escape closes the palette. It used to only close native menus, so the
+		// fill popover stayed open (and its button lit) until the next click.
+		this.onKeyDown = (e: KeyboardEvent) => {
+			if (e.key === "Escape") this.closePalette();
+		};
+		document.addEventListener("keydown", this.onKeyDown, true);
 	}
 
 	/** Cells a toolbar action should act on. */
@@ -160,6 +217,43 @@ export class SheetToolbar {
 		);
 		this.caret(this.borderButton);
 		this.borderButton.onclick = () => this.openBorderMenu();
+
+		this.el.createDiv({ cls: "leovale-sheet-tb-sep" });
+
+		// --- group 4: number format ------------------------------------------
+		const group4 = this.el.createDiv({ cls: "leovale-sheet-tb-group" });
+		this.numberButton = group4.createEl("button", {
+			cls: "leovale-sheet-tb-btn leovale-sheet-tb-number is-wide",
+			attr: { type: "button", title: t("tbNumberFormat"), "aria-label": t("tbNumberFormat") },
+		});
+		setIcon(this.numberButton.createSpan({ cls: "leovale-sheet-tb-icon" }), "hash");
+		this.numberLabel = this.numberButton.createSpan({
+			cls: "leovale-sheet-tb-value leovale-sheet-tb-nfvalue",
+			text: "—",
+		});
+		this.caret(this.numberButton);
+		this.numberButton.onclick = () => this.openNumberMenu();
+
+		this.el.createDiv({ cls: "leovale-sheet-tb-sep" });
+
+		// --- group 5: alignment + wrap ---------------------------------------
+		const group5 = this.el.createDiv({ cls: "leovale-sheet-tb-group" });
+		this.alignButton = group5.createEl("button", {
+			cls: "leovale-sheet-tb-btn leovale-sheet-tb-align is-wide",
+			attr: { type: "button", title: t("tbAlign"), "aria-label": t("tbAlign") },
+		});
+		this.alignIcon = this.alignButton.createSpan({ cls: "leovale-sheet-tb-icon" });
+		setIcon(this.alignIcon, "align-left");
+		this.caret(this.alignButton);
+		this.alignButton.onclick = () => this.openAlignMenu();
+
+		this.wrapButton = this.iconButton(
+			group5,
+			"leovale-sheet-tb-wrap",
+			"wrap-text",
+			t("tbWrap"),
+		);
+		this.wrapButton.onclick = () => this.toggleWrap();
 	}
 
 	/* ------------------------------------------------------------ actions */
@@ -261,6 +355,65 @@ export class SheetToolbar {
 		this.sync();
 	}
 
+	private applyNumberFormat(mask: string | null): void {
+		const engine = this.getEngine();
+		if (!engine) return;
+		const refs = this.targetRefs();
+		if (refs.length === 0) return;
+		engine.applyStyle(refs, (cur) => {
+			const next: CellStyle = { ...cur };
+			if (mask) next.nf = mask;
+			else delete next.nf;
+			return next;
+		});
+		this.sync();
+	}
+
+	private applyHAlign(value: HAlign | null): void {
+		const engine = this.getEngine();
+		if (!engine) return;
+		const refs = this.targetRefs();
+		if (refs.length === 0) return;
+		engine.applyStyle(refs, (cur) => {
+			const next: CellStyle = { ...cur };
+			if (value) next.ha = value;
+			else delete next.ha;
+			return next;
+		});
+		this.sync();
+	}
+
+	private applyVAlign(value: VAlign | null): void {
+		const engine = this.getEngine();
+		if (!engine) return;
+		const refs = this.targetRefs();
+		if (refs.length === 0) return;
+		engine.applyStyle(refs, (cur) => {
+			const next: CellStyle = { ...cur };
+			if (value) next.va = value;
+			else delete next.va;
+			return next;
+		});
+		this.sync();
+	}
+
+	private toggleWrap(): void {
+		const engine = this.getEngine();
+		if (!engine) return;
+		const refs = this.targetRefs();
+		if (refs.length === 0) return;
+		// Same semantics as Bold: any unwrapped cell in the selection means "wrap
+		// them all", otherwise the whole selection is unwrapped.
+		const makeWrap = refs.some((r) => !engine.getStyleAt(r).wrap);
+		engine.applyStyle(refs, (cur) => {
+			const next: CellStyle = { ...cur };
+			if (makeWrap) next.wrap = true;
+			else delete next.wrap;
+			return next;
+		});
+		this.sync();
+	}
+
 	/* -------------------------------------------------------------- popups */
 
 	private togglePalette(): void {
@@ -275,9 +428,23 @@ export class SheetToolbar {
 		this.fillButton.removeClass("is-active");
 	}
 
-	/** Anchor a native Obsidian menu just under a toolbar button. */
+	/**
+	 * Anchor a native Obsidian menu just under a toolbar button.
+	 *
+	 * The button is marked while its menu is open and cleaned up in `onHide`,
+	 * which fires for every way of dismissing a menu - picking an item, clicking
+	 * away, Escape. Without it a tap on a tablet left the button looking pressed
+	 * for the rest of the session (`:hover`/`:focus` stick after a touch, so
+	 * `blur()` is part of the cleanup).
+	 */
 	private showMenuUnder(menu: Menu, button: HTMLElement): void {
 		const rect = button.getBoundingClientRect();
+		button.addClass("is-open");
+		menu.onHide(() => {
+			button.removeClass("is-open");
+			(button as HTMLButtonElement).blur();
+			this.sync();
+		});
 		menu.showAtPosition({ x: rect.left, y: rect.bottom + 4 });
 	}
 
@@ -304,6 +471,54 @@ export class SheetToolbar {
 		this.showMenuUnder(menu, this.sizeButton);
 	}
 
+	private openNumberMenu(): void {
+		this.closePalette();
+		const refs = this.targetRefs();
+		const current = refs[0] ? this.getEngine()?.getStyleAt(refs[0]).nf : undefined;
+		const menu = new Menu();
+		NUMBER_FORMATS.forEach(({ mask, label }, i) => {
+			if (i === 1 || i === 5 || i === 8) menu.addSeparator();
+			menu.addItem((item) =>
+				item
+					.setTitle(t(label))
+					.setChecked(mask === null ? current === undefined : current === mask)
+					.onClick(() => this.applyNumberFormat(mask)),
+			);
+		});
+		this.showMenuUnder(menu, this.numberButton);
+	}
+
+	/**
+	 * One menu for both axes: horizontal on top, vertical below the separator.
+	 * Two buttons would cost 28 px of a toolbar that has to fit a phone.
+	 */
+	private openAlignMenu(): void {
+		this.closePalette();
+		const refs = this.targetRefs();
+		const style = refs[0] ? this.getEngine()?.getStyleAt(refs[0]) : undefined;
+		const menu = new Menu();
+		for (const { value, label, icon } of H_ALIGN_ITEMS) {
+			menu.addItem((item) =>
+				item
+					.setTitle(t(label))
+					.setIcon(icon)
+					.setChecked(value === null ? style?.ha === undefined : style?.ha === value)
+					.onClick(() => this.applyHAlign(value)),
+			);
+		}
+		menu.addSeparator();
+		for (const { value, label, icon } of V_ALIGN_ITEMS) {
+			menu.addItem((item) =>
+				item
+					.setTitle(t(label))
+					.setIcon(icon)
+					.setChecked(value === null ? style?.va === undefined : style?.va === value)
+					.onClick(() => this.applyVAlign(value)),
+			);
+		}
+		this.showMenuUnder(menu, this.alignButton);
+	}
+
 	private openBorderMenu(): void {
 		this.closePalette();
 		const menu = new Menu();
@@ -325,7 +540,15 @@ export class SheetToolbar {
 	sync(): void {
 		const engine = this.getEngine();
 		const disabled = !engine || engine.isReadOnly;
-		for (const el of [this.boldButton, this.sizeButton, this.fillButton, this.borderButton]) {
+		for (const el of [
+			this.boldButton,
+			this.sizeButton,
+			this.fillButton,
+			this.borderButton,
+			this.numberButton,
+			this.alignButton,
+			this.wrapButton,
+		]) {
 			el.toggleAttribute("disabled", disabled);
 		}
 		if (!engine) return;
@@ -336,10 +559,27 @@ export class SheetToolbar {
 		this.sizeLabel.setText(first.fs !== undefined ? String(first.fs) : "—");
 		this.fillSwatch.style.backgroundColor = first.bg ?? "";
 		this.fillSwatch.toggleClass("is-empty", !first.bg);
+
+		// The number button shows the live mask, like the font-size button shows
+		// the live size. Long masks would stretch the toolbar, hence the preset
+		// label for the ones we know and an ellipsis for anything else.
+		const preset = NUMBER_FORMATS.find((p) => p.mask && p.mask === first.nf);
+		this.numberLabel.setText(
+			first.nf === undefined ? "—" : (preset?.mask ?? first.nf).slice(0, 12),
+		);
+		this.numberButton.toggleClass("is-active", first.nf !== undefined);
+
+		const alignName =
+			first.ha === "c" ? "align-center" : first.ha === "r" ? "align-right" : "align-left";
+		this.alignIcon.empty();
+		setIcon(this.alignIcon, alignName);
+		this.alignButton.toggleClass("is-active", !!first.ha || !!first.va);
+		this.wrapButton.toggleClass("is-active", !!first.wrap);
 	}
 
 	destroy(): void {
 		document.removeEventListener("mousedown", this.onPointerDown, true);
+		document.removeEventListener("keydown", this.onKeyDown, true);
 		this.el.detach();
 	}
 }

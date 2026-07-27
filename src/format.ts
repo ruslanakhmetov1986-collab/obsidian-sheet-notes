@@ -15,7 +15,19 @@
  */
 
 export const FORMAT_ID = "leovale-sheet";
-export const CURRENT_VERSION = 1;
+/**
+ * 1 -> 2 (release 1.2.0): cell styles gained `nf`, `ha`, `va` and `wrap`.
+ *
+ * The bump is not cosmetic. A 1.1.x build knows nothing about those keys and
+ * `normalizeStyle()` there DROPS unknown properties, so opening a v2 file in an
+ * older build and saving it would silently strip every number format and
+ * alignment in the document. Version 2 makes that build refuse to write the
+ * file at all (`isSupportedVersion` -> read-only) instead.
+ *
+ * Reading v1 keeps working forever; writing always emits the current version
+ * (see {@link serializeSheet}).
+ */
+export const CURRENT_VERSION = 2;
 
 /** Shortest plausible serialization; used by the view as an anti-truncation floor. */
 export const MIN_VALID = 60;
@@ -30,20 +42,41 @@ export const BORDER_SIDES = "trbl";
 export const MIN_FONT_SIZE = 6;
 export const MAX_FONT_SIZE = 96;
 
+/** Horizontal alignment codes. Left is the grid's own default. */
+export const H_ALIGNS = ["l", "c", "r"] as const;
+/** Vertical alignment codes. Middle is the browser's own default for a cell. */
+export const V_ALIGNS = ["t", "m", "b"] as const;
+export type HAlign = (typeof H_ALIGNS)[number];
+export type VAlign = (typeof V_ALIGNS)[number];
+
+/** A number/date mask longer than this is a corrupt file, not a format. */
+export const MAX_NF_LENGTH = 64;
+
 /**
- * Normalized cell style. Deliberately NOT raw CSS: only these four properties
+ * Normalized cell style. Deliberately NOT raw CSS: only these eight properties
  * are persisted, in this key order, so the file stays byte-stable and readable.
  *
- *   b   bold                      true (absent = normal weight)
- *   fs  font size in px           integer 6..96
- *   bg  background fill           "#rrggbb", lowercase
- *   bd  borders                   subset of "trbl" in that order, e.g. "trbl"
+ *   b     bold                    true (absent = normal weight)
+ *   fs    font size in px         integer 6..96
+ *   bg    background fill         "#rrggbb", lowercase
+ *   bd    borders                 subset of "trbl" in that order, e.g. "trbl"
+ *   nf    number/date mask        excel-like, e.g. "#,##0.00", "yyyy-mm-dd"
+ *   ha    horizontal alignment    "l" | "c" | "r" (absent = left)
+ *   va    vertical alignment      "t" | "m" | "b" (absent = the cell default)
+ *   wrap  wrap long text          true (absent = one clipped line)
+ *
+ * `nf` is a DISPLAY mask only: the cell keeps its raw value in `v`, so the file
+ * stays locale-independent and a date is a plain value plus a mask, not a type.
  */
 export interface CellStyle {
 	b?: true;
 	fs?: number;
 	bg?: string;
 	bd?: string;
+	nf?: string;
+	ha?: HAlign;
+	va?: VAlign;
+	wrap?: true;
 }
 
 export interface SheetCell {
@@ -86,6 +119,40 @@ export function normalizeSides(input: unknown): string | undefined {
 	return out.length > 0 ? out : undefined;
 }
 
+/**
+ * Keep a number/date mask if it is a plausible one.
+ *
+ * Masks are stored verbatim (excel-like), so the only rules are: it is a
+ * non-empty single-line string of sane length. Whatever the formatter cannot
+ * interpret is simply displayed as the raw value, never as an error.
+ */
+export function normalizeNf(input: unknown): string | undefined {
+	if (typeof input !== "string") return undefined;
+	const s = input.trim();
+	if (s.length === 0 || s.length > MAX_NF_LENGTH) return undefined;
+	// A mask is one line of printable characters. A control byte in there means
+	// a corrupt file, not a format we should try to honour.
+	for (let k = 0; k < s.length; k++) {
+		const code = s.charCodeAt(k);
+		if (code < 0x20 || code === 0x7f) return undefined;
+	}
+	return s;
+}
+
+/** "l" | "c" | "r" (also accepts full CSS words); anything else -> undefined. */
+export function normalizeHAlign(input: unknown): HAlign | undefined {
+	if (typeof input !== "string") return undefined;
+	const s = input.trim().toLowerCase().charAt(0) as HAlign;
+	return (H_ALIGNS as readonly string[]).includes(s) ? s : undefined;
+}
+
+/** "t" | "m" | "b" (also accepts "top"/"middle"/"bottom"). */
+export function normalizeVAlign(input: unknown): VAlign | undefined {
+	if (typeof input !== "string") return undefined;
+	const s = input.trim().toLowerCase().charAt(0) as VAlign;
+	return (V_ALIGNS as readonly string[]).includes(s) ? s : undefined;
+}
+
 /** Coerce anything into a valid {@link CellStyle}, dropping unknown properties. */
 export function normalizeStyle(input: unknown): CellStyle | undefined {
 	if (!input || typeof input !== "object" || Array.isArray(input)) return undefined;
@@ -107,12 +174,32 @@ export function normalizeStyle(input: unknown): CellStyle | undefined {
 	const bd = normalizeSides(src["bd"]);
 	if (bd) out.bd = bd;
 
+	const nf = normalizeNf(src["nf"]);
+	if (nf) out.nf = nf;
+
+	const ha = normalizeHAlign(src["ha"]);
+	if (ha) out.ha = ha;
+
+	const va = normalizeVAlign(src["va"]);
+	if (va) out.va = va;
+
+	if (src["wrap"] === true || src["wrap"] === 1 || src["wrap"] === "wrap") out.wrap = true;
+
 	return isEmptyStyle(out) ? undefined : out;
 }
 
 export function isEmptyStyle(style: CellStyle | undefined): boolean {
 	if (!style) return true;
-	return !style.b && style.fs === undefined && !style.bg && !style.bd;
+	return (
+		!style.b &&
+		style.fs === undefined &&
+		!style.bg &&
+		!style.bd &&
+		!style.nf &&
+		!style.ha &&
+		!style.va &&
+		!style.wrap
+	);
 }
 
 export interface SheetPage {
@@ -358,7 +445,13 @@ function jnum(n: number): string {
 	return JSON.stringify(n);
 }
 
-/** Fixed sub-key order inside `s`: b, fs, bg, bd. */
+/**
+ * Fixed sub-key order inside `s`: b, fs, bg, bd, nf, ha, va, wrap.
+ *
+ * The 1.2.0 keys are appended AFTER `bd` on purpose: a file written by 1.1.x
+ * and re-saved by this build then differs only in the added tail of each style,
+ * which keeps LiveSync diffs small and makes the change reviewable in git.
+ */
 function serializeStyleBody(style: CellStyle | undefined): string {
 	const s = normalizeStyle(style);
 	if (!s) return "";
@@ -367,6 +460,10 @@ function serializeStyleBody(style: CellStyle | undefined): string {
 	if (s.fs !== undefined) parts.push(`"fs": ${jnum(s.fs)}`);
 	if (s.bg) parts.push(`"bg": ${jstr(s.bg)}`);
 	if (s.bd) parts.push(`"bd": ${jstr(s.bd)}`);
+	if (s.nf) parts.push(`"nf": ${jstr(s.nf)}`);
+	if (s.ha) parts.push(`"ha": ${jstr(s.ha)}`);
+	if (s.va) parts.push(`"va": ${jstr(s.va)}`);
+	if (s.wrap) parts.push('"wrap": true');
 	return parts.length > 0 ? `{ ${parts.join(", ")} }` : "";
 }
 
@@ -452,10 +549,17 @@ function serializePage(page: SheetPage, indent: string): string {
  * Deterministic serialization. Always returns a complete, non-empty document:
  * a doc with no sheets is written as a document with one empty sheet, never
  * as `""` (see the data-loss guard in view.ts).
+ *
+ * The written `version` is ALWAYS {@link CURRENT_VERSION}, whatever the document
+ * says. Writing a v1 file back as v1 was the alternative and it is worse: the
+ * file would then claim a version whose readers are entitled to drop the new
+ * style keys, so an old build could quietly strip formats it cannot see. A
+ * document with a FUTURE version never reaches this function at all - the view
+ * opens it read-only.
  */
 export function serializeSheet(doc: SheetDoc): string {
 	const sheets = doc.sheets && doc.sheets.length > 0 ? doc.sheets : [newSheetPage()];
-	const version = Number.isFinite(doc.version) ? Math.round(doc.version) : CURRENT_VERSION;
+	const version = CURRENT_VERSION;
 	const body = sheets.map((p) => serializePage(p, "    ")).join(",\n");
 	return [
 		"{",

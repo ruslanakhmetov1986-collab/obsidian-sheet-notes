@@ -1,25 +1,43 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
 import {
 	CURRENT_VERSION,
 	FORMAT_ID,
+	MAX_NF_LENGTH,
 	MIN_VALID,
 	SheetFormatError,
 	cellRef,
 	colToName,
+	isEmptyStyle,
 	isSupportedVersion,
 	nameToCol,
 	newSheetDoc,
 	newSheetPage,
 	normalizeColor,
+	normalizeHAlign,
+	normalizeNf,
 	normalizeSides,
 	normalizeStyle,
+	normalizeVAlign,
 	parseRef,
 	parseSheet,
 	serializeSheet,
 } from "./.build/format.mjs";
-import { BORDER_ON, contrastColor, cssToStyle, styleToCss } from "./.build/cellcss.mjs";
+import {
+	BORDER_ON,
+	H_ALIGN_CSS,
+	V_ALIGN_CSS,
+	WRAP_CLASS,
+	WRAP_ON,
+	contrastColor,
+	cssToStyle,
+	styleToCss,
+} from "./.build/cellcss.mjs";
 
 /* ------------------------------------------------------------------ refs */
 
@@ -303,7 +321,10 @@ test("a fill gets a contrasting, non-persisted text colour", () => {
 });
 
 test("cssToStyle ignores declarations we do not manage", () => {
-	assert.equal(cssToStyle("color: red; text-align: center;"), undefined);
+	// `color` is derived from the fill at render time and never read back;
+	// `text-align` became managed in 1.2.0, hence the ha key.
+	assert.deepEqual(cssToStyle("color: red; text-align: center;"), { ha: "c" });
+	assert.equal(cssToStyle("color: red; letter-spacing: 2px;"), undefined);
 	assert.equal(cssToStyle(""), undefined);
 	assert.equal(cssToStyle(null), undefined);
 	assert.deepEqual(cssToStyle("color: red; font-weight: bold;"), { b: true });
@@ -384,7 +405,10 @@ test("version guard: current version is supported", () => {
 });
 
 test("version guard: a future version parses but is not supported", () => {
-	const text = serializeSheet(newSheetDoc()).replace('"version": 1', '"version": 99');
+	const text = serializeSheet(newSheetDoc()).replace(
+		`"version": ${CURRENT_VERSION}`,
+		'"version": 99',
+	);
 	const doc = parseSheet(text);
 	assert.equal(doc.version, 99);
 	assert.equal(isSupportedVersion(doc), false);
@@ -476,4 +500,293 @@ test("formula source is stored, computed results are not", () => {
 	const text = serializeSheet(doc);
 	assert.ok(text.includes('"f": "=SUM(A1:A2)"'));
 	assert.ok(!/"A3": \{ "v"/.test(text), "must not cache the computed result");
+});
+
+/* ================================================================= 1.2.0 ==
+ * Number formats, alignment and wrapping: the four style keys added in this
+ * release. Everything below is about the two invariants that make this file
+ * format worth trusting - the byte order is fixed and a round trip changes
+ * nothing - plus the compatibility promise for files written by 1.1.x.
+ */
+
+test("fixed style sub-key order b, fs, bg, bd, nf, ha, va, wrap", () => {
+	const doc = newSheetDoc();
+	// deliberately inserted in the worst possible order
+	doc.sheets[0].cells = {
+		A1: {
+			v: "x",
+			s: {
+				wrap: true,
+				va: "t",
+				ha: "c",
+				nf: "#,##0.00",
+				bd: "trbl",
+				bg: "#fff2cc",
+				fs: 18,
+				b: true,
+			},
+		},
+	};
+	const line = serializeSheet(doc)
+		.split("\n")
+		.find((l) => l.includes('"A1"'));
+	assert.equal(
+		line.trim(),
+		'"A1": { "v": "x", "s": { "b": true, "fs": 18, "bg": "#fff2cc", "bd": "trbl", ' +
+			'"nf": "#,##0.00", "ha": "c", "va": "t", "wrap": true } }',
+	);
+});
+
+test("the 1.2.0 keys come after bd, so a 1.1.x style only grows a tail", () => {
+	const page = (cells) => ({ ...newSheetPage(), cells });
+	const old = { v: 1, s: { b: true, fs: 14, bg: "#fff2cc", bd: "tb" } };
+	const grown = { v: 1, s: { ...old.s, nf: "0%", ha: "r", va: "b", wrap: true } };
+	const before = serializeSheet({ ...newSheetDoc(), sheets: [page({ A1: old })] });
+	const after = serializeSheet({ ...newSheetDoc(), sheets: [page({ A1: grown })] });
+	const oldLine = before
+		.split("\n")
+		.find((l) => l.includes('"A1"'))
+		.replace(/ \} \}$/, "");
+	const newLine = after.split("\n").find((l) => l.includes('"A1"'));
+	assert.ok(newLine.startsWith(oldLine), `${newLine}\ndoes not extend\n${oldLine}`);
+});
+
+test("every new key round-trips through the file", () => {
+	const doc = newSheetDoc();
+	doc.sheets[0].cells = {
+		A1: { v: 1234.5, s: { nf: "#,##0.00" } },
+		A2: { v: "2026-07-27", s: { nf: "yyyy-mm-dd hh:mm" } },
+		A3: { v: 0.5, s: { nf: "0%", ha: "r" } },
+		A4: { v: "mid", s: { ha: "c", va: "m" } },
+		A5: { v: "top", s: { va: "t" } },
+		A6: { v: "bottom", s: { va: "b" } },
+		A7: { v: "long text", s: { wrap: true } },
+		A8: {
+			v: "all",
+			s: { b: true, fs: 12, bg: "#deebf7", bd: "tb", nf: "0.00", ha: "c", va: "b", wrap: true },
+		},
+	};
+	const text = serializeSheet(doc);
+	const back = parseSheet(text);
+	assert.deepEqual(back.sheets[0].cells, doc.sheets[0].cells);
+	// and re-serializing is byte-identical: determinism holds with the new keys
+	assert.equal(serializeSheet(back), text);
+});
+
+test("a mask containing the characters that break CSS survives the file", () => {
+	// ":" and ";" are exactly why masks are not smuggled through inline CSS.
+	const doc = newSheetDoc();
+	doc.sheets[0].cells = { A1: { v: 1, s: { nf: "yyyy-mm-dd hh:mm" } } };
+	const text = serializeSheet(doc);
+	assert.ok(text.includes('"nf": "yyyy-mm-dd hh:mm"'), text);
+	assert.equal(parseSheet(text).sheets[0].cells.A1.s.nf, "yyyy-mm-dd hh:mm");
+});
+
+test("nf is validated, not trusted", () => {
+	assert.equal(normalizeNf("#,##0.00"), "#,##0.00");
+	assert.equal(normalizeNf("  0%  "), "0%");
+	assert.equal(normalizeNf(""), undefined);
+	assert.equal(normalizeNf("   "), undefined);
+	assert.equal(normalizeNf(42), undefined);
+	assert.equal(normalizeNf(null), undefined);
+	assert.equal(normalizeNf("a".repeat(MAX_NF_LENGTH + 1)), undefined);
+	assert.equal(normalizeNf("0.00\n#,##0"), undefined, "no control characters");
+	assert.equal(normalizeNf("0.00\tx"), undefined, "no control characters");
+});
+
+test("alignment codes are validated, and whole words are accepted", () => {
+	assert.equal(normalizeHAlign("l"), "l");
+	assert.equal(normalizeHAlign("center"), "c");
+	assert.equal(normalizeHAlign("RIGHT"), "r");
+	assert.equal(normalizeHAlign("x"), undefined);
+	assert.equal(normalizeHAlign(""), undefined);
+	assert.equal(normalizeHAlign(3), undefined);
+	assert.equal(normalizeVAlign("top"), "t");
+	assert.equal(normalizeVAlign("m"), "m");
+	assert.equal(normalizeVAlign("bottom"), "b");
+	assert.equal(normalizeVAlign("q"), undefined);
+});
+
+test("normalizeStyle keeps the eight managed properties and drops the rest", () => {
+	assert.deepEqual(
+		normalizeStyle({
+			b: 1,
+			fs: "14",
+			bg: "#FFF",
+			bd: "bt",
+			nf: " 0.00 ",
+			ha: "center",
+			va: "top",
+			wrap: 1,
+			junk: 9,
+			"text-align": "center",
+		}),
+		{ b: true, fs: 14, bg: "#ffffff", bd: "tb", nf: "0.00", ha: "c", va: "t", wrap: true },
+	);
+	// a style that holds nothing but a new key is still a style
+	assert.deepEqual(normalizeStyle({ nf: "0%" }), { nf: "0%" });
+	assert.deepEqual(normalizeStyle({ wrap: true }), { wrap: true });
+	assert.equal(normalizeStyle({ nf: "", wrap: false, ha: "q" }), undefined);
+	assert.equal(isEmptyStyle({ nf: undefined }), true);
+	assert.equal(isEmptyStyle({ wrap: true }), false);
+});
+
+test("a cell carrying only a format is not empty and survives", () => {
+	const doc = newSheetDoc();
+	doc.sheets[0].cells = { C3: { s: { nf: "0%" } }, C4: { s: { wrap: true } } };
+	const text = serializeSheet(doc);
+	assert.ok(text.includes('"C3": { "s": { "nf": "0%" } }'), text);
+	assert.ok(text.includes('"C4": { "s": { "wrap": true } }'), text);
+	assert.deepEqual(parseSheet(text).sheets[0].cells, doc.sheets[0].cells);
+});
+
+/* -------------------------------------------------- v1 files keep working */
+
+const V1_FILE = [
+	"{",
+	'  "format": "leovale-sheet",',
+	'  "version": 1,',
+	'  "sheets": [',
+	"    {",
+	'      "name": "Sheet1",',
+	'      "rows": 100,',
+	'      "cols": 26,',
+	'      "colWidths": {',
+	'        "0": 180',
+	"      },",
+	'      "rowHeights": {},',
+	'      "merges": {},',
+	'      "cells": {',
+	'        "A1": { "v": "Item", "s": { "b": true, "fs": 18, "bg": "#fff2cc", "bd": "trbl" } },',
+	'        "B2": { "v": 3 },',
+	'        "C2": { "f": "=B2*2" }',
+	"      }",
+	"    }",
+	"  ]",
+	"}",
+	"",
+].join("\n");
+
+test("a version 1 file loads with everything in it", () => {
+	const doc = parseSheet(V1_FILE);
+	assert.equal(doc.version, 1);
+	assert.equal(isSupportedVersion(doc), true);
+	assert.deepEqual(doc.sheets[0].cells, {
+		A1: { v: "Item", s: { b: true, fs: 18, bg: "#fff2cc", bd: "trbl" } },
+		B2: { v: 3 },
+		C2: { f: "=B2*2" },
+	});
+	assert.deepEqual(doc.sheets[0].colWidths, { 0: 180 });
+});
+
+test("writing always produces version 2, whatever the document claims", () => {
+	// The point of the bump: a 1.1.x build must refuse to WRITE a file that can
+	// carry style keys it would silently drop, so every save is a v2 save.
+	const written = serializeSheet(parseSheet(V1_FILE));
+	assert.match(written, /^\{\n  "format": "leovale-sheet",\n  "version": 2,/);
+	assert.equal(parseSheet(written).version, CURRENT_VERSION);
+	assert.equal(CURRENT_VERSION, 2);
+
+	// nothing else about the document changed: exactly one line differs
+	const lines = written.split("\n");
+	const diff = V1_FILE.split("\n").filter((l, i) => l !== lines[i]);
+	assert.deepEqual(diff, ['  "version": 1,']);
+});
+
+test("a v1 file without the new keys does not grow them on save", () => {
+	const doc = parseSheet(V1_FILE);
+	const out = serializeSheet(doc);
+	for (const key of ['"nf"', '"ha"', '"va"', '"wrap"']) {
+		assert.ok(!out.includes(key), `${key} appeared out of nowhere:\n${out}`);
+	}
+});
+
+test("a version 2 file is supported, a version 3 file is not", () => {
+	assert.equal(isSupportedVersion(parseSheet(serializeSheet(newSheetDoc()))), true);
+	const future = parseSheet(serializeSheet(newSheetDoc()).replace('"version": 2', '"version": 3'));
+	assert.equal(isSupportedVersion(future), false);
+});
+
+/* ---------------------------------------- new keys <-> engine inline CSS */
+
+test("styleToCss always writes the alignment and wrap properties too", () => {
+	const css = styleToCss({});
+	for (const prop of ["text-align", "vertical-align", "overflow-wrap"]) {
+		assert.ok(css.includes(prop + ":"), `${prop} missing from ${css}`);
+	}
+	// the "off" values have to reproduce the grid's own look
+	assert.ok(css.includes("text-align: left"), css);
+	assert.ok(css.includes("vertical-align: inherit"), css);
+	assert.ok(css.includes("overflow-wrap: normal"), css);
+});
+
+test("alignment maps to real CSS keywords", () => {
+	assert.deepEqual(H_ALIGN_CSS, { l: "left", c: "center", r: "right" });
+	assert.deepEqual(V_ALIGN_CSS, { t: "top", m: "middle", b: "bottom" });
+	assert.ok(styleToCss({ ha: "c" }).includes("text-align: center"));
+	assert.ok(styleToCss({ ha: "r" }).includes("text-align: right"));
+	assert.ok(styleToCss({ va: "t" }).includes("vertical-align: top"));
+	assert.ok(styleToCss({ va: "m" }).includes("vertical-align: middle"));
+	assert.ok(styleToCss({ wrap: true }).includes(`overflow-wrap: ${WRAP_ON}`));
+});
+
+test("styleToCss / cssToStyle round-trip for every new combination", () => {
+	const cases = [
+		{ ha: "c" },
+		{ ha: "r" },
+		{ va: "t" },
+		{ va: "m" },
+		{ va: "b" },
+		{ wrap: true },
+		{ ha: "c", va: "m", wrap: true },
+		{ b: true, fs: 10, bg: "#434343", bd: "tb", ha: "r", va: "b", wrap: true },
+	];
+	for (const style of cases) {
+		const css = styleToCss(style);
+		const back = cssToStyle(css) ?? {};
+		assert.deepEqual(back, style, `round-trip failed for ${JSON.stringify(style)} -> ${css}`);
+		assert.equal(styleToCss(back), css, "CSS generation is deterministic");
+	}
+});
+
+test("text-align: left is the engine's default and never becomes an ha key", () => {
+	// The engine writes `text-align: left` onto EVERY cell it creates (that is
+	// how the columns are configured), so reading it back as `ha: "l"` would put
+	// an alignment key on all 2600 cells of a fresh sheet.
+	assert.equal(cssToStyle("text-align: left;"), undefined);
+	assert.equal(
+		cssToStyle("text-align: left; vertical-align: inherit; overflow-wrap: normal;"),
+		undefined,
+	);
+	// the value itself stays legal, it just renders as the default
+	assert.deepEqual(normalizeStyle({ ha: "l" }), { ha: "l" });
+	assert.ok(styleToCss({ ha: "l" }).includes("text-align: left"));
+});
+
+test("the engine's own white-space is not mistaken for the wrap flag", () => {
+	// The engine sets `white-space: pre-wrap` by itself on any cell holding more
+	// than 200 characters. That must not become a persisted `wrap`.
+	assert.equal(cssToStyle("white-space: pre-wrap;"), undefined);
+	assert.deepEqual(cssToStyle(`white-space: pre-wrap; overflow-wrap: ${WRAP_ON};`), { wrap: true });
+});
+
+test("nf is deliberately absent from the CSS mapping", () => {
+	// It travels in a data attribute instead; see the header of cellcss.ts.
+	const css = styleToCss({ nf: "yyyy-mm-dd hh:mm", ha: "c" });
+	assert.ok(!css.includes("yyyy"), css);
+	assert.deepEqual(cssToStyle(css), { ha: "c" });
+	// every declaration is one clean `prop: value` pair, which is all the
+	// engine's own style parser can handle (it splits on ";" and ":")
+	const decls = css.split(";").filter((d) => d.trim().length > 0);
+	assert.equal(decls.length, (css.match(/:/g) ?? []).length);
+});
+
+test("the wrap class the engine adds is the one the stylesheet styles", () => {
+	const here = path.dirname(fileURLToPath(import.meta.url));
+	const theme = fs.readFileSync(path.join(here, "..", "src", "styles", "theme.css"), "utf8");
+	assert.ok(theme.includes(`td.${WRAP_CLASS}`), `theme.css has no rule for td.${WRAP_CLASS}`);
+	assert.match(theme, new RegExp(`td\\.${WRAP_CLASS}[^{]*\\{[^}]*white-space:\\s*pre-wrap`));
+	// the mobile safe-area fix has to use Obsidian's own variable, because
+	// env(safe-area-inset-bottom) resolves to 0px in its Android WebView
+	assert.match(theme, /padding-bottom: calc\(12px \+ var\(--safe-area-inset-bottom/);
 });

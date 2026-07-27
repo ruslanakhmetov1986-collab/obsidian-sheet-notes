@@ -7,6 +7,8 @@ import {
 	normalizePath,
 } from "obsidian";
 import { SheetView, VIEW_TYPE_SHEET } from "./view";
+import { releaseEngineGlobals } from "./engine";
+import { registerSheetEmbeds } from "./embed";
 import { newSheetDoc, serializeSheet } from "./format";
 import { t } from "./i18n";
 
@@ -77,6 +79,10 @@ export default class LeovaleSheetsPlugin extends Plugin {
 		this.claimExtension(FALLBACK_EXT);
 		this.claimExtension(CSV_EXT);
 
+		// `![[file.sheet]]` in a note, plus the ```sheet code block. Read-only,
+		// mounted by a post-processor over Obsidian's generic file card.
+		registerSheetEmbeds(this);
+
 		this.addCommand({
 			id: "create-sheet",
 			name: "Create new spreadsheet",
@@ -134,6 +140,26 @@ export default class LeovaleSheetsPlugin extends Plugin {
 	onunload(): void {
 		// Deliberately no detach() of open leaves: that would destroy the
 		// user's layout. Open .sheet tabs show "no view of type" until re-enable.
+		//
+		// The GRIDS inside them do have to go, though: the engine keeps handlers on
+		// `document` and releases them only when its last instance is destroyed, so
+		// a plugin reload with a sheet tab open would leave a second live set of
+		// them behind. See SheetView.releaseEngine().
+		for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_SHEET)) {
+			const view = leaf.view;
+			if (view instanceof SheetView) {
+				try {
+					view.releaseEngine();
+				} catch (e) {
+					console.error("leovale-sheets: releasing a grid on unload failed", e);
+				}
+			}
+		}
+		// And the handlers this copy of the engine put on `document`, which no
+		// individual grid teardown is allowed to remove any more. Deliberately not
+		// awaited (onunload is synchronous): the module's closures outlive the
+		// plugin object, so the removal still lands on the right functions.
+		void releaseEngineGlobals();
 	}
 }
 

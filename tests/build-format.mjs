@@ -2,7 +2,15 @@
 import esbuild from "esbuild";
 
 await esbuild.build({
-	entryPoints: ["src/format.ts", "src/cellcss.ts", "src/csv.ts", "src/formulabar.ts", "src/i18n.ts"],
+	entryPoints: [
+		"src/format.ts",
+		"src/cellcss.ts",
+		"src/csv.ts",
+		"src/formulabar.ts",
+		"src/i18n.ts",
+		"src/numfmt.ts",
+		"src/embedsrc.ts",
+	],
 	bundle: true,
 	format: "esm",
 	target: "es2021",

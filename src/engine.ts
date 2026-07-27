@@ -14,7 +14,8 @@ import jspreadsheet from "jspreadsheet-ce";
 import "jsuites/dist/jsuites.css";
 import "jspreadsheet-ce/dist/jspreadsheet.css";
 import type { CellValue as JssCellValue, WorksheetInstance } from "jspreadsheet-ce";
-import { cssToStyle, styleToCss } from "./cellcss";
+import { WRAP_CLASS, WRAP_ON, cssToStyle, styleToCss } from "./cellcss";
+import { formatValue } from "./numfmt";
 import {
 	CURRENT_VERSION,
 	FORMAT_ID,
@@ -26,6 +27,7 @@ import {
 	cellRef,
 	isEmptyStyle,
 	newSheetPage,
+	normalizeNf,
 	normalizeStyle,
 	parseRef,
 } from "./format";
@@ -34,6 +36,21 @@ export { cssToStyle, styleToCss };
 
 export const ROOT_CLASS = "leovale-sheet-root";
 export const DEFAULT_COL_WIDTH = 100;
+
+/**
+ * Where a cell's number/date mask lives at runtime.
+ *
+ * A data attribute on the `<td>`, not the inline style (a mask can contain `:`
+ * and `;`, which the engine's own style parser splits on) and not a map keyed by
+ * A1 ref (that would go stale the moment a row is inserted). An attribute rides
+ * along with the element exactly like the inline style does, so the engine's
+ * row/column bookkeeping shifts it for free.
+ */
+export const NF_ATTR = "data-nf";
+/** The engine's own rendering of the cell, kept so formatting is reversible. */
+const NF_SRC_ATTR = "data-nf-src";
+/** What we last wrote, so a value change can be told apart from our own output. */
+const NF_OUT_ATTR = "data-nf-out";
 
 /* ------------------------------------------------------------- mapping */
 
@@ -128,6 +145,52 @@ export interface EngineOptions {
 	readOnly?: boolean;
 }
 
+/**
+ * Take the engine's document-level handlers off `document` for good.
+ *
+ * Why this exists. The engine installs `keydown` and `mousedown` handlers on
+ * `document` when its first instance is created, and only removes them from
+ * inside `jspreadsheet.destroy(el, true)`. Each LOAD of the plugin gets its own
+ * copy of the bundled engine, with its own handler functions and its own
+ * `current` pointer, and every copy's `mousedown` handler happily adopts
+ * whatever grid was clicked. So a leftover copy is not idle: it moves the live
+ * selection as well. Measured in the sandbox after ten plugin reloads with a
+ * sheet tab open: one ArrowRight moved eleven columns.
+ *
+ * There is no exported `destroyEvents`, so the only way to reach it is to hand
+ * `destroy()` a live instance with the flag set. A 1x1 throwaway grid is that
+ * instance; it never enters the DOM the user sees.
+ */
+export async function releaseEngineGlobals(): Promise<void> {
+	const host = document.createElement("div") as HTMLDivElement & { spreadsheet?: unknown };
+	try {
+		jspreadsheet(host, {
+			worksheets: [{ minDimensions: [1, 1] }],
+			toolbar: false,
+			about: false,
+		} as never);
+		// The factory is ASYNC underneath: it returns the worksheet array straight
+		// away but assigns `el.spreadsheet` in a promise continuation, and
+		// `destroy()` does nothing at all without that property. Destroying too
+		// early is worse than not trying: the instance has already installed the
+		// handlers, so a no-op teardown ADDS a set instead of removing one. Which
+		// is exactly what the first version of this function did.
+		for (let i = 0; i < 25 && !host.spreadsheet; i++) {
+			await new Promise((resolve) => setTimeout(resolve, 10));
+		}
+		if (!host.spreadsheet) {
+			console.warn("leovale-sheets: the throwaway grid never came up; handlers left in place");
+			return;
+		}
+		jspreadsheet.destroy(host as never, true as never);
+		(jspreadsheet as unknown as { current?: unknown }).current = null;
+	} catch (e) {
+		console.warn("leovale-sheets: could not release the engine's global handlers", e);
+	} finally {
+		host.remove();
+	}
+}
+
 export class SheetEngine {
 	private root: HTMLElement;
 	private host: HTMLElement;
@@ -155,7 +218,12 @@ export class SheetEngine {
 		this.root = parent.createDiv({ cls: ROOT_CLASS });
 		this.host = this.root.createDiv({ cls: "leovale-sheet-host" });
 
+		// Decor (masked text, wrap class) is re-applied on EVERY engine event,
+		// read-only documents and load-time replays included: the engine rewrites
+		// a cell's text from the raw value whenever it changes, which silently
+		// undoes the mask. Autosave stays gated on the flags.
 		const notify = () => {
+			this.syncDecor();
 			if (!this.readOnly && !this.suspend) opts.onChange();
 		};
 		this.notify = notify;
@@ -194,7 +262,28 @@ export class SheetEngine {
 		} as never);
 
 		this.applyStoredRowHeights(doc);
+		this.applyStoredMasks(doc);
+		this.syncDecor();
 		this.observeResize();
+	}
+
+	/**
+	 * Replay the stored `nf` masks onto the cells. Suppressed like the row
+	 * heights: reopening a file must not mark it modified.
+	 */
+	private applyStoredMasks(doc: SheetDoc): void {
+		this.suspend = true;
+		try {
+			doc.sheets.forEach((page, i) => {
+				for (const [ref, cell] of Object.entries(page.cells)) {
+					const nf = normalizeNf(cell.s?.nf);
+					if (!nf) continue;
+					this.cellElement(ref, i)?.setAttribute(NF_ATTR, nf);
+				}
+			});
+		} finally {
+			this.suspend = false;
+		}
 	}
 
 	/**
@@ -252,6 +341,90 @@ export class SheetEngine {
 
 	get isReadOnly(): boolean {
 		return this.readOnly;
+	}
+
+	/* --------------------------------------------------- cells and their decor */
+
+	/** The live `<td>` of a cell, or null when the ref is outside the grid. */
+	private cellElement(ref: string, sheet = 0): HTMLElement | null {
+		const ws = this.worksheets?.[sheet];
+		if (!ws) return null;
+		let coords;
+		try {
+			coords = parseRef(ref);
+		} catch {
+			return null;
+		}
+		const records = (ws as unknown as { records?: { element?: HTMLElement }[][] }).records;
+		return records?.[coords.row]?.[coords.col]?.element ?? null;
+	}
+
+	/** Number/date mask of a cell, as stored on its element. */
+	getNfAt(ref: string): string | undefined {
+		return normalizeNf(this.cellElement(ref)?.getAttribute(NF_ATTR));
+	}
+
+	/**
+	 * Re-render the text of one masked cell.
+	 *
+	 * The engine owns the cell's text: on every value change it writes the raw
+	 * value (or the computed formula result) into the element. So the mask is
+	 * applied on top, and the pre-mask text is remembered in an attribute. Which
+	 * of the two is the current truth is decided by comparing the element's text
+	 * with our last output: if they differ, the engine has re-rendered and its
+	 * text wins.
+	 */
+	private decorateCell(el: HTMLElement): void {
+		// An open editor is an <input> inside the cell; writing text would eat it.
+		if (el.classList.contains("editor") || el.childElementCount > 0) return;
+		const mask = normalizeNf(el.getAttribute(NF_ATTR));
+		if (!mask) {
+			this.undecorateCell(el);
+			return;
+		}
+		const shown = el.textContent ?? "";
+		const last = el.getAttribute(NF_OUT_ATTR);
+		const kept = el.getAttribute(NF_SRC_ATTR);
+		const raw = last !== null && shown === last && kept !== null ? kept : shown;
+		const out = formatValue(raw, mask);
+		if (out !== shown) el.textContent = out;
+		el.setAttribute(NF_SRC_ATTR, raw);
+		el.setAttribute(NF_OUT_ATTR, out);
+	}
+
+	/** Put the engine's own rendering back and forget the mask bookkeeping. */
+	private undecorateCell(el: HTMLElement): void {
+		const last = el.getAttribute(NF_OUT_ATTR);
+		const kept = el.getAttribute(NF_SRC_ATTR);
+		if (last !== null && kept !== null && (el.textContent ?? "") === last) {
+			el.textContent = kept;
+		}
+		el.removeAttribute(NF_SRC_ATTR);
+		el.removeAttribute(NF_OUT_ATTR);
+	}
+
+	/**
+	 * Bring every decorated cell back in step with the engine: masked text and
+	 * the wrap class (the class does the wrapping, because the engine overwrites
+	 * `style.whiteSpace` itself - see cellcss.ts).
+	 *
+	 * Cheap by construction: it only ever looks at cells that carry a mask, a
+	 * wrap marker or a stale wrap class, not at the whole grid.
+	 */
+	syncDecor(): void {
+		const host = this.host;
+		if (!host.isConnected && !host.firstChild) return;
+		try {
+			host.querySelectorAll<HTMLElement>(`td[${NF_ATTR}]`).forEach((el) => this.decorateCell(el));
+			host.querySelectorAll<HTMLElement>(`td.${WRAP_CLASS}`).forEach((el) => {
+				if (!el.style.overflowWrap.includes(WRAP_ON)) el.classList.remove(WRAP_CLASS);
+			});
+			host
+				.querySelectorAll<HTMLElement>(`td[style*="${WRAP_ON}"]`)
+				.forEach((el) => el.classList.add(WRAP_CLASS));
+		} catch (e) {
+			console.error("leovale-sheets: decor sync failed", e);
+		}
 	}
 
 	/* --------------------------------------------------------- selection */
@@ -325,15 +498,19 @@ export class SheetEngine {
 		this.notify();
 	}
 
-	/** Current normalized style of a single cell. */
+	/** Current normalized style of a single cell, mask included. */
 	getStyleAt(ref: string): CellStyle {
 		const ws = this.first();
 		if (!ws) return {};
+		let style: CellStyle = {};
 		try {
-			return cssToStyle(ws.getStyle(ref) as string) ?? {};
+			style = cssToStyle(ws.getStyle(ref) as string) ?? {};
 		} catch {
-			return {};
+			style = {};
 		}
+		const nf = this.getNfAt(ref);
+		if (nf) style.nf = nf;
+		return style;
 	}
 
 	/**
@@ -348,9 +525,11 @@ export class SheetEngine {
 		const ws = this.first();
 		if (!ws || this.readOnly || refs.length === 0) return;
 		const update: Record<string, string> = {};
+		const masks: [string, string | undefined][] = [];
 		refs.forEach((ref, i) => {
 			const next = normalizeStyle(patch(this.getStyleAt(ref), ref, i)) ?? {};
 			update[ref] = styleToCss(next);
+			masks.push([ref, next.nf]);
 		});
 		try {
 			(ws.setStyle as (o: Record<string, string>, k?: null, v?: null, force?: boolean) => void)(
@@ -363,12 +542,82 @@ export class SheetEngine {
 			console.error("leovale-sheets: setStyle failed", e);
 			return;
 		}
+		// `nf` is not CSS, so it is written separately (see NF_ATTR).
+		for (const [ref, mask] of masks) {
+			const el = this.cellElement(ref);
+			if (!el) continue;
+			if (mask) {
+				el.setAttribute(NF_ATTR, mask);
+			} else if (el.hasAttribute(NF_ATTR)) {
+				el.removeAttribute(NF_ATTR);
+				this.undecorateCell(el);
+			}
+		}
 		this.notify();
 	}
 
 	focus(): void {
 		const first = this.host.querySelector<HTMLElement>("tbody td[data-x]");
 		first?.click();
+	}
+
+	/* ------------------------------------------------------------- cropping */
+
+	/** Grid size as the engine currently sees it. */
+	dimensions(): { rows: number; cols: number } {
+		const ws = this.first();
+		const data = ((ws as unknown as { options?: { data?: unknown[][] } })?.options?.data ??
+			[]) as unknown[][];
+		return { rows: data.length, cols: (data[0] as unknown[] | undefined)?.length ?? 0 };
+	}
+
+	/**
+	 * Bounding box of the cells that actually hold something, as row/column
+	 * indexes. An embed shows this instead of 100 empty rows.
+	 */
+	usedRange(): { r1: number; c1: number; r2: number; c2: number } {
+		const ws = this.first();
+		const data = ((ws as unknown as { options?: { data?: unknown[][] } })?.options?.data ??
+			[]) as unknown[][];
+		let r2 = 0;
+		let c2 = 0;
+		for (let r = 0; r < data.length; r++) {
+			const row = data[r];
+			if (!Array.isArray(row)) continue;
+			for (let c = 0; c < row.length; c++) {
+				const v = row[c];
+				if (v === null || v === undefined || v === "") continue;
+				if (r > r2) r2 = r;
+				if (c > c2) c2 = c;
+			}
+		}
+		return { r1: 0, c1: 0, r2, c2 };
+	}
+
+	/**
+	 * Show only a rectangle of the grid, hiding everything around it.
+	 *
+	 * Rows and columns outside the range are HIDDEN rather than never created:
+	 * a formula in the visible range may well reference a cell outside it, and
+	 * a grid built to the size of the range would compute that as zero.
+	 */
+	cropTo(range: { r1: number; c1: number; r2: number; c2: number }): void {
+		const ws = this.first();
+		if (!ws) return;
+		const { rows, cols } = this.dimensions();
+		const hideRows: number[] = [];
+		const hideCols: number[] = [];
+		for (let r = 0; r < rows; r++) if (r < range.r1 || r > range.r2) hideRows.push(r);
+		for (let c = 0; c < cols; c++) if (c < range.c1 || c > range.c2) hideCols.push(c);
+		this.suspend = true;
+		try {
+			if (hideRows.length > 0) ws.hideRow(hideRows);
+			if (hideCols.length > 0) ws.hideColumn(hideCols);
+		} catch (e) {
+			console.error("leovale-sheets: crop failed", e);
+		} finally {
+			this.suspend = false;
+		}
 	}
 
 	/**
@@ -439,6 +688,21 @@ export class SheetEngine {
 				page.cells[ref] = cell;
 			}
 
+			// Masks live on the elements for the same reason, one attribute per cell.
+			const records = (ws as unknown as { records?: { element?: HTMLElement }[][] }).records ?? [];
+			for (let r = 0; r < records.length; r++) {
+				const row = records[r] ?? [];
+				for (let c = 0; c < row.length; c++) {
+					const nf = normalizeNf(row[c]?.element?.getAttribute(NF_ATTR));
+					if (!nf) continue;
+					if (r >= page.rows || c >= page.cols) continue;
+					const ref = cellRef(r, c);
+					const cell = page.cells[ref] ?? {};
+					cell.s = { ...(cell.s ?? {}), nf };
+					page.cells[ref] = cell;
+				}
+			}
+
 			const columns = (opts["columns"] as { width?: number | string }[] | undefined) ?? [];
 			columns.forEach((col, c) => {
 				const w = typeof col?.width === "string" ? parseInt(col.width, 10) : col?.width;
@@ -482,13 +746,45 @@ export class SheetEngine {
 		};
 	}
 
+	/**
+	 * Abandon an open in-cell editor WITHOUT committing it.
+	 *
+	 * Called before teardown. The engine's own `closeEditor(cell, true)` runs from
+	 * a document-level mousedown, so an editor left open while the view reloads
+	 * is a live value waiting to be written into whatever document is mounted
+	 * next. Discarding it is the only safe answer: the user's keystrokes are not
+	 * lost, they were never committed in the first place.
+	 */
+	discardOpenEditor(): void {
+		const ws = this.first() as unknown as {
+			edition?: [HTMLTableCellElement, string, string, string] | null;
+			closeEditor?: (cell: HTMLTableCellElement, save: boolean) => void;
+		} | null;
+		const cell = ws?.edition?.[0];
+		if (!ws || !cell) return;
+		try {
+			ws.closeEditor?.(cell, false);
+		} catch (e) {
+			console.error("leovale-sheets: closing the editor failed", e);
+		}
+	}
+
 	destroy(): void {
+		this.discardOpenEditor();
 		this.resizeObserver?.disconnect();
 		this.resizeObserver = null;
 		try {
-			// `true` also removes the document-level key/mouse handlers, otherwise
-			// the grid keeps eating Obsidian hotkeys after the tab is closed.
-			jspreadsheet.destroy(this.host as never, true);
+			// NOTE the `false`: the document-level key/mouse handlers are NOT removed
+			// here. They are shared by every instance of the engine, and since 1.2.0
+			// an embedded sheet in a note is a second one, so tearing this instance
+			// down with `true` would leave the other grid deaf to the mouse. They are
+			// released once, for good, when the plugin unloads
+			// ({@link releaseEngineGlobals}).
+			jspreadsheet.destroy(this.host as never, false as never);
+			// What those leftover handlers act on is the engine's `current` pointer.
+			// Clearing it is what stops them from eating Obsidian's own hotkeys once
+			// the last grid is gone; any click on a live grid sets it again.
+			(jspreadsheet as unknown as { current?: unknown }).current = null;
 		} catch (e) {
 			console.error("leovale-sheets: engine destroy failed", e);
 		}

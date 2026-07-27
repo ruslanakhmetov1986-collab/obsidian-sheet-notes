@@ -17,7 +17,14 @@ export const UDATA = path.join(SANDBOX, "udata");
 export const VAULT = path.join(SANDBOX, "test-vault");
 export const PLUGIN_DIR = path.join(VAULT, ".obsidian", "plugins", "leovale-sheets");
 export const SHOTS = path.join(PROJECT_ROOT, "tests", "shots");
-export const CDP_PORT = 9333;
+/**
+ * CDP port of the SANDBOX instance. 9333 by default; 9222 is the user's real
+ * Obsidian and is never touched. `SHEETS_CDP_PORT` overrides it, which is not a
+ * luxury: a leftover `adb forward tcp:9333` (Obsidian on a phone/tablet, also
+ * debuggable over CDP) squats exactly this port, and attaching to that would
+ * write test files into a real vault. See {@link assertSandboxTarget}.
+ */
+export const CDP_PORT = Number(process.env.SHEETS_CDP_PORT) || 9333;
 export const PLUGIN_ID = "leovale-sheets";
 export const OBSIDIAN_EXE = "C:\\Program Files\\Obsidian\\Obsidian.exe";
 
@@ -113,21 +120,66 @@ async function portAlive(port) {
 	}
 }
 
+/**
+ * Refuse to drive anything that is not a DESKTOP Obsidian we launched.
+ *
+ * Desktop Obsidian serves its window from `app://obsidian.md/index.html`; the
+ * mobile app serves `http://localhost/`. So an `adb forward tcp:9333` to a
+ * phone/tablet looks exactly like a live sandbox to `portAlive()`, and the test
+ * would happily create `Untitled.sheet` in the user's real vault. Verified
+ * failure mode: 9333 was an adb forward to a tablet whose vault is not ours.
+ */
+export async function assertSandboxTarget(port = CDP_PORT) {
+	let targets = [];
+	try {
+		targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
+	} catch (e) {
+		throw new Error(`CDP port ${port} did not answer /json/list: ${e.message}`);
+	}
+	const pages = targets.filter((t) => t.type === "page");
+	if (pages.some((t) => t.url === "app://obsidian.md/index.html")) return true;
+	throw new Error(
+		`CDP port ${port} is not a desktop Obsidian sandbox (pages: ` +
+			`${pages.map((t) => `${t.url} "${t.title}"`).join(", ") || "none"}). ` +
+			`An "adb forward tcp:${port}" to a phone or tablet looks the same from ` +
+			`outside and its vault is REAL. Free the port or set SHEETS_CDP_PORT.`,
+	);
+}
+
 export async function launchSandbox({ fresh = false } = {}) {
 	if (fresh) killSandbox();
-	if (await portAlive(CDP_PORT)) return "already-running";
+	if (await portAlive(CDP_PORT)) {
+		await assertSandboxTarget(CDP_PORT);
+		return "already-running";
+	}
 
 	seedSandbox();
 	const child = spawn(
 		OBSIDIAN_EXE,
-		[`--user-data-dir=${UDATA}`, `--remote-debugging-port=${CDP_PORT}`],
+		[
+			`--user-data-dir=${UDATA}`,
+			`--remote-debugging-port=${CDP_PORT}`,
+			// Without these, a sandbox window that ends up BEHIND other windows is
+			// reported as `document.visibilityState === "hidden"` by Chromium's
+			// native occlusion tracking. Rendering then stops, requestAnimationFrame
+			// never fires, and every Playwright click times out on "waiting for
+			// element to be stable" - with the grid perfectly present in the DOM.
+			// Verified failure mode, and the reason the suite passed only when the
+			// window happened to be on top.
+			"--disable-features=CalculateNativeWinOcclusion",
+			"--disable-backgrounding-occluded-windows",
+			"--disable-renderer-backgrounding",
+		],
 		{ detached: true, stdio: "ignore" },
 	);
 	child.unref();
 
 	const deadline = Date.now() + 90_000;
 	while (Date.now() < deadline) {
-		if (await portAlive(CDP_PORT)) return "launched";
+		if (await portAlive(CDP_PORT)) {
+			await assertSandboxTarget(CDP_PORT);
+			return "launched";
+		}
 		await new Promise((r) => setTimeout(r, 1000));
 	}
 	throw new Error(`sandbox Obsidian did not expose CDP on ${CDP_PORT} within 90 s`);

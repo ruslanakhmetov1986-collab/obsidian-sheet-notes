@@ -30,6 +30,17 @@ export const JSON_EXTENSIONS = ["sheet", "lsheet"];
 const SAVE_DEBOUNCE_MS = 1500;
 
 /**
+ * How long after a load the document refuses to become dirty.
+ *
+ * Mounting a grid fires a lot of events, and a straggler from the OUTGOING
+ * document (a blur from a focused formula bar, an engine editor closing) can
+ * still arrive after the new one is on screen. Opening a file must never, ever
+ * change it, so anything that asks for a save inside this window is dropped.
+ * A human cannot type in the first 250 ms of a view they just opened.
+ */
+const LOAD_QUIET_MS = 250;
+
+/**
  * Spreadsheet view for `.sheet` files.
  *
  * NOTE ON MEMBER NAMES: every field below is prefixed with `sheet`. `TextFileView`
@@ -49,6 +60,9 @@ export class SheetView extends TextFileView {
 	private sheetDirty = false;
 	private sheetSaveTimer: number | null = null;
 	private sheetReadOnly = false;
+	/** True while a document is being mounted; see {@link LOAD_QUIET_MS}. */
+	private sheetLoading = false;
+	private sheetLoadTimer: number | null = null;
 	/** `.sheet`/`.lsheet` keep JSON; `.csv` keeps CSV. Decided per opened file. */
 	private sheetMode: SheetMode = "sheet";
 	/** Delimiter sniffed from the CSV we loaded; preserved on every write. */
@@ -78,6 +92,7 @@ export class SheetView extends TextFileView {
 
 	setViewData(data: string, clear: boolean): void {
 		if (clear) this.clear();
+		this.beginLoad();
 
 		const ext = (this.file?.extension ?? "").toLowerCase();
 		this.sheetMode = JSON_EXTENSIONS.includes(ext) || ext === "" ? "sheet" : "csv";
@@ -167,6 +182,40 @@ export class SheetView extends TextFileView {
 		this.sheetLastGood = null;
 	}
 
+	/** Discard an editor that is open, so it cannot commit into the next file. */
+	private discardPendingEdits(): void {
+		this.sheetEngine?.discardOpenEditor();
+	}
+
+	/**
+	 * Tear the grid down without touching the leaf. Called when the PLUGIN is
+	 * unloaded (disabled, or replaced by an update).
+	 *
+	 * The leaf is deliberately left alone - closing the user's tabs in onunload
+	 * would rearrange their workspace - but the engine must go, because the grid
+	 * engine keeps key and mouse handlers on `document` and only drops them when
+	 * its last instance is destroyed. Leaving them behind means the NEXT load of
+	 * the plugin adds a second set, and then a third: every arrow key then moves
+	 * the selection by as many cells as there have been reloads. Verified in the
+	 * sandbox after ten reloads: one press jumped eleven columns.
+	 *
+	 * Pending edits are serialized first, so disabling the plugin cannot lose the
+	 * last 1.5 seconds of typing: `getViewData()` refreshes the known-good bytes,
+	 * which is what Obsidian will ask for afterwards.
+	 */
+	releaseEngine(): void {
+		try {
+			if (this.sheetDirty && !this.sheetReadOnly) {
+				this.getViewData();
+				this.requestSave();
+			}
+		} catch (e) {
+			console.error("leovale-sheets: could not flush before releasing the grid", e);
+		}
+		this.cancelScheduledSave();
+		this.destroyEngine();
+	}
+
 	/* ----------------------------------------------------------- rendering */
 
 	private renderSheet(doc: SheetDoc): void {
@@ -232,6 +281,10 @@ export class SheetView extends TextFileView {
 	}
 
 	private destroyEngine(): void {
+		// Order matters: the formula bar is disarmed and the in-cell editor is
+		// dropped BEFORE anything is detached, so no straggling blur or editor
+		// close can write into the document that is being mounted next.
+		this.discardPendingEdits();
 		if (this.sheetFormulaBar) {
 			try {
 				this.sheetFormulaBar.destroy();
@@ -261,8 +314,28 @@ export class SheetView extends TextFileView {
 
 	/* ------------------------------------------------------------ autosave */
 
+	/**
+	 * Open the quiet window in which the document cannot become dirty. Any
+	 * pending save is cancelled too: it can only belong to the document that is
+	 * being replaced, whose bytes were already flushed by onUnloadFile.
+	 */
+	private beginLoad(): void {
+		this.sheetLoading = true;
+		this.cancelScheduledSave();
+		if (this.sheetLoadTimer !== null) window.clearTimeout(this.sheetLoadTimer);
+		this.sheetLoadTimer = window.setTimeout(() => {
+			this.sheetLoadTimer = null;
+			this.sheetLoading = false;
+		}, LOAD_QUIET_MS);
+	}
+
 	private scheduleSave(): void {
 		if (this.sheetReadOnly) return;
+		if (this.sheetLoading) {
+			// Not ours: an event from the document we just replaced.
+			console.debug("leovale-sheets: ignoring a change during load");
+			return;
+		}
 		this.sheetDirty = true;
 		this.cancelScheduledSave();
 		this.sheetSaveTimer = window.setTimeout(() => {

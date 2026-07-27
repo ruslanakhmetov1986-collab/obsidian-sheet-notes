@@ -43,6 +43,10 @@ need those, use it. The differences below are the reasons this plugin exists.
 
 ![The same sheet in the dark theme](tests/shots/04-dark.png)
 
+![A sheet embedded in a note: caption, formats, a cropped plain range](tests/shots/12-embed-light.png)
+
+![The same note in the dark theme](tests/shots/13-embed-dark.png)
+
 ![Fill colour palette](tests/shots/06-palette-open-light.png)
 
 ![Tablet layout: 44 px controls, frozen row numbers](tests/shots/08-mobile-light.png)
@@ -59,9 +63,14 @@ covered by the Android navigation bar, and the formula bar makes long formulas
 editable. Some touch interactions are still rough, see Limitations. Phones are
 untested.
 
-The interface is English by default and switches to Russian when Obsidian's
-interface language is Russian (Settings, About, Language). Command names stay
-English, which is the Obsidian convention.
+The interface follows Obsidian's own interface language (Settings, About,
+Language) and ships twelve of them: English, Russian, Simplified Chinese,
+Traditional Chinese, German, French, Spanish, Japanese, Korean, Brazilian
+Portuguese, Italian and Polish. A region code resolves to its language
+(`de-AT` → German), Traditional Chinese is a table of its own (`zh-TW`,
+`zh-Hant`, `zh-HK`), European Portuguese uses the Brazilian table, and anything
+else falls back to English. Command names stay English, which is the Obsidian
+convention.
 
 ## Install
 
@@ -165,10 +174,65 @@ icon buttons with thin separators between groups.
 | Font size, `18 ⌄` | Opens a native Obsidian menu: Default, 10, 12, 14, 16, 18, 24. The current size of the selection is shown on the button |
 | Fill (bucket) | A 6×2 popup palette: no fill plus 11 colours. A strip under the bucket shows the current colour, like in Google Sheets |
 | Borders (grid) | Menu: all borders, outer borders, no borders, then individual sides |
+| Number format, `# ⌄` | Menu: Auto, `0.00`, `#,##0`, `#,##0.00`, `0%`, currency in $, € or ₽, `yyyy-mm-dd`, date and time. The live mask is shown on the button |
+| Alignment | One menu for both axes: left / center / right, then top / middle / bottom |
+| Wrap text | Toggle. Long text wraps inside the cell and the row grows to fit it |
 
 Formatting applies to the entire selected range, not just the active cell.
 Text colour inside a filled cell is picked automatically from the fill's
 luminance, so a pale yellow background stays readable in the dark theme too.
+
+### Number and date formats
+
+A format is a **display mask**; the cell keeps its raw value. `3` formatted as
+currency shows `$3.00`, the formula bar still shows `3`, and the file still
+stores `"v": 3`. So the file stays locale-independent, and removing the format
+gives the plain number back. A formula cell can be formatted too: `=SUM(B2:B3)`
+shows `$7.00` while the file keeps the formula.
+
+The masks are excel-like strings and are written into the file verbatim
+(`"nf": "$#,##0.00"`), which means the same file renders the same everywhere.
+Typing is unaffected: you always type and edit the raw value.
+
+A date is a value plus a date mask, not a separate cell type. `2026-07-27`,
+`27.07.2026` and a spreadsheet serial number are all understood, and rendering
+is done in UTC so the day shown is the day written in the file. Masks the
+formatter cannot read, and values that are not numbers or dates, are displayed
+unchanged - a text cell with a currency format shows its text, never an error.
+
+Custom masks beyond the menu presets work as long as they follow the same shape
+(`prefix #,##0.00 suffix`, `0%`, or a date mask); a mask can be edited in the
+file directly. Multi-section masks (`positive;negative`) are not interpreted.
+
+### Embedding a sheet in a note
+
+A spreadsheet can be shown inside a Markdown note, read-only:
+
+````markdown
+![[Budget.sheet]]                   the first worksheet, cropped to its used range
+![[Budget.sheet#Sheet2]]            a named worksheet
+![[Budget.sheet#Sheet2!A1:D20]]     a range of it
+![[Budget.sheet|plain]]             no headers, no frame, transparent background
+
+```sheet
+Budget.sheet#Sheet2!A1:D20
+```
+````
+
+Both work in reading view and in live preview. `.lsheet` and `.csv` can be
+embedded the same way.
+
+- The embed is read-only: no toolbar, no formula bar, no in-cell editor. Values,
+  formats and computed formulas are all rendered.
+- Without an explicit range it shows the filled part of the sheet rather than
+  100 empty rows. Taller embeds scroll inside themselves (capped at 60% of the
+  window height).
+- The caption above the grid names the file, the worksheet and the range;
+  clicking it opens the spreadsheet in a new tab. `|plain` removes it along with
+  the row numbers, the column letters and the background.
+- Editing the spreadsheet updates every embed of it, in place, while you watch.
+- The code block form takes the same reference, or `path:` / `sheet:` /
+  `range:` / `plain:` on separate lines.
 
 ### Saving
 
@@ -183,7 +247,7 @@ Plain JSON, sparse, with a strictly fixed key order:
 ```json
 {
   "format": "leovale-sheet",
-  "version": 1,
+  "version": 2,
   "sheets": [
     {
       "name": "Sheet1",
@@ -194,8 +258,9 @@ Plain JSON, sparse, with a strictly fixed key order:
       "merges": {},
       "cells": {
         "A1": { "v": "Item", "s": { "b": true, "fs": 18, "bg": "#fff2cc", "bd": "trbl" } },
-        "B2": { "v": 3 },
-        "C2": { "f": "=B2*2" }
+        "B2": { "v": 3, "s": { "nf": "$#,##0.00", "ha": "r" } },
+        "C2": { "f": "=B2*2" },
+        "D2": { "v": "a long sentence", "s": { "wrap": true } }
       }
     }
   ]
@@ -208,7 +273,27 @@ Cell keys, always in this order:
 - `f` is the formula source (in which case `v` is omitted)
 - `s` is the style, also fixed order: `b` (bold), `fs` (font size in px),
   `bg` (fill, `#rrggbb`), `bd` (borders, a subset of `trbl`:
-  top/right/bottom/left, in that order)
+  top/right/bottom/left, in that order), `nf` (number/date mask),
+  `ha` (horizontal alignment, `l` / `c` / `r`), `va` (vertical alignment,
+  `t` / `m` / `b`), `wrap` (`true`)
+
+### Format versions
+
+`version` is 2 since release 1.2.0, which is when `nf`, `ha`, `va` and `wrap`
+were added. Two rules follow from it and both matter:
+
+- **Files written by 1.1.x (version 1) keep opening**, with everything in them.
+  Nothing is migrated or rewritten; the version line is the only thing that
+  changes when you save such a file.
+- **Every save writes version 2**, even for a document that came in as version 1.
+  This is deliberate: a 1.1.x build does not know the new style keys and its
+  normalizer DROPS unknown properties, so letting it write the file would
+  silently strip every number format and alignment in the document. Version 2 is
+  newer than that build understands, so it opens the file read-only instead -
+  which is the whole point of the version field.
+
+The new keys are appended AFTER `bd` rather than sorted in, so a file re-saved
+by this release differs from the 1.1.x one only by the added tail of each style.
 
 The serialisation rules exist for one reason: sync. Obsidian LiveSync resolves
 conflicts on non-Markdown files last-write-wins, without merging, so the file
@@ -243,6 +328,16 @@ Three safeguards here:
   last known-good version is returned instead of an empty string.
 - If a file cannot be parsed (broken JSON, foreign format), it opens read-only,
   and writing to it is impossible by construction.
+- **Opening a file cannot change it.** Mounting a grid fires a lot of events, and
+  a straggler from the document being replaced (a blur from a focused formula
+  bar, an in-cell editor closing) used to be able to arrive after the next one
+  was on screen - which is how an old typed value could reappear in a cell of
+  another file. Three things now make that impossible: the formula bar refuses to
+  commit into an engine other than the one the edit started in and is disarmed
+  before teardown, an open in-cell editor is discarded rather than saved when the
+  view reloads, and nothing at all may mark the document dirty in the first
+  250 ms after a load. The e2e suite asserts that opening a file leaves it clean
+  and its bytes untouched.
 
 ## Development
 
@@ -250,11 +345,11 @@ Three safeguards here:
 npm install          # node_modules ~40 MB
 npm run build        # tsc --noEmit + esbuild production -> main.js, styles.css
 npm run dev          # esbuild --watch
-npm test             # 74 unit tests: format, styles, CSV, i18n (node --test)
+npm test             # 128 unit tests: format, styles, masks, CSV, embeds, i18n
 npm run e2e          # e2e in a sandboxed Obsidian, screenshots into tests/shots/
 ```
 
-Build output: `main.js` ~520 KB, `styles.css` ~99 KB.
+Build output: `main.js` ~570 KB, `styles.css` ~107 KB.
 
 Notes on the build configuration:
 
@@ -268,19 +363,33 @@ Notes on the build configuration:
 - The engine's hard-coded colours (`#fff`, `#ccc`, `#f3f3f3`) are remapped to
   Obsidian CSS variables. No `filter: invert(1)` anywhere.
 
-The e2e suite (164 assertions) launches a separate Obsidian instance with its
+The e2e suite (243 assertions) launches a separate Obsidian instance with its
 own `--user-data-dir` on CDP port 9333, so your running Obsidian is left alone.
 It installs and enables the plugin, creates a sheet, types values and formulas
 with real keyboard events, drags column and row edges, formats a selection with
 real toolbar clicks, edits a formula through the formula bar, checks that the
 row-number gutter stays put during a horizontal scroll, waits for autosave,
 reads the file from disk and checks the format, reopens it, switches themes and
-locales, emulates the tablet (800x1340, `mobile: true`, `body.is-mobile`) to
+locales (twelve of them), applies a currency format to a range including a
+formula, aligns and wraps cells and checks the bytes that come out, reloads the
+plugin twice to prove the engine's global handlers are not doubled, embeds the
+sheet in a note in both markdown modes and edits the source while the embed is on
+screen, emulates the tablet (800x1340, `mobile: true`, `body.is-mobile`) to
 measure touch targets, round-trips a semicolon-delimited CSV through the real
 view, and finally pretends a foreign plugin owns `.sheet` to check the notice
 and the `.lsheet` fallback. Screenshots land in `tests/shots/`. Playwright is
 needed for e2e only: either `npm i -D playwright` or point `SHEETS_PLAYWRIGHT`
 at an existing install.
+
+Two things the harness does that are worth knowing before touching it. It
+refuses to drive anything that is not a desktop Obsidian it launched: a leftover
+`adb forward tcp:9333` to a phone answers CDP exactly like a sandbox does, and
+its vault is real, so both the page URL and the vault path are checked first
+(`SHEETS_CDP_PORT` moves the port if something else owns 9333). And the sandbox
+is launched with `--disable-features=CalculateNativeWinOcclusion`: without it a
+window that ends up behind another one is reported as hidden, rendering stops,
+and every click times out on "waiting for element to be stable" with the grid
+perfectly present in the DOM.
 
 ## Releases
 
@@ -294,8 +403,13 @@ without releasing. See `.github/workflows/release.yml` and
 
 - Dragging columns and rows is disabled. Order is stored by index, not by id,
   so reordering would make the saved order a lie.
-- Formatting covers fill, font size, bold and borders. No italics, font
-  family, alignment or number formats. Text is left-aligned, numbers included.
+- Formatting covers fill, font size, bold, borders, number and date formats,
+  alignment and text wrapping. No italics, underline or font family.
+- Number formats are display masks read by this plugin. Excel understands the
+  same strings, but nothing converts them: a `.sheet` file is not an `.xlsx`.
+- Multi-section masks (`positive;negative;zero`) are stored but only their first
+  section is interpreted; there is no calendar picker, a date is a value plus a
+  date mask.
 - The format supports multiple sheets per file, but there is no UI yet for
   creating a second sheet.
 - Merged cells (`merges`) are saved and restored, but there is no toolbar
@@ -306,7 +420,11 @@ without releasing. See `.github/workflows/release.yml` and
   type…". That is intentional: closing the user's tabs in `onunload` would
   rearrange their workspace.
 - CSV files keep values only. Formatting, column widths, row heights and merges
-  are not saved for them, and a formula is stored as its text.
+  are not saved for them, and a formula is stored as its text. A CSV embedded in
+  a note therefore shows values only.
+- An embedded sheet is read-only by design: it has no toolbar, no formula bar
+  and no save path, and a grid that accepted keystrokes it then threw away would
+  be worse than one that does not.
 - The formula bar edits the anchor cell of the selection, one cell at a time.
   There is no range editing and no autocomplete for function names.
 - On touch devices the remaining rough edges are: no gesture for selecting a
@@ -316,6 +434,62 @@ without releasing. See `.github/workflows/release.yml` and
   the formula bar. Fixed on an Android tablet at 800x1340; phones untested.
 
 ## Gotchas worth knowing
+
+Reloading the plugin doubled every arrow key. The grid engine installs `keydown`
+and `mousedown` handlers on `document` and only drops them from inside
+`destroy(el, true)`. Each load of the plugin gets its own copy of the bundled
+engine with its own handlers, and a leftover copy is not idle: its `mousedown`
+adopts whatever grid was clicked, so its `keydown` moves the same selection
+again. Ten reloads with a sheet tab open, and one press of ArrowRight moved
+eleven columns. Since 1.2.0 an embedded sheet is a second live instance, so no
+individual teardown may remove the shared handlers any more: they are released
+once, on plugin unload, by `releaseEngineGlobals()`. Which needs a live instance
+to work through, hence the throwaway 1×1 grid in there.
+
+The engine's factory is asynchronous. `jspreadsheet(el, options)` returns the
+worksheet array synchronously but assigns `el.spreadsheet` and pushes onto
+`jspreadsheet.spreadsheet` in a promise continuation. So `destroy(el, true)`
+called right after creation does nothing at all - and "nothing" is worse than it
+sounds, because the instance has already installed the document handlers: a
+no-op teardown ADDS a set instead of removing one. Anything that counts live
+instances or destroys a fresh one has to wait for `el.spreadsheet` to appear.
+
+A number mask cannot travel through the inline style. The engine's `setStyle`
+parses the string it is handed by splitting on `;` and then `:`, so
+`yyyy-mm-dd hh:mm` would arrive truncated at the colon. Masks therefore live in a
+`data-nf` attribute on the cell, which is the same storage class as the inline
+style: the engine moves it along when rows or columns are inserted, so nothing
+has to be re-keyed by hand. Alignment and wrapping are ordinary CSS and do go
+through the style, with one twist - `white-space` is assigned by the engine on
+every cell update, so the wrap flag is stored as `overflow-wrap: break-word`
+(which the engine never touches) and the wrapping itself is done by a class.
+
+`text-align: left` is not "no alignment". The engine writes it onto every cell it
+creates, from `columns[].align`, so reading it back as a real value would put an
+alignment key on all 2600 cells of a fresh sheet. Left is the off value; only
+center and right are persisted. `vertical-align` needed the opposite treatment:
+its off value is `inherit`, because a table cell inherits `middle` anyway and
+`middle` had to stay available as something the user chose.
+
+Live preview does not use markdown post-processors for embeds. An `![[...]]`
+there is a CodeMirror widget rendered by Obsidian's own embed machinery, so a
+post-processor sees it only in reading view - the grid appeared in reading view
+while the editing mode still showed Obsidian's generic file card. The embed
+registry (`app.embedRegistry`, not public API, hence guarded) is what serves both
+modes. That widget also builds its element DETACHED and sets `src`/`alt` on it
+only when inserting, so `|plain` is not readable when the component is asked for:
+it is re-read on the way to the first render, and once more on a short timer.
+
+Obsidian styles tables inside `.markdown-rendered`, and an embedded grid is one.
+Its `margin: 1em 0` showed as a gap above and below the grid inside the embed
+frame, and its alternate-column rule would stripe the spreadsheet in the theme's
+table colour. Both are neutralised for `.leovale-sheet-embed`; a cell fill is an
+inline style and still wins.
+
+`env(safe-area-inset-bottom)` is 0px in Obsidian's Android WebView. Measured on a
+tablet whose real inset is 47.32px: the last row sat under the navigation bar and
+tapping it opened Recents. Obsidian publishes the true value as its own
+`--safe-area-inset-bottom`, so that goes first and `env()` stays as the fallback.
 
 `dirty` is a taken name. `TextFileView` keeps its own undocumented `dirty`
 field on the instance and resets it inside its own save logic. A
