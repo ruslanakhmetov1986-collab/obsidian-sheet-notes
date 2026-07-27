@@ -41,6 +41,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          # Deploy key instead of GITHUB_TOKEN: master is protected by a
+          # ruleset that requires PRs, and on a personal repo the only bypass
+          # actor GitHub accepts is a deploy key - so the version-bump commit
+          # ("release: X.Y.Z") is pushed over SSH with this key.
+          ssh-key: ${{ secrets.RELEASE_DEPLOY_KEY }}
 
       - uses: actions/setup-node@v4
         with:
