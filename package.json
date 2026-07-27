@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "node esbuild.config.mjs",
     "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
-    "test": "node tests/build-format.mjs && node --test tests/format.test.mjs tests/csv.test.mjs tests/i18n.test.mjs tests/numfmt.test.mjs tests/embed.test.mjs tests/sheetops.test.mjs",
+    "test": "node tests/build-format.mjs && node --test tests/format.test.mjs tests/csv.test.mjs tests/i18n.test.mjs tests/numfmt.test.mjs tests/embed.test.mjs tests/sheetops.test.mjs tests/links.test.mjs tests/xlsx.test.mjs",
     "e2e": "node tests/e2e.mjs"
   },
   "keywords": [],
@@ -24,6 +24,7 @@
     "typescript": "^5.8.3"
   },
   "dependencies": {
-    "jspreadsheet-ce": "5.0.4"
+    "jspreadsheet-ce": "5.0.4",
+    "xlsx-js-style": "1.2.0"
   }
 }

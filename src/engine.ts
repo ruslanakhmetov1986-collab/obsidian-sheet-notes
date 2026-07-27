@@ -20,6 +20,7 @@ import {
 	CURRENT_VERSION,
 	FORMAT_ID,
 	type CellStyle,
+	type CellType,
 	type CellValue,
 	type PageFreeze,
 	type PageView,
@@ -27,15 +28,18 @@ import {
 	type SheetDoc,
 	type SheetPage,
 	cellRef,
+	isCheckedValue,
 	isEmptyFreeze,
 	isEmptyStyle,
 	newSheetPage,
+	normalizeCellType,
 	normalizeFreeze,
 	normalizeNf,
 	normalizeStyle,
 	normalizeView,
 	parseRef,
 } from "./format";
+import { type CellLink, hasWikiLink, parseCellLinks } from "./links";
 import {
 	type Cursor,
 	type ValueReader,
@@ -66,6 +70,19 @@ export const NF_ATTR = "data-nf";
 const NF_SRC_ATTR = "data-nf-src";
 /** What we last wrote, so a value change can be told apart from our own output. */
 const NF_OUT_ATTR = "data-nf-out";
+
+/**
+ * Where a cell's TYPE lives at runtime, for exactly the reasons the mask does:
+ * an attribute on the `<td>` rides along when the engine inserts a row, a map
+ * keyed by A1 ref would go stale. Only `cb` (checkbox) exists.
+ */
+export const TYPE_ATTR = "data-ct";
+/** The `<input type="checkbox">` a `cb` cell renders. */
+export const CHECKBOX_CLASS = "leovale-sheet-cb";
+/** An `<a>` rendered for a `[[wiki link]]` inside a cell value. */
+export const LINK_CLASS = "leovale-sheet-link";
+/** The exact text the links in a cell were built from; see {@link syncLinks}. */
+const LINK_SRC_ATTR = "data-link-src";
 
 /** Classes the in-sheet search puts on the cells it found. */
 export const FOUND_CLASS = "leovale-sheet-found";
@@ -162,6 +179,18 @@ function docToWorksheets(doc: SheetDoc, readOnly: boolean): Record<string, unkno
 	});
 }
 
+/**
+ * What a `[[wiki link]]` in a cell can do. Supplied by the view and by embeds,
+ * because opening a note and asking Obsidian for a hover preview are the host's
+ * business, not the grid's - the engine stays free of `obsidian` imports.
+ */
+export interface LinkHandlers {
+	/** A click on the link. `newTab` is the usual Ctrl/Cmd or middle click. */
+	open: (target: string, newTab: boolean) => void;
+	/** Pointer over the link: the hook for Obsidian's page preview popover. */
+	hover?: (el: HTMLElement, target: string, event: MouseEvent) => void;
+}
+
 export interface EngineOptions {
 	/** Called after every mutation (cell edit, resize, style, insert, undo). */
 	onChange: () => void;
@@ -173,6 +202,8 @@ export interface EngineOptions {
 	onSelection?: () => void;
 	/** Future-version documents render read-only so we never write them back. */
 	readOnly?: boolean;
+	/** Makes `[[wiki links]]` in cells clickable. Omitted: they stay plain text. */
+	links?: LinkHandlers;
 }
 
 /**
@@ -252,6 +283,8 @@ export class SheetEngine {
 	private freezeTimer: number | null = null;
 	/** Kept so keyboard-driven selection changes can refresh the chrome too. */
 	private selectionListener?: () => void;
+	/** What a `[[link]]` in a cell does; absent means "leave it as text". */
+	private links?: LinkHandlers;
 
 	constructor(parent: HTMLElement, doc: SheetDoc, opts: EngineOptions) {
 		this.readOnly = !!opts.readOnly;
@@ -262,6 +295,7 @@ export class SheetEngine {
 		this.uid = `leovale-sheet-g${++instanceCounter}`;
 
 		this.selectionListener = opts.onSelection;
+		this.links = opts.links;
 		this.root = parent.createDiv({ cls: ROOT_CLASS });
 		this.root.addClass(this.uid);
 		this.host = this.root.createDiv({ cls: "leovale-sheet-host" });
@@ -311,6 +345,7 @@ export class SheetEngine {
 
 		this.applyStoredRowHeights(doc);
 		this.applyStoredMasks(doc);
+		this.applyStoredTypes(doc);
 		// The stored view is replayed like the row heights are, with autosave
 		// suppressed: merely opening a filtered, frozen sheet must not modify it.
 		this.suspend = true;
@@ -338,6 +373,22 @@ export class SheetEngine {
 					const nf = normalizeNf(cell.s?.nf);
 					if (!nf) continue;
 					this.cellElement(ref, i)?.setAttribute(NF_ATTR, nf);
+				}
+			});
+		} finally {
+			this.suspend = false;
+		}
+	}
+
+	/** Replay the stored cell types (`t`), like the masks and for the same reason. */
+	private applyStoredTypes(doc: SheetDoc): void {
+		this.suspend = true;
+		try {
+			doc.sheets.forEach((page, i) => {
+				for (const [ref, cell] of Object.entries(page.cells)) {
+					const type = normalizeCellType(cell.t);
+					if (!type) continue;
+					this.cellElement(ref, i)?.setAttribute(TYPE_ATTR, type);
 				}
 			});
 		} finally {
@@ -482,6 +533,8 @@ export class SheetEngine {
 			host
 				.querySelectorAll<HTMLElement>(`td[style*="${WRAP_ON}"]`)
 				.forEach((el) => el.classList.add(WRAP_CLASS));
+			this.syncCheckboxes();
+			this.syncLinks();
 		} catch (e) {
 			console.error("leovale-sheets: decor sync failed", e);
 		}
@@ -489,6 +542,319 @@ export class SheetEngine {
 		// (a resized column, a row that grew because its text now wraps). Rebuilt
 		// here, but only written when the rule text actually differs.
 		if (!isEmptyFreeze(this.freezes[0] ?? {})) this.syncFreeze();
+	}
+
+	/* ------------------------------------------------------ checkbox cells */
+
+	/** The type of one cell, as stored on its element. */
+	getCellType(ref: string): CellType | undefined {
+		return normalizeCellType(this.cellElement(ref)?.getAttribute(TYPE_ATTR));
+	}
+
+	/**
+	 * Turn cells into checkboxes, or back into plain cells.
+	 *
+	 * The type is an attribute, not a style: it changes what the cell IS, and it
+	 * must survive a row insert exactly like a number mask does. Values are left
+	 * alone - a column of `true`/`false` becomes a column of ticked boxes, and
+	 * removing the type gives the words back.
+	 */
+	setCellType(refs: string[], type: CellType | null): void {
+		if (this.readOnly || refs.length === 0) return;
+		const data = this.rawData();
+		for (const ref of refs) {
+			const el = this.cellElement(ref);
+			if (!el) continue;
+			if (type) {
+				el.setAttribute(TYPE_ATTR, type);
+			} else if (el.hasAttribute(TYPE_ATTR)) {
+				el.removeAttribute(TYPE_ATTR);
+				let coords;
+				try {
+					coords = parseRef(ref);
+				} catch {
+					continue;
+				}
+				this.undecorateCheckbox(el, data[coords.row]?.[coords.col]);
+			}
+		}
+		this.syncDecor();
+		this.notify();
+	}
+
+	/**
+	 * Draw the tick boxes.
+	 *
+	 * The engine owns the cell's text and rewrites it from the raw value on every
+	 * change, so the box is rebuilt whenever it is gone rather than created once:
+	 * same contract as the number masks, one pass over the cells that asked for it
+	 * (`td[data-ct="cb"]`), nothing at all when there are none.
+	 */
+	private syncCheckboxes(): void {
+		const cells = this.host.querySelectorAll<HTMLElement>(`td[${TYPE_ATTR}="cb"]`);
+		if (cells.length === 0) return;
+		const data = this.rawData();
+		cells.forEach((el) => {
+			// An open editor is an <input> of the engine's own; leave it be.
+			if (el.classList.contains("editor")) return;
+			const row = Number(el.getAttribute("data-y"));
+			const col = Number(el.getAttribute("data-x"));
+			if (!Number.isInteger(row) || !Number.isInteger(col)) return;
+			let box = el.querySelector<HTMLInputElement>(`input.${CHECKBOX_CLASS}`);
+			if (box && el.childNodes.length !== 1) {
+				// the engine wrote the raw value back next to our box
+				el.empty();
+				el.appendChild(box);
+			}
+			if (!box) {
+				el.empty();
+				box = el.createEl("input", {
+					cls: CHECKBOX_CLASS,
+					attr: { type: "checkbox", "aria-label": cellRef(row, col) },
+				});
+				const target = box;
+				box.addEventListener("click", (e: MouseEvent) => {
+					// The click belongs to the box, not to the grid: without this the
+					// engine starts a selection drag from under the pointer.
+					e.stopPropagation();
+					this.setCheckbox(row, col, target.checked);
+				});
+			}
+			box.checked = isCheckedValue(data[row]?.[col] as CellValue | undefined);
+			box.disabled = this.readOnly;
+			el.classList.add("leovale-sheet-cb-cell");
+		});
+	}
+
+	/** Put the raw value back in a cell that is no longer a checkbox. */
+	private undecorateCheckbox(el: HTMLElement, value: unknown): void {
+		el.classList.remove("leovale-sheet-cb-cell");
+		if (!el.querySelector(`input.${CHECKBOX_CLASS}`)) return;
+		el.empty();
+		el.textContent = value === null || value === undefined ? "" : String(value);
+	}
+
+	/** Write a checkbox's state as a real boolean, which is what the file keeps. */
+	setCheckbox(row: number, col: number, checked: boolean): void {
+		const ws = this.first();
+		if (!ws || this.readOnly) return;
+		try {
+			ws.setValueFromCoords(col, row, checked as unknown as JssCellValue);
+		} catch (e) {
+			console.error("leovale-sheets: toggling a checkbox failed", e);
+			return;
+		}
+		this.notify();
+	}
+
+	/* ----------------------------------------------------- links in cells */
+
+	/**
+	 * Render `[[wiki links]]` in every cell that holds one.
+	 *
+	 * Driven off the DATA rather than the DOM: the values are the truth, the scan
+	 * is an array walk, and a cell that never had a link is never touched. A
+	 * formula cell is read from its element instead, because its value is the
+	 * formula source and what the sheet SHOWS is the result.
+	 *
+	 * Without link handlers (an embed in a note that has none, a future caller)
+	 * nothing happens at all and `[[Note]]` stays exactly the text it is.
+	 */
+	private syncLinks(): void {
+		if (!this.links) return;
+		const data = this.rawData();
+		const records =
+			(this.first() as unknown as { records?: { element?: HTMLElement }[][] })?.records ?? [];
+		for (let r = 0; r < data.length; r++) {
+			const row = data[r];
+			if (!Array.isArray(row)) continue;
+			for (let c = 0; c < row.length; c++) {
+				const raw = row[c];
+				const el = records[r]?.[c]?.element;
+				if (!el) continue;
+				// A checkbox cell has its own rendering, and a masked cell holds a
+				// number: neither can hold a link.
+				if (el.hasAttribute(TYPE_ATTR) || el.hasAttribute(NF_ATTR)) continue;
+				if (typeof raw === "string" && raw.startsWith("=")) {
+					this.decorateLinks(el, this.cellSourceText(el));
+					continue;
+				}
+				if (typeof raw !== "string" || !hasWikiLink(raw)) {
+					this.undecorateLinks(el);
+					continue;
+				}
+				this.decorateLinks(el, raw);
+			}
+		}
+	}
+
+	private decorateLinks(el: HTMLElement, text: string): void {
+		if (el.classList.contains("editor")) return;
+		const segments = parseCellLinks(text);
+		if (segments.length === 0) {
+			this.undecorateLinks(el);
+			return;
+		}
+		// Already ours, and still built from this exact text.
+		if (el.getAttribute(LINK_SRC_ATTR) === text && el.querySelector(`a.${LINK_CLASS}`)) return;
+		el.empty();
+		for (const segment of segments) {
+			if (segment.kind === "text") {
+				// A text node, never innerHTML: a cell value is user text and may
+				// perfectly well contain a `<`.
+				el.appendText(segment.text);
+				continue;
+			}
+			this.buildLink(el, segment.link);
+		}
+		el.setAttribute(LINK_SRC_ATTR, text);
+	}
+
+	private buildLink(el: HTMLElement, link: CellLink): void {
+		const anchor = el.createEl("a", {
+			cls: `internal-link ${LINK_CLASS}`,
+			text: link.display,
+			attr: { href: link.target, "data-href": link.target, "aria-label": link.target },
+		});
+		anchor.addEventListener("click", (e: MouseEvent) => {
+			e.preventDefault();
+			e.stopPropagation();
+			this.links?.open(link.target, e.ctrlKey || e.metaKey || e.button === 1);
+		});
+		anchor.addEventListener("mouseover", (e: MouseEvent) => {
+			this.links?.hover?.(anchor, link.target, e);
+		});
+	}
+
+	/** Undo our link rendering, but only while it is still the thing on screen. */
+	private undecorateLinks(el: HTMLElement): void {
+		if (!el.hasAttribute(LINK_SRC_ATTR)) return;
+		const source = el.getAttribute(LINK_SRC_ATTR) ?? "";
+		el.removeAttribute(LINK_SRC_ATTR);
+		// If the engine has already rewritten the cell, its text is the fresh one
+		// and putting the old source back would be a lie.
+		if (el.querySelector(`a.${LINK_CLASS}`)) el.textContent = source;
+	}
+
+	/* --------------------------------------------------------- merged cells */
+
+	/** Every merge of a page, anchor ref -> [colspan, rowspan]. */
+	getMerges(sheet = 0): Record<string, [number, number]> {
+		const ws = this.worksheet(sheet);
+		if (!ws) return {};
+		try {
+			const all = ws.getMerge();
+			if (!all || Array.isArray(all)) return {};
+			const out: Record<string, [number, number]> = {};
+			for (const [ref, span] of Object.entries(all)) {
+				if (Array.isArray(span) && span.length >= 2) {
+					out[ref] = [Number(span[0]), Number(span[1])];
+				}
+			}
+			return out;
+		} catch {
+			return {};
+		}
+	}
+
+	/** The merge a cell belongs to, anchor included, or null. */
+	mergeAt(row: number, col: number, sheet = 0): { ref: string; cols: number; rows: number } | null {
+		for (const [ref, span] of Object.entries(this.getMerges(sheet))) {
+			let coords;
+			try {
+				coords = parseRef(ref);
+			} catch {
+				continue;
+			}
+			const [cols, rows] = span;
+			if (
+				row >= coords.row &&
+				row < coords.row + rows &&
+				col >= coords.col &&
+				col < coords.col + cols
+			) {
+				return { ref, cols, rows };
+			}
+		}
+		return null;
+	}
+
+	/**
+	 * Cells of the selection that would lose their content to a merge: everything
+	 * but the top-left one that actually holds something. The caller asks before
+	 * throwing them away.
+	 */
+	mergeLosses(): string[] {
+		const rect = this.selectionRect();
+		if (!rect) return [];
+		const read = this.reader();
+		const out: string[] = [];
+		for (let r = rect.r1; r <= rect.r2; r++) {
+			for (let c = rect.c1; c <= rect.c2; c++) {
+				if (r === rect.r1 && c === rect.c1) continue;
+				if (read(r, c) !== undefined) out.push(cellRef(r, c));
+			}
+		}
+		return out;
+	}
+
+	/**
+	 * Merge the selection into its top-left cell.
+	 *
+	 * The doomed cells are emptied BEFORE the engine is asked to merge, and that
+	 * is not tidiness: the engine's own `setMerge` puts up a native `confirm()`
+	 * when it finds data in the cells it is about to swallow, and a native modal
+	 * inside Obsidian is both ugly and unanswerable from a test. With the cells
+	 * already empty there is nothing for it to ask about, and the question was
+	 * asked properly by the caller (see SheetView.mergeSelection).
+	 *
+	 * Merges already inside the range are dropped first, or the engine would
+	 * refuse and leave a half-merged block behind.
+	 */
+	mergeSelection(): boolean {
+		const ws = this.first();
+		const rect = this.selectionRect();
+		if (!ws || this.readOnly || !rect) return false;
+		if (rect.r1 === rect.r2 && rect.c1 === rect.c2) return false;
+		try {
+			for (const [ref] of Object.entries(this.getMerges())) {
+				const { row, col } = parseRef(ref);
+				if (row >= rect.r1 && row <= rect.r2 && col >= rect.c1 && col <= rect.c2) {
+					ws.removeMerge(ref);
+				}
+			}
+			const doomed = this.mergeLosses();
+			if (doomed.length > 0) ws.setValue(doomed, "");
+			ws.setMerge(cellRef(rect.r1, rect.c1), rect.c2 - rect.c1 + 1, rect.r2 - rect.r1 + 1);
+		} catch (e) {
+			console.error("leovale-sheets: merging failed", e);
+			return false;
+		}
+		this.notify();
+		return true;
+	}
+
+	/** Split every merge the selection touches back into its own cells. */
+	unmergeSelection(): boolean {
+		const ws = this.first();
+		const rect = this.selectionRect();
+		if (!ws || this.readOnly || !rect) return false;
+		const anchors = new Set<string>();
+		for (let r = rect.r1; r <= rect.r2; r++) {
+			for (let c = rect.c1; c <= rect.c2; c++) {
+				const merge = this.mergeAt(r, c);
+				if (merge) anchors.add(merge.ref);
+			}
+		}
+		if (anchors.size === 0) return false;
+		try {
+			for (const ref of anchors) ws.removeMerge(ref);
+		} catch (e) {
+			console.error("leovale-sheets: unmerging failed", e);
+			return false;
+		}
+		this.notify();
+		return true;
 	}
 
 	/* ------------------------------------------------- reading the live grid */
@@ -1060,9 +1426,19 @@ export class SheetEngine {
 		this.foundRefs = [];
 	}
 
-	/** The text a cell shows right now: what "copy as Markdown" copies. */
+	/**
+	 * The text a cell shows right now: what "copy as Markdown" copies.
+	 *
+	 * A cell whose links we rendered gives back the SOURCE (`[[Note]]`), not the
+	 * link's label: a wiki link pasted into a note is a working link there, and
+	 * the label alone would be a link thrown away.
+	 */
 	displayText(ref: string): string {
-		return this.cellElement(ref)?.textContent ?? "";
+		const el = this.cellElement(ref);
+		if (!el) return "";
+		const link = el.getAttribute(LINK_SRC_ATTR);
+		if (link !== null && el.querySelector(`a.${LINK_CLASS}`)) return link;
+		return el.textContent ?? "";
 	}
 
 	/* ------------------------------------------------------- writing a block */
@@ -1342,18 +1718,30 @@ export class SheetEngine {
 				page.cells[ref] = cell;
 			}
 
-			// Masks live on the elements for the same reason, one attribute per cell.
+			// Masks and cell types live on the elements for the same reason, one
+			// attribute per cell.
 			const records = (ws as unknown as { records?: { element?: HTMLElement }[][] }).records ?? [];
 			for (let r = 0; r < records.length; r++) {
 				const row = records[r] ?? [];
 				for (let c = 0; c < row.length; c++) {
-					const nf = normalizeNf(row[c]?.element?.getAttribute(NF_ATTR));
-					if (!nf) continue;
-					if (r >= page.rows || c >= page.cols) continue;
+					const el = row[c]?.element;
+					if (!el || r >= page.rows || c >= page.cols) continue;
 					const ref = cellRef(r, c);
-					const cell = page.cells[ref] ?? {};
-					cell.s = { ...(cell.s ?? {}), nf };
-					page.cells[ref] = cell;
+					const nf = normalizeNf(el.getAttribute(NF_ATTR));
+					if (nf) {
+						const cell = page.cells[ref] ?? {};
+						cell.s = { ...(cell.s ?? {}), nf };
+						page.cells[ref] = cell;
+					}
+					const type = normalizeCellType(el.getAttribute(TYPE_ATTR));
+					if (type) {
+						const cell = page.cells[ref] ?? {};
+						cell.t = type;
+						// A checkbox holds a boolean, whatever the engine kept: it may
+						// have arrived as the string "true" from a paste or an editor.
+						if (cell.f === undefined) cell.v = isCheckedValue(cell.v);
+						page.cells[ref] = cell;
+					}
 				}
 			}
 

@@ -1001,3 +1001,239 @@ body.is-mobile .leovale-sheet-fb-ref,
 .leovale-sheet-root .jss_about {
 	display: none !important;
 }
+
+/* ---- checkbox cells (`"t": "cb"` in the file) --------------------------
+ *
+ * The box replaces the cell's text rather than sitting next to it: the value is
+ * the tick.
+ *
+ * It is DRAWN HERE rather than left to the platform, and that was measured, not
+ * assumed. A plain `<input type="checkbox">` inside the grid came out as an
+ * invisible white rectangle: Obsidian sets `appearance: none` on every checkbox
+ * in the app and paints its own with a rule the vendor's scoped stylesheet then
+ * overrode (`background: #fff; border: none`), leaving a box with no edges and
+ * no tick. Both themes showed an empty column. So: our own border, our own
+ * background, our own tick, in Obsidian's variables. */
+
+/* A tick box sits in the middle of its cell, as it does in every spreadsheet.
+   `!important` because the engine writes `text-align: left` INLINE on every cell
+   it creates (see cellcss.ts), and no stylesheet rule beats that; the cost is
+   that a horizontal alignment set on a checkbox cell does not show, which is
+   documented. */
+.leovale-sheet-root .jss_worksheet > tbody > tr > td.leovale-sheet-cb-cell {
+	text-align: center !important;
+}
+
+.leovale-sheet-root input.leovale-sheet-cb {
+	-webkit-appearance: none !important;
+	appearance: none !important;
+	position: relative;
+	display: inline-block;
+	box-sizing: border-box;
+	width: 15px !important;
+	height: 15px !important;
+	margin: 0 !important;
+	padding: 0 !important;
+	vertical-align: middle;
+	border: 1px solid var(--checkbox-border-color, var(--background-modifier-border-hover)) !important;
+	border-radius: 3px !important;
+	background-color: var(--background-primary) !important;
+	box-shadow: none !important;
+	cursor: pointer;
+}
+
+.leovale-sheet-root input.leovale-sheet-cb:hover:not(:disabled) {
+	border-color: var(--interactive-accent) !important;
+}
+
+.leovale-sheet-root input.leovale-sheet-cb:checked {
+	background-color: var(--interactive-accent) !important;
+	border-color: var(--interactive-accent) !important;
+}
+
+/* The tick, in percentages so it stays centred at both sizes. */
+.leovale-sheet-root input.leovale-sheet-cb:checked::after {
+	content: "";
+	position: absolute;
+	left: 50%;
+	top: 50%;
+	width: 28%;
+	height: 55%;
+	transform: translate(-50%, -60%) rotate(45deg);
+	border: solid var(--text-on-accent, #fff);
+	border-width: 0 2px 2px 0;
+}
+
+.leovale-sheet-root input.leovale-sheet-cb:focus-visible {
+	outline: 2px solid var(--interactive-accent);
+	outline-offset: 1px;
+}
+
+.leovale-sheet-root input.leovale-sheet-cb:disabled {
+	cursor: default;
+	opacity: 0.6;
+}
+
+/* Bigger target on a tablet, like every other control here. */
+.leovale-sheet-content.is-mobile .leovale-sheet-root input.leovale-sheet-cb,
+body.is-mobile .leovale-sheet-root input.leovale-sheet-cb {
+	width: 20px !important;
+	height: 20px !important;
+}
+
+/* ---- [[wiki links]] inside a cell --------------------------------------
+ *
+ * `internal-link` is Obsidian's own class, so the link takes the theme's link
+ * colour and its hover behaviour for free; everything below is only about
+ * living inside a table cell that clips its content. */
+
+.leovale-sheet-root a.leovale-sheet-link {
+	color: var(--link-color, var(--text-accent));
+	text-decoration: var(--link-decoration, none);
+	cursor: pointer;
+}
+
+.leovale-sheet-root a.leovale-sheet-link:hover {
+	color: var(--link-color-hover, var(--text-accent-hover));
+	text-decoration: var(--link-decoration-hover, underline);
+}
+
+/* ---- printing (Ctrl+P / "Sheets: Print spreadsheet") -------------------
+ *
+ * A spreadsheet on paper is the grid and nothing else. The rules below are the
+ * only ones in this file that reach outside `.leovale-sheet-root`, and they are
+ * fenced twice: `@media print`, and `body:has(.workspace-leaf.mod-active .leovale-sheet-content)` so that
+ * printing a NOTE, with no spreadsheet on screen, is left completely alone. */
+
+@media print {
+	body:has(.workspace-leaf.mod-active .leovale-sheet-content) .workspace-ribbon,
+	body:has(.workspace-leaf.mod-active .leovale-sheet-content) .workspace-split.mod-left-split,
+	body:has(.workspace-leaf.mod-active .leovale-sheet-content) .workspace-split.mod-right-split,
+	body:has(.workspace-leaf.mod-active .leovale-sheet-content) .workspace-tab-header-container,
+	body:has(.workspace-leaf.mod-active .leovale-sheet-content) .status-bar,
+	body:has(.workspace-leaf.mod-active .leovale-sheet-content) .titlebar,
+	body:has(.workspace-leaf.mod-active .leovale-sheet-content) .view-header,
+	body:has(.workspace-leaf.mod-active .leovale-sheet-content) .notice-container {
+		display: none !important;
+	}
+
+	/* Our own chrome goes with it: a toolbar is a thing you click. */
+	.leovale-sheet-toolbar,
+	.leovale-sheet-formulabar,
+	.leovale-sheet-find,
+	.leovale-sheet-palette,
+	.leovale-sheet-root .jss_corner {
+		display: none !important;
+	}
+
+	/* Obsidian prints by HIDING the app: its own print stylesheet sets
+	   `.app-container { display: none }` and shows a `.print` element that its
+	   Markdown export fills in. A spreadsheet is not Markdown and has no such
+	   element, so printing one produced a genuinely blank page - measured, 979
+	   bytes of PDF. The app comes back for our own print, and every box between
+	   it and the grid is flattened: Obsidian's layout is nested absolutely
+	   positioned flex boxes sized to the WINDOW, which is exactly the shape a
+	   printer cannot page through. */
+	body:has(.workspace-leaf.mod-active .leovale-sheet-content),
+	body:has(.workspace-leaf.mod-active .leovale-sheet-content) .app-container,
+	body:has(.workspace-leaf.mod-active .leovale-sheet-content) .horizontal-main-container,
+	body:has(.workspace-leaf.mod-active .leovale-sheet-content) .workspace,
+	body:has(.workspace-leaf.mod-active .leovale-sheet-content) .workspace-split,
+	body:has(.workspace-leaf.mod-active .leovale-sheet-content) .workspace-tabs,
+	body:has(.workspace-leaf.mod-active .leovale-sheet-content) .workspace-tab-container,
+	body:has(.workspace-leaf.mod-active .leovale-sheet-content) .workspace-leaf,
+	body:has(.workspace-leaf.mod-active .leovale-sheet-content) .workspace-leaf-content,
+	body:has(.workspace-leaf.mod-active .leovale-sheet-content) .view-content,
+	.leovale-sheet-content,
+	.leovale-sheet-wrapper {
+		display: block !important;
+		overflow: visible !important;
+		height: auto !important;
+		min-height: 0 !important;
+		max-height: none !important;
+		width: auto !important;
+		position: static !important;
+		/* `contain: strict` on a workspace leaf means "size me as if I were
+		   empty", so the page stayed 0 px tall with a 1161 px grid inside it. */
+		contain: none !important;
+	}
+
+	/* Only the spreadsheet that is on screen goes on paper. Flattening the boxes
+	   above also un-hides the OTHER tabs (Obsidian keeps them `display: none`),
+	   and the first PDF of this feature had a Markdown note printed above the
+	   grid because of exactly that. */
+	body:has(.workspace-leaf.mod-active .leovale-sheet-content) .workspace-leaf:not(.mod-active) {
+		display: none !important;
+	}
+
+	/* Frozen panes are a screen thing. `position: sticky` inside a printed table
+	   parks the pinned row on top of the first page and leaves a hole on every
+	   other one, so the generated freeze rules are switched off here. */
+	.leovale-sheet-root .jss_worksheet > tbody > tr > td,
+	.leovale-sheet-root .jss_worksheet > thead > tr > td {
+		position: static !important;
+		box-shadow: none !important;
+	}
+
+	/* The column letters repeat at the top of every page - the one thing that
+	   makes a multi-page table readable. */
+	.leovale-sheet-root .jss_worksheet > thead {
+		display: table-header-group;
+	}
+
+	.leovale-sheet-root .jss_worksheet > tbody > tr {
+		break-inside: avoid;
+		page-break-inside: avoid;
+	}
+
+	/* Ink, not screen: the theme's backgrounds would come out as grey blocks,
+	   while a fill the user chose is data and stays. */
+	.leovale-sheet-root,
+	.leovale-sheet-root .jss_container,
+	.leovale-sheet-root .jss_content,
+	.leovale-sheet-root .jss_worksheet,
+	.leovale-sheet-wrapper,
+	.leovale-sheet-content {
+		background: transparent !important;
+		color: #000 !important;
+	}
+
+	.leovale-sheet-root .jss_worksheet > tbody > tr > td,
+	.leovale-sheet-root .jss_worksheet > thead > tr > td {
+		border-color: #999 !important;
+		-webkit-print-color-adjust: exact;
+		print-color-adjust: exact;
+	}
+
+	/* Nothing is selected on paper. */
+	.leovale-sheet-root .jss_worksheet > tbody > tr > td.highlight,
+	.leovale-sheet-root .jss_worksheet > tbody > tr > td.highlight-selected {
+		background-color: transparent !important;
+		box-shadow: none !important;
+	}
+
+	/* A tick box goes on paper as a CHARACTER, not as a styled `<input>`.
+	   Chromium's print painter does not honour our checkbox: the accent fill and
+	   the `::after` tick both disappeared and every box printed empty, ticked or
+	   not - which is the one thing a checkbox column must never do. Printing
+	   `☐` / `☑` instead is text: it survives a printer with "background
+	   graphics" turned off, and it ends up in the PDF's text layer. */
+	.leovale-sheet-root input.leovale-sheet-cb {
+		display: none !important;
+	}
+
+	/* U+FE0E is the text-presentation selector, and it is load-bearing: without
+	   it the ticked box came out of the emoji font as a blue picture, which is
+	   not ink and is not text either - it was missing from the PDF's text layer
+	   altogether while the empty box was in it. */
+	.leovale-sheet-root td.leovale-sheet-cb-cell::after {
+		content: "\2610\FE0E";
+		color: #000;
+		font-size: 15px;
+		line-height: 1;
+	}
+
+	.leovale-sheet-root td.leovale-sheet-cb-cell:has(input.leovale-sheet-cb:checked)::after {
+		content: "\2611\FE0E";
+	}
+}

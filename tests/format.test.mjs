@@ -13,7 +13,10 @@ import {
 	SheetFormatError,
 	cellRef,
 	colToName,
+	isCheckedValue,
+	isEmptyCell,
 	isEmptyStyle,
+	normalizeCellType,
 	isSupportedVersion,
 	nameToCol,
 	newSheetDoc,
@@ -688,16 +691,16 @@ test("writing always produces the current version, whatever the document claims"
 	// The point of the bump: an older build must refuse to WRITE a file that can
 	// carry keys it would silently drop, so every save is a current-version save.
 	const written = serializeSheet(parseSheet(V1_FILE));
-	assert.match(written, /^\{\n  "format": "leovale-sheet",\n  "version": 3,/);
+	assert.match(written, /^\{\n  "format": "leovale-sheet",\n  "version": 4,/);
 	assert.equal(parseSheet(written).version, CURRENT_VERSION);
-	assert.equal(CURRENT_VERSION, 3);
+	assert.equal(CURRENT_VERSION, 4);
 
 	// Nothing about the CONTENT changed: the version line, plus the two empty
 	// 1.3.0 blocks that every page now carries, and not a line more.
 	const before = V1_FILE.split("\n");
 	const after = written.split("\n");
 	const added = after.filter((l) => !before.includes(l));
-	assert.deepEqual(added, ['  "version": 3,', '      "view": {},', '      "freeze": {},']);
+	assert.deepEqual(added, ['  "version": 4,', '      "view": {},', '      "freeze": {},']);
 	const removed = before.filter((l) => !after.includes(l));
 	assert.deepEqual(removed, ['  "version": 1,']);
 });
@@ -710,10 +713,16 @@ test("a v1 file without the new keys does not grow them on save", () => {
 	}
 });
 
-test("versions 1..3 are supported, a version 4 file is not", () => {
+test("versions 1..4 are supported, a version 5 file is not", () => {
 	assert.equal(isSupportedVersion(parseSheet(serializeSheet(newSheetDoc()))), true);
 	assert.equal(isSupportedVersion(parseSheet(V1_FILE)), true);
-	const future = parseSheet(serializeSheet(newSheetDoc()).replace('"version": 3', '"version": 4'));
+	for (const version of [2, 3]) {
+		const older = parseSheet(
+			serializeSheet(newSheetDoc()).replace('"version": 4', `"version": ${version}`),
+		);
+		assert.equal(isSupportedVersion(older), true, `v${version} must stay readable`);
+	}
+	const future = parseSheet(serializeSheet(newSheetDoc()).replace('"version": 4', '"version": 5'));
 	assert.equal(isSupportedVersion(future), false);
 });
 
@@ -897,7 +906,7 @@ test("a sort or filter naming a column outside the grid is dropped on load", () 
 
 test("a version 2 file gains only the two empty blocks", () => {
 	const v2 = serializeSheet(newSheetDoc())
-		.replace('"version": 3', '"version": 2')
+		.replace('"version": 4', '"version": 2')
 		.replace('      "view": {},\n', "")
 		.replace('      "freeze": {},\n', "");
 	const doc = parseSheet(v2);
@@ -906,5 +915,78 @@ test("a version 2 file gains only the two empty blocks", () => {
 	assert.deepEqual(doc.sheets[0].freeze, {});
 	const written = serializeSheet(doc);
 	const added = written.split("\n").filter((l) => !v2.split("\n").includes(l));
-	assert.deepEqual(added, ['  "version": 3,', '      "view": {},', '      "freeze": {},']);
+	assert.deepEqual(added, ['  "version": 4,', '      "view": {},', '      "freeze": {},']);
+});
+
+/* ------------------------------------------------ 1.4.0: the cell type `t` */
+
+test("a cell type is normalized and everything else is dropped", () => {
+	assert.equal(normalizeCellType("cb"), "cb");
+	assert.equal(normalizeCellType("CB"), "cb");
+	assert.equal(normalizeCellType("checkbox"), "cb");
+	for (const junk of ["", "dd", "dropdown", "x", 1, true, null, undefined, {}]) {
+		assert.equal(normalizeCellType(junk), undefined, JSON.stringify(junk));
+	}
+});
+
+test("a checkbox reads its value the way a checkbox has to", () => {
+	for (const on of [true, 1, "true", "TRUE", " yes ", "1"]) {
+		assert.equal(isCheckedValue(on), true, JSON.stringify(on));
+	}
+	for (const off of [false, 0, "", "false", "no", "anything", undefined, null]) {
+		assert.equal(isCheckedValue(off), false, JSON.stringify(off));
+	}
+});
+
+test("`t` is serialized after `s`, one cell per line", () => {
+	const doc = newSheetDoc();
+	doc.sheets[0].cells = {
+		A1: { v: true, s: { b: true }, t: "cb" },
+		A2: { v: false, t: "cb" },
+	};
+	const text = serializeSheet(doc);
+	assert.ok(
+		text.includes('"A1": { "v": true, "s": { "b": true }, "t": "cb" }'),
+		text.split("\n").find((l) => l.includes("A1")),
+	);
+	assert.ok(text.includes('"A2": { "v": false, "t": "cb" }'));
+	const back = parseSheet(text);
+	assert.equal(back.sheets[0].cells.A1.t, "cb");
+	assert.equal(back.sheets[0].cells.A1.v, true);
+	assert.equal(back.sheets[0].cells.A2.v, false);
+	// byte-stable, like every other key
+	assert.equal(serializeSheet(back), text);
+});
+
+test("an unticked checkbox is not an empty cell", () => {
+	// Otherwise the box would vanish on the next save: `false` and "no value"
+	// look the same to a sparse writer that only knows about values and styles.
+	assert.equal(isEmptyCell({ t: "cb" }), false);
+	assert.equal(isEmptyCell({ v: false, t: "cb" }), false);
+	assert.equal(isEmptyCell({}), true);
+	assert.equal(isEmptyCell({ v: "" }), true);
+	const doc = newSheetDoc();
+	doc.sheets[0].cells = { B2: { t: "cb" } };
+	const back = parseSheet(serializeSheet(doc));
+	assert.equal(back.sheets[0].cells.B2.t, "cb");
+});
+
+test("an unknown cell type is dropped rather than carried around", () => {
+	const text = serializeSheet(newSheetDoc()).replace(
+		'"cells": {}',
+		'"cells": {\n        "A1": { "v": 1, "t": "dropdown" }\n      }',
+	);
+	const doc = parseSheet(text);
+	assert.equal(doc.sheets[0].cells.A1.v, 1);
+	assert.equal(doc.sheets[0].cells.A1.t, undefined);
+});
+
+test("a v3 file gains nothing at all until a checkbox is put in it", () => {
+	// The 3 -> 4 bump changes the version line and nothing else: `t` is written
+	// only for the cells that have one.
+	const v3 = serializeSheet(newSheetDoc()).replace('"version": 4', '"version": 3');
+	const doc = parseSheet(v3);
+	const written = serializeSheet(doc);
+	const added = written.split("\n").filter((l) => !v3.split("\n").includes(l));
+	assert.deepEqual(added, ['  "version": 4,']);
 });

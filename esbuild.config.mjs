@@ -26,8 +26,35 @@ const footer = `
  *   MIT License, Jspreadsheet Ltd / Paul Hodel
  * - Jspreadsheet Extensions: Formula Basic (https://jspreadsheet.com)
  *   "License: This is a free software MIT"
+ * - xlsx-js-style 1.2.0 (https://github.com/gitbrent/xlsx-js-style)
+ *   SheetJS Community Edition 0.18.5 plus cell styles, maintained by Brent Ely
+ *   Apache License 2.0, Copyright (C) 2012-present SheetJS LLC
  */
 `;
+
+/**
+ * Keep the legacy code pages out of the bundle.
+ *
+ * `xlsx-js-style/dist/xlsx.min.js` ends with
+ * `typeof require && (cptable = require("./cpexcel.js"))`, a RUNTIME guard for
+ * old single-byte encodings in `.xls`, `.dbf` and friends. esbuild cannot know
+ * the branch is dead and pulls the 472 KB table in: measured, the same bundle is
+ * 1 239 911 B with it and 427 056 B without. We only ever touch `.xlsx`, which
+ * is UTF-8 XML inside a zip, so the tables have nothing to do.
+ */
+const stubCodepagePlugin = {
+	name: "stub-cpexcel",
+	setup(build) {
+		build.onResolve({ filter: /cpexcel(\.js)?$/ }, () => ({
+			path: "cpexcel-stub",
+			namespace: "leovale-stub",
+		}));
+		build.onLoad({ filter: /.*/, namespace: "leovale-stub" }, () => ({
+			contents: "module.exports = undefined;",
+			loader: "js",
+		}));
+	},
+};
 
 /**
  * Obsidian only ever loads `styles.css`. esbuild emits `main.css` for imported
@@ -123,7 +150,7 @@ const context = await esbuild.context({
 	legalComments: "eof",
 	// Vendor CSS references SVG/PNG assets; inline them, no runtime fetches.
 	loader: { ".svg": "dataurl", ".png": "dataurl", ".gif": "dataurl" },
-	plugins: [cssScopePlugin],
+	plugins: [cssScopePlugin, stubCodepagePlugin],
 });
 
 if (prod) {

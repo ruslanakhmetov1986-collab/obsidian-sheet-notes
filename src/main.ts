@@ -2,14 +2,21 @@ import {
 	type App,
 	Notice,
 	Plugin,
-	type TFile,
+	TFile,
 	TFolder,
 	normalizePath,
 } from "obsidian";
 import { SheetView, VIEW_TYPE_SHEET } from "./view";
 import { releaseEngineGlobals } from "./engine";
 import { registerSheetEmbeds } from "./embed";
-import { newSheetDoc, serializeSheet } from "./format";
+import { newSheetDoc, parseSheet, serializeSheet } from "./format";
+import {
+	XLSX_EXT,
+	exportDocAsXlsx,
+	importXlsxBytes,
+	importXlsxFile,
+	pickXlsx,
+} from "./xlsxio";
 import { t } from "./i18n";
 
 /** Preferred extension. Also used by Sheet Plus, Excel and Spreadsheets. */
@@ -147,6 +154,55 @@ export default class LeovaleSheetsPlugin extends Plugin {
 			},
 		});
 
+		this.addCommand({
+			id: "merge-cells",
+			name: "Merge or split cells",
+			checkCallback: (checking: boolean) => {
+				const view = this.app.workspace.getActiveViewOfType(SheetView);
+				if (!view) return false;
+				if (!checking) view.mergeSelection();
+				return true;
+			},
+		});
+
+		// --- exchange and print (1.4.0) ---------------------------------------
+
+		this.addCommand({
+			id: "export-xlsx",
+			name: "Export as .xlsx",
+			checkCallback: (checking: boolean) => {
+				const view = this.app.workspace.getActiveViewOfType(SheetView);
+				if (!view?.file) return false;
+				if (!checking) void view.exportXlsx();
+				return true;
+			},
+		});
+
+		this.addCommand({
+			id: "import-xlsx",
+			name: "Import .xlsx as sheet",
+			callback: () =>
+				pickXlsx((data, name) =>
+					void importXlsxBytes(this.app, data, name, this.newSheetExt()),
+				),
+		});
+
+		// Print goes through the browser's own dialog, which is Electron's system
+		// print dialog on the desktop. Everything that makes the result readable -
+		// no toolbar, no formula bar, the whole grid instead of the visible part,
+		// the header row repeated on every page - is the `@media print` block in
+		// the theme layer.
+		this.addCommand({
+			id: "print-sheet",
+			name: "Print spreadsheet",
+			checkCallback: (checking: boolean) => {
+				const view = this.app.workspace.getActiveViewOfType(SheetView);
+				if (!view) return false;
+				if (!checking) window.print();
+				return true;
+			},
+		});
+
 		this.addRibbonIcon("table", "New spreadsheet", () =>
 			void createSheet(this.app, undefined, this.newSheetExt()),
 		);
@@ -154,13 +210,34 @@ export default class LeovaleSheetsPlugin extends Plugin {
 		this.registerEvent(
 			this.app.workspace.on("file-menu", (menu, file) => {
 				// Fires for files too; the reference plugin crashed here.
-				if (!(file instanceof TFolder)) return;
-				menu.addItem((item) =>
-					item
-						.setTitle("New spreadsheet")
-						.setIcon("table")
-						.onClick(() => void createSheet(this.app, file, this.newSheetExt())),
-				);
+				if (file instanceof TFolder) {
+					menu.addItem((item) =>
+						item
+							.setTitle("New spreadsheet")
+							.setIcon("table")
+							.onClick(() => void createSheet(this.app, file, this.newSheetExt())),
+					);
+					return;
+				}
+				if (!(file instanceof TFile)) return;
+				const ext = file.extension.toLowerCase();
+				// The two ways a spreadsheet and a workbook meet, offered exactly
+				// where a user looks for them: on the file itself.
+				if (ext === SHEET_EXT || ext === FALLBACK_EXT) {
+					menu.addItem((item) =>
+						item
+							.setTitle("Export as .xlsx")
+							.setIcon("file-spreadsheet")
+							.onClick(() => void exportSheetFile(this.app, file)),
+					);
+				} else if (ext === XLSX_EXT) {
+					menu.addItem((item) =>
+						item
+							.setTitle("Import as spreadsheet")
+							.setIcon("table")
+							.onClick(() => void importXlsxFile(this.app, file, this.newSheetExt())),
+					);
+				}
 			}),
 		);
 	}
@@ -207,6 +284,31 @@ export default class LeovaleSheetsPlugin extends Plugin {
 		// awaited (onunload is synchronous): the module's closures outlive the
 		// plugin object, so the removal still lands on the right functions.
 		void releaseEngineGlobals();
+	}
+}
+
+/**
+ * Export a `.sheet` from the file explorer, whether or not it is open.
+ *
+ * An open tab is asked first, and that is not an optimisation: its grid may hold
+ * edits from the last second and a half that the file on disk does not have yet,
+ * and exporting the older bytes would be a quietly wrong answer.
+ */
+export async function exportSheetFile(app: App, file: TFile): Promise<void> {
+	for (const leaf of app.workspace.getLeavesOfType(VIEW_TYPE_SHEET)) {
+		const view = leaf.view;
+		if (view instanceof SheetView && view.file?.path === file.path) {
+			await view.exportXlsx();
+			return;
+		}
+	}
+	try {
+		const text = await app.vault.read(file);
+		const doc = text.trim().length > 0 ? parseSheet(text) : newSheetDoc();
+		await exportDocAsXlsx(app, file, doc);
+	} catch (e) {
+		console.error("leovale-sheets: reading the sheet to export failed", e);
+		new Notice(t("xlsxExportFailed", { message: (e as Error).message }), 8000);
 	}
 }
 

@@ -19,6 +19,7 @@ export const FORMAT_ID = "leovale-sheet";
  * 1 -> 2 (release 1.2.0): cell styles gained `nf`, `ha`, `va` and `wrap`.
  * 2 -> 3 (release 1.3.0): a page gained the `view` (sort + filters) and
  * `freeze` (frozen rows/columns) blocks.
+ * 3 -> 4 (release 1.4.0): a cell gained `t`, its type (`"cb"` = checkbox).
  *
  * The bump is not cosmetic, and the rule behind it is always the same one: a
  * build that cannot see a key DROPS it on save. A 1.1.x build's
@@ -29,10 +30,21 @@ export const FORMAT_ID = "leovale-sheet";
  * makes that build refuse to write the file at all
  * (`isSupportedVersion` -> read-only), which is the entire point of the field.
  *
- * Reading v1 and v2 keeps working forever; writing always emits the current
+ * Version 4 is the same argument once more, and it was checked rather than
+ * assumed: a 1.3.0 build's `parseCell()` copies `v`, `f` and `s` onto a fresh
+ * cell and never looks at `t`, so a checkbox column opened and re-saved there
+ * would come back as a column of `true`/`false` text. The bump is what stops
+ * that build from writing the file at all.
+ *
+ * Wiki links in cells needed no bump: a `[[Note]]` is an ordinary string in `v`,
+ * every older build stores and returns it unchanged, and only the RENDERING is
+ * new. Merged cells needed none either - `merges` has been in the format since
+ * 1.1.x, 1.4.0 only added a button for it.
+ *
+ * Reading v1..v3 keeps working forever; writing always emits the current
  * version (see {@link serializeSheet}).
  */
-export const CURRENT_VERSION = 3;
+export const CURRENT_VERSION = 4;
 
 /** Shortest plausible serialization; used by the view as an anti-truncation floor. */
 export const MIN_VALID = 60;
@@ -84,6 +96,39 @@ export interface CellStyle {
 	wrap?: true;
 }
 
+/**
+ * Cell types beyond "a value with a style". Exactly one so far.
+ *
+ *   cb   checkbox: the cell renders as a tick box and its `v` is a boolean
+ *
+ * A type is deliberately NOT a style: `s` describes how a value LOOKS, `t`
+ * changes what the cell IS and what typing into it means. Keeping them apart is
+ * also what lets a checkbox keep a fill, a border and an alignment.
+ */
+export const CELL_TYPES = ["cb"] as const;
+export type CellType = (typeof CELL_TYPES)[number];
+
+/** "cb" (also accepts "checkbox"); anything else -> undefined. */
+export function normalizeCellType(input: unknown): CellType | undefined {
+	if (typeof input !== "string") return undefined;
+	const s = input.trim().toLowerCase();
+	if (s === "cb" || s === "checkbox") return "cb";
+	return undefined;
+}
+
+/**
+ * How a checkbox reads a value. Everything that is not a truthy boolean, a
+ * non-zero number or a "true"-ish word is unticked, so a checkbox put on a
+ * column of text never shows a tick it cannot explain.
+ */
+export function isCheckedValue(value: CellValue | undefined | null): boolean {
+	if (typeof value === "boolean") return value;
+	if (typeof value === "number") return value !== 0;
+	if (typeof value !== "string") return false;
+	const s = value.trim().toLowerCase();
+	return s === "true" || s === "1" || s === "yes";
+}
+
 export interface SheetCell {
 	/** Literal value. Absent for pure-formula cells. */
 	v?: CellValue;
@@ -91,6 +136,8 @@ export interface SheetCell {
 	f?: string;
 	/** Normalized style. Omitted when empty. */
 	s?: CellStyle;
+	/** Cell type. Since v4; only `"cb"` (checkbox) exists. */
+	t?: CellType;
 }
 
 const HEX_RE = /^#[0-9a-f]{6}$/;
@@ -443,13 +490,18 @@ function parseCell(raw: unknown, ref: string): SheetCell | null {
 	const style = normalizeStyle(src["s"]);
 	if (style) cell.s = style;
 
+	const type = normalizeCellType(src["t"]);
+	if (type) cell.t = type;
+
 	return isEmptyCell(cell) ? null : cell;
 }
 
 export function isEmptyCell(cell: SheetCell): boolean {
 	const hasV = cell.v !== undefined && cell.v !== null && cell.v !== "";
 	const hasF = typeof cell.f === "string" && cell.f.length > 0;
-	return !hasV && !hasF && isEmptyStyle(cell.s);
+	// A checkbox that has never been ticked has no value at all, and dropping it
+	// as "empty" would make the box disappear on the next save.
+	return !hasV && !hasF && !cell.t && isEmptyStyle(cell.s);
 }
 
 function parseIndexMap(raw: unknown, limit: number): Record<string, number> {
@@ -615,6 +667,11 @@ function serializeCellBody(cell: SheetCell): string {
 		parts.push(`"f": ${jstr(cell.f)}`);
 	}
 	if (style) parts.push(`"s": ${style}`);
+	// `t` goes AFTER `s`, for the same reason every new key is appended rather
+	// than sorted in: a file re-saved by this release differs from the older one
+	// only by the added tail of each cell, so the LiveSync diff stays one line.
+	const type = normalizeCellType(cell.t);
+	if (type) parts.push(`"t": ${jstr(type)}`);
 
 	if (parts.length === 0) return "";
 	return `{ ${parts.join(", ")} }`;

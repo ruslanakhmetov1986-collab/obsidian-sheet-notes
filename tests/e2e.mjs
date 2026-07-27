@@ -10,6 +10,7 @@
  */
 import fs from "node:fs";
 import path from "node:path";
+import zlib from "node:zlib";
 // Playwright is only needed for e2e, not for building the plugin. Either
 // `npm i -D playwright` in this repo, or point SHEETS_PLAYWRIGHT at an
 // existing install (a file:// URL to its index.mjs).
@@ -90,6 +91,125 @@ async function setBaseTheme(page, theme) {
 		}
 		return document.body.className;
 	}, theme);
+}
+
+/* ------------------------------------------------------------ PDF reading */
+
+/**
+ * Enough of a PDF reader to answer one question: is this text on the page?
+ *
+ * Chromium prints with SUBSET fonts and Identity-H encoding, so a content stream
+ * holds glyph ids, not letters - grepping the raw bytes for "Write docs" finds
+ * nothing whatever the page says. The glyph ids are translated by the font's own
+ * `/ToUnicode` CMap, which is in the file too, so the three steps below are:
+ * inflate every stream, collect every CMap into one table, then decode the text
+ * that the drawing operators show.
+ *
+ * The tables are merged rather than kept per font: two subsets can in principle
+ * disagree about a code, and a proper reader would follow the page's resource
+ * dictionary. For a "does the printed page contain this row" assertion the merged
+ * table is enough, and it is checked against a string that has to be ABSENT too,
+ * so a decoder that produced mush would fail the suite rather than pass it.
+ */
+function pdfStreams(buf) {
+	const raw = buf.toString("latin1");
+	const out = [];
+	// The dictionary end is part of the pattern on purpose: an embedded font is
+	// binary, and the seven bytes "stream\n" turn up inside one often enough to
+	// send a naive scanner off by a whole object (measured: 9 of 10 "streams"
+	// came out as garbage that way).
+	const re = />>\s*stream\r?\n/g;
+	let m;
+	while ((m = re.exec(raw))) {
+		const start = m.index + m[0].length;
+		const end = raw.indexOf("endstream", start);
+		if (end < 0) continue;
+		const chunk = buf.subarray(start, end);
+		let text = null;
+		for (const inflate of [zlib.inflateSync, zlib.inflateRawSync]) {
+			try {
+				text = inflate(chunk).toString("latin1");
+				break;
+			} catch {
+				/* the next one, then the bytes as they are */
+			}
+		}
+		out.push(text ?? chunk.toString("latin1"));
+		re.lastIndex = end;
+	}
+	return out;
+}
+
+function hexToText(hex) {
+	let out = "";
+	for (let i = 0; i + 3 < hex.length; i += 4) out += String.fromCharCode(parseInt(hex.slice(i, i + 4), 16));
+	return out;
+}
+
+function pdfToUnicode(streams) {
+	const map = new Map();
+	for (const text of streams) {
+		if (!text.includes("beginbfchar") && !text.includes("beginbfrange")) continue;
+		for (const block of text.match(/beginbfchar[\s\S]*?endbfchar/g) ?? []) {
+			for (const m of block.matchAll(/<([0-9a-fA-F]+)>\s*<([0-9a-fA-F]+)>/g)) {
+				map.set(parseInt(m[1], 16), hexToText(m[2]));
+			}
+		}
+		for (const block of text.match(/beginbfrange[\s\S]*?endbfrange/g) ?? []) {
+			for (const m of block.matchAll(/<([0-9a-fA-F]+)>\s*<([0-9a-fA-F]+)>\s*<([0-9a-fA-F]+)>/g)) {
+				const lo = parseInt(m[1], 16);
+				const hi = parseInt(m[2], 16);
+				const dst = parseInt(m[3], 16);
+				for (let c = lo; c <= hi && c - lo < 1024; c++) {
+					map.set(c, String.fromCharCode(dst + (c - lo)));
+				}
+			}
+		}
+	}
+	return map;
+}
+
+/** The visible text of a printed page, as best a hundred lines can tell. */
+function pdfText(buf) {
+	const streams = pdfStreams(buf);
+	const cmap = pdfToUnicode(streams);
+	const decodeHex = (hex) => {
+		const clean = hex.replace(/\s+/g, "");
+		let out = "";
+		for (let i = 0; i + 3 < clean.length; i += 4) {
+			out += cmap.get(parseInt(clean.slice(i, i + 4), 16)) ?? "";
+		}
+		return out;
+	};
+	const decodeLiteral = (s) => s.replace(/\\([()\\])/g, "$1");
+
+	const parts = [];
+	for (const text of streams) {
+		if (!/\bTJ\b|\bTj\b/.test(text)) continue;
+		// Three shapes carry text: `[..] TJ` (kerned runs), `(..) Tj` (literal),
+		// and `<hex> Tj` - which is what Chromium emits, one glyph at a time,
+		// through an Identity-H subset font.
+		for (const m of text.matchAll(
+			/\[([^\]]*)\]\s*TJ|\(((?:\\.|[^)])*)\)\s*Tj|<([0-9a-fA-F\s]*)>\s*Tj/g,
+		)) {
+			if (m[3] !== undefined) {
+				parts.push(decodeHex(m[3]));
+				continue;
+			}
+			if (m[2] !== undefined) {
+				parts.push(decodeLiteral(m[2]));
+				continue;
+			}
+			let piece = "";
+			for (const token of (m[1] ?? "").matchAll(/<([0-9a-fA-F\s]+)>|\(((?:\\.|[^)])*)\)/g)) {
+				piece += token[1] !== undefined ? decodeHex(token[1]) : decodeLiteral(token[2] ?? "");
+			}
+			parts.push(piece);
+		}
+	}
+	// Chromium draws a glyph at a time, so the pieces are joined without a
+	// separator; word breaks come from the text itself.
+	return parts.join("");
 }
 
 function selectedCell(page) {
@@ -493,7 +613,8 @@ async function main() {
 		console.log("  toolbar icons:", icons);
 		check(
 			"every icon button actually rendered its glyph",
-			icons.length === 12 && icons.every((i) => i.glyphs === 1 || i.cls.includes("tb-size")),
+			// 1.4.0 added two: merge and checkbox
+			icons.length === 14 && icons.every((i) => i.glyphs === 1 || i.cls.includes("tb-size")),
 			JSON.stringify(icons),
 		);
 		check(
@@ -826,8 +947,8 @@ async function main() {
 		check("LF endings only", !onDisk.includes("\r"));
 		check("trailing newline", onDisk.endsWith("}\n"));
 		check(
-			"2-space indent header, format version 3",
-			onDisk.startsWith('{\n  "format": "leovale-sheet",\n  "version": 3,'),
+			"2-space indent header, format version 4",
+			onDisk.startsWith('{\n  "format": "leovale-sheet",\n  "version": 4,'),
 			onDisk.slice(0, 60),
 		);
 		check("valid JSON", (() => { try { JSON.parse(onDisk); return true; } catch { return false; } })());
@@ -1620,8 +1741,10 @@ async function main() {
 		const dataSaved = fs.readFileSync(dataDisk, "utf8");
 		console.log("  ---- Data.sheet on disk ----");
 		console.log(dataSaved.split("\n").map((l) => "  | " + l).join("\n"));
-		check("still version 3 deterministic JSON",
-			dataSaved.startsWith('{\n  "format": "leovale-sheet",\n  "version": 3,'), dataSaved.slice(0, 50));
+		// The fixture on disk was a version 3 file; saving it rewrites the version
+		// line, which is the 3 -> 4 rule and nothing else about it changes.
+		check("saved as version 4 deterministic JSON",
+			dataSaved.startsWith('{\n  "format": "leovale-sheet",\n  "version": 4,'), dataSaved.slice(0, 50));
 		check("the view block holds the sort",
 			dataSaved.includes('"sort": { "col": 0, "dir": "asc" }'), dataSaved);
 		check("the freeze block holds the frozen row",
@@ -1999,6 +2122,640 @@ async function main() {
 		await shot(page, "17-data-dark");
 		await setBaseTheme(page, "moonstone");
 		await page.waitForTimeout(500);
+
+		/* ================================================================== *
+		 *  1.4.0: exchange and print                                         *
+		 * ================================================================== */
+
+		step("1.4.0: a sheet with wiki links and a checkbox column");
+		const X_PATH = "Exchange14.sheet";
+		const X_DISK = path.join(VAULT, X_PATH);
+		const X_XLSX = path.join(VAULT, "Exchange14.xlsx");
+		const LINK_NOTE = "Linked note.md";
+		const X_SOURCE = [
+			"{",
+			'  "format": "leovale-sheet",',
+			'  "version": 4,',
+			'  "sheets": [',
+			"    {",
+			'      "name": "Sheet1",',
+			'      "rows": 40,',
+			'      "cols": 6,',
+			'      "colWidths": {',
+			'        "0": 160,',
+			'        "2": 180',
+			"      },",
+			'      "rowHeights": {},',
+			'      "merges": {},',
+			'      "view": {},',
+			'      "freeze": {},',
+			'      "cells": {',
+			'        "A1": { "v": "Task", "s": { "b": true, "bg": "#fff2cc", "bd": "trbl" } },',
+			'        "B1": { "v": "Done", "s": { "b": true, "bg": "#fff2cc" } },',
+			'        "C1": { "v": "Note", "s": { "b": true, "bg": "#fff2cc" } },',
+			'        "D1": { "v": "Qty", "s": { "b": true, "bg": "#fff2cc", "ha": "r" } },',
+			'        "A2": { "v": "Write docs" },',
+			'        "B2": { "v": false, "t": "cb" },',
+			'        "C2": { "v": "[[Linked note]]" },',
+			'        "D2": { "v": 3, "s": { "nf": "#,##0.00", "ha": "r" } },',
+			'        "A3": { "v": "Ship it" },',
+			'        "B3": { "v": true, "t": "cb" },',
+			'        "C3": { "v": "see [[Linked note|the note]]" },',
+			'        "D3": { "v": 4, "s": { "ha": "r" } },',
+			'        "A4": { "v": "Total", "s": { "b": true } },',
+			'        "D4": { "f": "=SUM(D2:D3)", "s": { "b": true, "ha": "r" } },',
+			'        "A6": { "v": "merge me" },',
+			'        "B6": { "v": "lost" },',
+			'        "A7": { "v": "second row" }',
+			"      }",
+			"    }",
+			"  ]",
+			"}",
+			"",
+		].join("\n");
+
+		const openX = async () => {
+			await page.evaluate(
+				async ([p, text, note]) => {
+					const app = window.app;
+					app.workspace.detachLeavesOfType("leovale-sheet-view");
+					if (!app.vault.getAbstractFileByPath(note)) {
+						await app.vault.create(note, "# Linked note\n\nA note a cell points at.\n");
+					}
+					const old = app.vault.getAbstractFileByPath(p);
+					if (old) await app.vault.delete(old);
+					const f = await app.vault.create(p, text);
+					await app.workspace.getLeaf(true).openFile(f);
+				},
+				[X_PATH, X_SOURCE, LINK_NOTE],
+			);
+			await page.waitForFunction(
+				(p) => window.sheetView()?.file?.path === p && !!window.wsHandle(),
+				X_PATH,
+				{ timeout: 20_000 },
+			);
+			await page.waitForTimeout(600);
+		};
+		await openX();
+
+		const xCell = (x, y) =>
+			`.leovale-sheet-content .leovale-sheet-root td[data-x="${x}"][data-y="${y}"]`;
+		const clickX = async (x, y) => {
+			await page.click(xCell(x, y));
+			await page.waitForTimeout(140);
+		};
+
+		const decor = await page.evaluate((sel) => {
+			const q = (s) => document.querySelector(s);
+			const boxes = [...document.querySelectorAll(".leovale-sheet-content input.leovale-sheet-cb")];
+			const links = [
+				...document.querySelectorAll(".leovale-sheet-content a.leovale-sheet-link"),
+			];
+			return {
+				boxes: boxes.length,
+				checked: boxes.map((b) => b.checked),
+				linkTexts: links.map((a) => a.textContent),
+				linkTargets: links.map((a) => a.getAttribute("data-href")),
+				linkIsInternal: links.every((a) => a.classList.contains("internal-link")),
+				// the raw brackets must NOT be on screen any more
+				c2Text: q(sel)?.textContent,
+				a2Text: q(sel.replace('data-x="2"', 'data-x="0"'))?.textContent,
+			};
+		}, xCell(2, 1));
+		console.log("  decor:", decor);
+		check("both checkbox cells rendered a real <input>", decor.boxes === 2, String(decor.boxes));
+		check("their state came from the file", JSON.stringify(decor.checked) === "[false,true]",
+			JSON.stringify(decor.checked));
+		check("both wiki links rendered an <a>", decor.linkTexts.length === 2,
+			JSON.stringify(decor.linkTexts));
+		check("a bare link shows the note name", decor.linkTexts[0] === "Linked note",
+			String(decor.linkTexts[0]));
+		check("an alias shows the alias", decor.linkTexts[1] === "the note", String(decor.linkTexts[1]));
+		check("the link target is the note, not the alias",
+			decor.linkTargets.every((t) => t === "Linked note"), JSON.stringify(decor.linkTargets));
+		check("the anchor is an Obsidian internal link", decor.linkIsInternal === true);
+		check("the brackets are gone from the cell's own text", decor.c2Text === "Linked note",
+			String(decor.c2Text));
+
+		step("1.4.0: a click on a checkbox writes a boolean and autosaves");
+		await page.click(`${xCell(1, 1)} input.leovale-sheet-cb`);
+		await page.waitForTimeout(300);
+		const afterToggle = await page.evaluate(() =>
+			[...document.querySelectorAll(".leovale-sheet-content input.leovale-sheet-cb")].map(
+				(b) => b.checked,
+			),
+		);
+		check("the box the user clicked is now ticked",
+			JSON.stringify(afterToggle) === "[true,true]", JSON.stringify(afterToggle));
+		await page.waitForTimeout(5000);
+		const xAfterToggle = fs.readFileSync(X_DISK, "utf8");
+		check('the file says "v": true, "t": "cb"',
+			xAfterToggle.includes('"B2": { "v": true, "t": "cb" }'),
+			xAfterToggle.split("\n").filter((l) => l.includes("B2")).join(" | "));
+		check("the other checkbox is untouched",
+			xAfterToggle.includes('"B3": { "v": true, "t": "cb" }'),
+			xAfterToggle.split("\n").filter((l) => l.includes("B3")).join(" | "));
+		check("the file is a version 4 document", xAfterToggle.includes('"version": 4,'),
+			xAfterToggle.slice(0, 60));
+		// untick it again so the screenshots show one of each
+		await page.click(`${xCell(1, 1)} input.leovale-sheet-cb`);
+		await page.waitForTimeout(300);
+
+		step("1.4.0: hovering a link asks Obsidian for a preview");
+		await page.evaluate(() => {
+			window.__hoverLinks = [];
+			window.app.workspace.on("hover-link", (e) => {
+				window.__hoverLinks.push({
+					linktext: e?.linktext,
+					source: e?.source,
+					sourcePath: e?.sourcePath,
+					hasParent: !!e?.hoverParent,
+					hasTarget: !!e?.targetEl,
+				});
+			});
+		});
+		await page.hover(".leovale-sheet-content a.leovale-sheet-link");
+		await page.waitForTimeout(400);
+		const hovers = await page.evaluate(() => window.__hoverLinks);
+		console.log("  hover-link:", hovers);
+		check("a hover-link event was fired", hovers.length >= 1, JSON.stringify(hovers));
+		check("it names the note", hovers[0]?.linktext === "Linked note", JSON.stringify(hovers[0]));
+		check("it comes from the spreadsheet and knows its path",
+			hovers[0]?.sourcePath === X_PATH && !!hovers[0]?.source, JSON.stringify(hovers[0]));
+		check("it carries a hover parent and a target element",
+			hovers[0]?.hasParent === true && hovers[0]?.hasTarget === true, JSON.stringify(hovers[0]));
+
+		step("1.4.0: light and dark screenshots of links and checkboxes");
+		await clickX(0, 1);
+		await page.waitForTimeout(200);
+		await shot(page, "19-links-checkboxes-light");
+		await setBaseTheme(page, "obsidian");
+		await page.waitForTimeout(700);
+		await shot(page, "20-links-checkboxes-dark");
+		await setBaseTheme(page, "moonstone");
+		await page.waitForTimeout(500);
+
+		step("1.4.0: clicking a link opens the note");
+		await page.click(".leovale-sheet-content a.leovale-sheet-link");
+		await page.waitForTimeout(900);
+		const opened = await page.evaluate(() => window.app.workspace.getActiveFile()?.path);
+		check("the linked note is now the active file", opened === LINK_NOTE, String(opened));
+		await openX();
+
+		step("1.4.0: merge cells from the toolbar, with the confirm");
+		// A6:B6 -> B6 holds "lost", so the confirm has to appear
+		const a6 = await page.locator(xCell(0, 5)).boundingBox();
+		const b6 = await page.locator(xCell(1, 5)).boundingBox();
+		await page.mouse.move(a6.x + a6.width / 2, a6.y + a6.height / 2);
+		await page.mouse.down();
+		await page.mouse.move(b6.x + b6.width / 2, b6.y + b6.height / 2, { steps: 6 });
+		await page.mouse.up();
+		await page.waitForTimeout(250);
+		await page.click(".leovale-sheet-toolbar .leovale-sheet-tb-merge");
+		await page.waitForTimeout(500);
+		const confirm = await page.evaluate(() => ({
+			modals: document.querySelectorAll(".modal").length,
+			title: document.querySelector(".modal .modal-title")?.textContent,
+			body: document.querySelector(".leovale-sheet-confirm-body")?.textContent,
+			buttons: [...document.querySelectorAll(".modal button")].map((b) => b.textContent),
+		}));
+		console.log("  confirm:", confirm);
+		check("merging over data asks first", confirm.modals === 1, JSON.stringify(confirm));
+		check("the question says how many cells are emptied",
+			/\b1\b/.test(confirm.body ?? ""), String(confirm.body));
+		check("it offers cancel and merge", confirm.buttons.length === 2, JSON.stringify(confirm.buttons));
+		await page.click(`.modal button:text-is("${confirm.buttons[1]}")`);
+		await page.waitForTimeout(600);
+
+		// The engine keeps the swallowed <td> in the DOM and hides it, so "gone"
+		// has to be asked as "does it take up any space", not "is it in the tree".
+		const cellShown = (x, y) =>
+			page.evaluate(([cx, cy]) => {
+				const el = document.querySelector(
+					`.leovale-sheet-content .leovale-sheet-root td[data-x="${cx}"][data-y="${cy}"]`,
+				);
+				return !!el && el.getClientRects().length > 0;
+			}, [x, y]);
+		const merged = await page.evaluate((sel) => {
+			const cell = document.querySelector(sel);
+			return {
+				colspan: cell?.getAttribute("colspan"),
+				rowspan: cell?.getAttribute("rowspan"),
+				text: cell?.textContent,
+				modals: document.querySelectorAll(".modal").length,
+			};
+		}, xCell(0, 5));
+		merged.neighbourShown = await cellShown(1, 5);
+		console.log("  merged:", merged);
+		check("the anchor cell now spans two columns", merged.colspan === "2", String(merged.colspan));
+		check("only the top-left value survived", merged.text === "merge me", String(merged.text));
+		check("the swallowed cell no longer takes up a place in the grid",
+			merged.neighbourShown === false, String(merged.neighbourShown));
+		check("the dialog closed", merged.modals === 0, String(merged.modals));
+
+		await page.waitForTimeout(5000);
+		const xMerged = fs.readFileSync(X_DISK, "utf8");
+		check("the merge is in the file, in the merges block",
+			/"merges": \{\n\s+"A6": \[2, 1\]\n\s+\}/.test(xMerged),
+			xMerged.split("\n").slice(8, 16).join(" | "));
+		check("the emptied cell is no longer in the file", !xMerged.includes('"B6"'),
+			xMerged.split("\n").filter((l) => l.includes("B6")).join(" | "));
+
+		step("1.4.0: a merged sheet refuses to sort, as it always has");
+		await page.click(".leovale-sheet-toolbar .leovale-sheet-tb-sort");
+		await page.waitForTimeout(300);
+		await page.click('.menu .menu-item:has-text("A")');
+		await page.waitForTimeout(500);
+		const sortNotice = await page.evaluate(() =>
+			[...document.querySelectorAll(".notice")].map((n) => n.textContent).join(" | "),
+		);
+		console.log("  notice:", sortNotice);
+		check("it says merged cells cannot be sorted", /merge/i.test(sortNotice), sortNotice);
+
+		step("1.4.0: the same button splits the merge again");
+		await clickX(0, 5);
+		await page.click(".leovale-sheet-toolbar .leovale-sheet-tb-merge");
+		await page.waitForTimeout(600);
+		const split = await page.evaluate((sel) => ({
+			colspan: document.querySelector(sel)?.getAttribute("colspan"),
+			modals: document.querySelectorAll(".modal").length,
+		}), xCell(0, 5));
+		split.neighbourShown = await cellShown(1, 5);
+		console.log("  split:", split);
+		check("the span is gone", !split.colspan || split.colspan === "1", String(split.colspan));
+		check("the cell next to it is on screen again", split.neighbourShown === true);
+		check("splitting asks nothing: nothing can be lost", split.modals === 0);
+		await page.waitForTimeout(5000);
+		check("the file has no merges any more",
+			/"merges": \{\},/.test(fs.readFileSync(X_DISK, "utf8")),
+			fs.readFileSync(X_DISK, "utf8").split("\n").slice(8, 14).join(" | "));
+
+		step("1.4.0: the checkbox button turns cells into checkboxes and back");
+		await clickX(1, 3); // B4, an empty cell
+		await page.click(".leovale-sheet-toolbar .leovale-sheet-tb-checkbox");
+		await page.waitForTimeout(400);
+		const madeBox = await page.evaluate(
+			(sel) => ({
+				box: !!document.querySelector(`${sel} input.leovale-sheet-cb`),
+				active: !!document
+					.querySelector(".leovale-sheet-toolbar .leovale-sheet-tb-checkbox")
+					?.classList.contains("is-active"),
+			}),
+			xCell(1, 3),
+		);
+		check("the cell became a checkbox", madeBox.box === true, JSON.stringify(madeBox));
+		check("the toolbar button lights up for it", madeBox.active === true, JSON.stringify(madeBox));
+		await page.waitForTimeout(5000);
+		check('an untouched checkbox is still written to the file',
+			/"B4": \{ "v": false, "t": "cb" \}/.test(fs.readFileSync(X_DISK, "utf8")),
+			fs.readFileSync(X_DISK, "utf8").split("\n").filter((l) => l.includes("B4")).join(" | "));
+
+		await page.click(".leovale-sheet-toolbar .leovale-sheet-tb-checkbox");
+		await page.waitForTimeout(400);
+		const unmadeBox = await page.evaluate(
+			(sel) => !!document.querySelector(`${sel} input.leovale-sheet-cb`),
+			xCell(1, 3),
+		);
+		check("pressing it again gives a plain cell back", unmadeBox === false);
+		await page.waitForTimeout(5000);
+		check("and the file drops the type with it",
+			!fs.readFileSync(X_DISK, "utf8").includes('"B4"'),
+			fs.readFileSync(X_DISK, "utf8").split("\n").filter((l) => l.includes("B4")).join(" | "));
+
+		step("1.4.0: every 1.4.0 toolbar button really drew its icon");
+		const tbIcons = await page.evaluate(() =>
+			[...document.querySelectorAll(".leovale-sheet-toolbar .leovale-sheet-tb-btn")].map((b) => ({
+				cls: [...b.classList].find((c) => c.startsWith("leovale-sheet-tb-") && c !== "leovale-sheet-tb-btn"),
+				svg: !!b.querySelector("svg"),
+				label: b.getAttribute("aria-label"),
+			})),
+		);
+		console.log("  toolbar icons:", tbIcons.map((i) => `${i.cls}:${i.svg ? "svg" : "MISSING"}`).join(" "));
+		check("no toolbar button is an empty box", tbIcons.every((i) => i.svg), JSON.stringify(tbIcons));
+		check("the merge and checkbox buttons are there",
+			icons.some((i) => i.cls === "leovale-sheet-tb-merge") &&
+				icons.some((i) => i.cls === "leovale-sheet-tb-checkbox"),
+			JSON.stringify(tbIcons.map((i) => i.cls)));
+
+		step("1.4.0: export to .xlsx");
+		const cmds14 = await page.evaluate(
+			(id) => Object.keys(window.app.commands.commands).filter((c) => c.startsWith(id)),
+			PLUGIN_ID,
+		);
+		console.log("  commands:", cmds14.join(", "));
+		check(
+			"the palette has every 1.4.0 command",
+			["export-xlsx", "import-xlsx", "print-sheet", "merge-cells"].every((c) =>
+				cmds14.includes(`${PLUGIN_ID}:${c}`),
+			),
+			cmds14.join(", "),
+		);
+		if (fs.existsSync(X_XLSX)) fs.rmSync(X_XLSX);
+		await page.evaluate(
+			(id) => window.app.commands.executeCommandById(`${id}:export-xlsx`),
+			PLUGIN_ID,
+		);
+		await page.waitForTimeout(2500);
+		const exportNotice = await page.evaluate(() =>
+			[...document.querySelectorAll(".notice")].map((n) => n.textContent).join(" | "),
+		);
+		console.log("  export notice:", exportNotice);
+		check("a notice names the file that was written", /Exchange14\.xlsx/.test(exportNotice),
+			exportNotice);
+		check("the .xlsx landed next to the sheet", fs.existsSync(X_XLSX));
+		const xlsxBytes = fs.existsSync(X_XLSX) ? fs.readFileSync(X_XLSX) : Buffer.alloc(0);
+		check("it is a real zip container", xlsxBytes.slice(0, 2).toString() === "PK",
+			xlsxBytes.slice(0, 4).toString("hex"));
+		check("and not a stub", xlsxBytes.length > 2000, String(xlsxBytes.length));
+
+		step("1.4.0: the file menu of a .sheet and of an .xlsx");
+		// The context menu of the file explorer is driven through the workspace
+		// event the plugin actually listens to, with a stand-in Menu that records
+		// what was added. Right-clicking the sidebar would test Obsidian's tree
+		// widget; this tests OUR handler, and it can then fire the item.
+		const fileMenuItems = (target) =>
+			page.evaluate((path) => {
+				const app = window.app;
+				const file = app.vault.getAbstractFileByPath(path);
+				const items = [];
+				// Every listener on "file-menu" gets this object, not just ours -
+				// Obsidian's core and any other plugin as well - so it has to answer
+				// the whole Menu/MenuItem surface they use, or the console fills up
+				// with "setSection is not a function" from THEIR handlers.
+				const menu = {
+					addItem(build) {
+						const item = {
+							setTitle(t) {
+								item.title = t;
+								return item;
+							},
+							setIcon(i) {
+								item.icon = i;
+								return item;
+							},
+							setChecked: () => item,
+							setDisabled: () => item,
+							setSection: () => item,
+							setIsLabel: () => item,
+							setWarning: () => item,
+							onClick(fn) {
+								item.click = fn;
+								return item;
+							},
+						};
+						build(item);
+						items.push(item);
+						// Menu.addItem is chainable and callers rely on it:
+						// `menu.addItem(a).addItem(b)` threw "cannot read addItem of
+						// undefined" out of somebody else's handler until this returned.
+						return menu;
+					},
+					addSeparator: () => menu,
+					addSections: () => menu,
+					setSection: () => menu,
+					setSectionSubmenu: () => menu,
+					setNoIcon: () => menu,
+					setUseNativeMenu: () => menu,
+					showAtMouseEvent: () => menu,
+					showAtPosition: () => menu,
+					hide: () => menu,
+					close: () => menu,
+				};
+				app.workspace.trigger("file-menu", menu, file, "file-explorer");
+				window.__menuItems = items;
+				return items.map((i) => ({
+					title: i.title,
+					icon: i.icon,
+					clickable: typeof i.click === "function",
+				}));
+			}, target);
+		const sheetMenu = await fileMenuItems(X_PATH);
+		console.log("  .sheet file menu:", JSON.stringify(sheetMenu));
+		check("a .sheet offers the export", sheetMenu.some((i) => i.title === "Export as .xlsx"),
+			JSON.stringify(sheetMenu));
+		check("the export item has an icon and an action",
+			sheetMenu.every((i) => i.icon && i.clickable), JSON.stringify(sheetMenu));
+
+		const xlsxMenu = await fileMenuItems("Exchange14.xlsx");
+		console.log("  .xlsx file menu:", JSON.stringify(xlsxMenu));
+		check("an .xlsx offers the import",
+			xlsxMenu.some((i) => i.title === "Import as spreadsheet"), JSON.stringify(xlsxMenu));
+
+		step("1.4.0: import that .xlsx back, from the file menu item itself");
+		// Close the source sheet first: two tabs of the same grid means every
+		// `document.querySelector` below could answer from the hidden one, and a
+		// hidden tab measures zero. (Which is exactly how this went wrong once.)
+		await page.evaluate(() => window.app.workspace.detachLeavesOfType("leovale-sheet-view"));
+		await page.waitForTimeout(400);
+		await page.evaluate(() => {
+			const item = window.__menuItems.find((i) => i.title === "Import as spreadsheet");
+			item.click();
+		});
+		await page.waitForTimeout(2000);
+		const importNotice = await page.evaluate(() =>
+			[...document.querySelectorAll(".notice")].map((n) => n.textContent).join(" | "),
+		);
+		await page.waitForTimeout(1500);
+
+		const imported = await page.evaluate(() => ({
+			path: window.app.workspace.getActiveFile()?.path,
+			viewType: window.app.workspace.activeLeaf?.view?.getViewType?.(),
+			sheetTabs: window.app.workspace.getLeavesOfType("leovale-sheet-view").length,
+		}));
+		imported.notices = importNotice;
+		console.log("  imported:", imported);
+		check("the import opened a new spreadsheet, without overwriting the old one",
+			imported.path === "Exchange14 1.sheet", String(imported.path));
+		check("it opened in our grid", imported.viewType === "leovale-sheet-view",
+			String(imported.viewType));
+		check("the notice names the file it wrote", /Exchange14 1\.sheet/.test(imported.notices),
+			imported.notices);
+		check("the notice counts the worksheets and the cells that arrived",
+			/\b1\b/.test(imported.notices) && /\b1[0-9]\b/.test(imported.notices), imported.notices);
+		check("exactly one spreadsheet tab is open", imported.sheetTabs === 1,
+			String(imported.sheetTabs));
+
+		const importedCells = await page.evaluate(() => {
+			const at = (x, y) =>
+				document.querySelector(
+					`.leovale-sheet-content .leovale-sheet-root td[data-x="${x}"][data-y="${y}"]`,
+				);
+			const style = (x, y) => {
+				const el = at(x, y);
+				if (!el) return null;
+				const cs = getComputedStyle(el);
+				return { weight: cs.fontWeight, bg: cs.backgroundColor, align: cs.textAlign };
+			};
+			return {
+				a1: at(0, 0)?.textContent,
+				a2: at(0, 1)?.textContent,
+				c2: at(2, 1)?.textContent,
+				d2: at(3, 1)?.textContent,
+				d4: at(3, 3)?.textContent,
+				b2: at(1, 1)?.textContent,
+				a1Style: style(0, 0),
+				width: Math.round(
+					document
+						.querySelector('.leovale-sheet-content .leovale-sheet-root thead td[data-x="0"]')
+						.getBoundingClientRect().width,
+				),
+			};
+		});
+		console.log("  imported cells:", importedCells);
+		check("the values arrived", importedCells.a1 === "Task" && importedCells.a2 === "Write docs",
+			JSON.stringify(importedCells));
+		check("the number mask came with them", importedCells.d2 === "3.00", String(importedCells.d2));
+		check("the formula recomputed after the trip", importedCells.d4 === "7", String(importedCells.d4));
+		check("bold survived", Number(importedCells.a1Style?.weight) >= 600,
+			String(importedCells.a1Style?.weight));
+		check("the fill survived", importedCells.a1Style?.bg === "rgb(255, 242, 204)",
+			String(importedCells.a1Style?.bg));
+		check("the column width survived", Math.abs(importedCells.width - 160) <= 2,
+			String(importedCells.width));
+		check("a wiki link is still the text it was", importedCells.c2 === "[[Linked note]]" ||
+			importedCells.c2 === "Linked note", String(importedCells.c2));
+		check("a checkbox arrives as its boolean", /true|false/i.test(importedCells.b2 ?? ""),
+			String(importedCells.b2));
+
+		const importedDisk = fs.readFileSync(path.join(VAULT, "Exchange14 1.sheet"), "utf8");
+		check("the imported file is our own deterministic JSON",
+			importedDisk.startsWith('{\n  "format": "leovale-sheet",\n  "version": 4,'),
+			importedDisk.slice(0, 60));
+		check("with the styles mapped back into it",
+			importedDisk.includes('"b": true') && importedDisk.includes('"bg": "#fff2cc"') &&
+				importedDisk.includes('"bd": "trbl"'),
+			importedDisk.split("\n").filter((l) => l.includes("A1")).join(" | "));
+		check("and the formula, not its result",
+			importedDisk.includes('"f": "=SUM(D2:D3)"'),
+			importedDisk.split("\n").filter((l) => l.includes("D4")).join(" | "));
+
+		step("1.4.0: print stylesheet and a real PDF (CDP Page.printToPDF)");
+		await page.evaluate(async (p) => {
+			const app = window.app;
+			app.workspace.leftSplit?.collapse?.();
+			const f = app.vault.getAbstractFileByPath(p);
+			app.workspace.detachLeavesOfType("leovale-sheet-view");
+			await app.workspace.getLeaf(true).openFile(f);
+		}, X_PATH);
+		await page.waitForFunction((p) => window.sheetView()?.file?.path === p, X_PATH, {
+			timeout: 20_000,
+		});
+		await page.waitForTimeout(800);
+
+		const printCdp = await page.context().newCDPSession(page);
+		await printCdp.send("Emulation.setEmulatedMedia", { media: "print" });
+		await page.waitForTimeout(400);
+		const printLayout = await page.evaluate(() => {
+			const shown = (sel) => {
+				const el = document.querySelector(sel);
+				if (!el) return "absent";
+				return getComputedStyle(el).display;
+			};
+			const wrapper = document.querySelector(".leovale-sheet-wrapper");
+			const table = document.querySelector(".leovale-sheet-content .jss_worksheet");
+			const firstCell = document.querySelector(
+				'.leovale-sheet-content .leovale-sheet-root td[data-x="0"][data-y="0"]',
+			);
+			return {
+				toolbar: shown(".leovale-sheet-toolbar"),
+				formulabar: shown(".leovale-sheet-formulabar"),
+				ribbon: shown(".workspace-ribbon"),
+				statusbar: shown(".status-bar"),
+				viewHeader: shown(".view-header"),
+				tabHeaders: shown(".workspace-tab-header-container"),
+				wrapperOverflow: wrapper ? getComputedStyle(wrapper).overflow : "absent",
+				thead: getComputedStyle(document.querySelector(".leovale-sheet-content thead")).display,
+				cellPosition: firstCell ? getComputedStyle(firstCell).position : "absent",
+				tableHeight: table ? Math.round(table.getBoundingClientRect().height) : 0,
+				wrapperHeight: wrapper ? Math.round(wrapper.getBoundingClientRect().height) : 0,
+			};
+		});
+		console.log("  print layout:", printLayout);
+		check("the toolbar is hidden on paper", printLayout.toolbar === "none", printLayout.toolbar);
+		check("so is the formula bar", printLayout.formulabar === "none", printLayout.formulabar);
+		check("Obsidian's ribbon is hidden", printLayout.ribbon === "none", printLayout.ribbon);
+		check("so is the status bar", printLayout.statusbar === "none", printLayout.statusbar);
+		check("and the tab header", printLayout.tabHeaders === "none", printLayout.tabHeaders);
+		check("the header row repeats on every page",
+			printLayout.thead === "table-header-group", printLayout.thead);
+		check("frozen/sticky cells are static on paper",
+			printLayout.cellPosition === "static", printLayout.cellPosition);
+		check("the grid is not a scroll box any more",
+			printLayout.wrapperOverflow === "visible", printLayout.wrapperOverflow);
+		check("the whole grid is laid out, not just the visible part",
+			printLayout.wrapperHeight >= printLayout.tableHeight - 2,
+			`wrapper ${printLayout.wrapperHeight} vs table ${printLayout.tableHeight}`);
+
+		await shot(page, "21-print-light");
+
+		// The PDF itself: CDP first, because that is the documented way to ask a
+		// Chromium for one. Electron does not register `Page.printToPDF` at all
+		// (headful Chromium keeps it in the browser process, and Electron's
+		// embedder never wires it up) - measured here as
+		// "'Page.printToPDF' wasn't found". Its own `webContents.printToPDF` is the
+		// same printing pipeline behind Ctrl+P, reached through @electron/remote,
+		// which is what the plugin's Print command ends up in as well.
+		let pdfSource = "cdp";
+		let pdfBase64 = "";
+		try {
+			pdfBase64 = (
+				await printCdp.send("Page.printToPDF", {
+					printBackground: true,
+					preferCSSPageSize: false,
+					landscape: true,
+				})
+			).data;
+		} catch (e) {
+			pdfSource = `electron (${String(e.message).split("\n")[0]})`;
+			pdfBase64 = await page.evaluate(async () => {
+				const remote = window.require("@electron/remote");
+				const buffer = await remote
+					.getCurrentWebContents()
+					.printToPDF({ printBackground: true, landscape: true });
+				const bytes = new Uint8Array(buffer);
+				let binary = "";
+				const step = 0x8000;
+				for (let i = 0; i < bytes.length; i += step) {
+					binary += String.fromCharCode.apply(null, bytes.subarray(i, i + step));
+				}
+				return btoa(binary);
+			});
+		}
+		console.log("  pdf via:", pdfSource);
+		await printCdp.send("Emulation.setEmulatedMedia", { media: "" });
+		await page.waitForTimeout(300);
+		const pdfBuf = Buffer.from(pdfBase64, "base64");
+		fs.writeFileSync(path.join(SHOTS, "22-print.pdf"), pdfBuf);
+		console.log(`  pdf ${pdfBuf.length} B -> ${path.join(SHOTS, "22-print.pdf")}`);
+		check("the PDF is a PDF", pdfBuf.slice(0, 5).toString() === "%PDF-",
+			pdfBuf.slice(0, 8).toString());
+		const pdfPages = (pdfBuf.toString("latin1").match(/\/Type\s*\/Page[^s]/g) ?? []).length;
+		console.log("  pdf pages:", pdfPages);
+		check("it has at least one page", pdfPages >= 1, String(pdfPages));
+
+		const printedText = pdfText(pdfBuf);
+		console.log(`  pdf text (${printedText.length} chars):`, JSON.stringify(printedText.slice(0, 300)));
+		check("the grid's content is in the PDF", printedText.includes("Write docs"),
+			printedText.slice(0, 200));
+		check("so are the other rows", printedText.includes("Ship it") && printedText.includes("Total"),
+			printedText.slice(0, 200));
+		// Chromium draws one glyph per operator, so the header row arrives as a run
+		// of letters with nothing between them: "ABCDEF1Task2Write docs...".
+		check("and the column letters, and the row numbers with them",
+			printedText.includes("ABCDEF") && /1Task/.test(printedText),
+			printedText.slice(0, 120));
+		check("the app's chrome is NOT in it (no tab title)",
+			!printedText.includes("Exchange14"), printedText.slice(0, 200));
+		check("neither is the OTHER tab that happens to be open",
+			!printedText.includes("A note a cell points at"), printedText.slice(0, 200));
+		check("neither is the formula bar's placeholder",
+			!printedText.includes("Value or formula"), printedText.slice(0, 200));
+		// On paper a checkbox is a character, because Chromium's print painter
+		// ignores a styled <input> and printed every box empty, ticked or not.
+		check("a ticked and an unticked checkbox print differently",
+			printedText.includes("☑") && printedText.includes("☐"),
+			printedText.slice(0, 200));
+
 
 		step("embedded sheets in a markdown note");
 		const NOTE_PATH = "Embeds.md";
@@ -2384,7 +3141,7 @@ async function main() {
 		const lsheetDisk = fs.readFileSync(path.join(VAULT, "Untitled.lsheet"), "utf8");
 		check(
 			".lsheet on disk is our deterministic JSON",
-			lsheetDisk.startsWith('{\n  "format": "leovale-sheet",\n  "version": 3,'),
+			lsheetDisk.startsWith('{\n  "format": "leovale-sheet",\n  "version": 4,'),
 			lsheetDisk.slice(0, 40),
 		);
 

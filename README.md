@@ -14,8 +14,8 @@ the bundle.
 ## How this differs from Sheet Plus
 
 Sheet Plus is the established spreadsheet plugin for Obsidian and it does much
-more than this one: charts, pivot tables, images in cells, Excel import. If you
-need those, use it. The differences below are the reasons this plugin exists.
+more than this one: charts, pivot tables, images in cells. If you need those,
+use it. The differences below are the reasons this plugin exists.
 
 - **Your data survives.** A file whose `version` is newer than the plugin
   understands opens read-only, serialization is guarded so a failure returns the
@@ -26,11 +26,13 @@ need those, use it. The differences below are the reasons this plugin exists.
   of the file, which is what Git and Obsidian LiveSync need to sync a few
   kilobytes instead of the whole document. Sheet Plus stores its data as a
   single-line JSON blob, so any edit rewrites the entire file as one diff line.
-- **0.5 MB instead of 18.5 MB.** Sheet Plus exceeds Obsidian Sync's 5 MB
-  per-file limit, so Obsidian Sync cannot carry the plugin itself.
-- **Auditable in an afternoon.** MIT, one public dependency (Jspreadsheet CE),
-  and the whole save path is in this repository. Sheet Plus keeps its save path
-  in unpublished private modules and talks to a license server.
+- **1.2 MB instead of 18.5 MB.** Sheet Plus exceeds Obsidian Sync's 5 MB
+  per-file limit, so Obsidian Sync cannot carry the plugin itself. (0.7 MB of
+  the 1.2 is the `.xlsx` reader and writer, which is loaded lazily and never
+  runs unless you import or export something.)
+- **Auditable in an afternoon.** MIT, two public dependencies (Jspreadsheet CE
+  and SheetJS), and the whole save path is in this repository. Sheet Plus keeps
+  its save path in unpublished private modules and talks to a license server.
 - **Scoped CSS, no global patching.** Every selector is prefixed with
   `.leovale-sheet-root`; nothing is added to `window` or to Obsidian's
   prototypes.
@@ -46,6 +48,12 @@ need those, use it. The differences below are the reasons this plugin exists.
 ![A sheet embedded in a note: caption, formats, a cropped plain range](tests/shots/12-embed-light.png)
 
 ![The same note in the dark theme](tests/shots/13-embed-dark.png)
+
+![Checkbox cells and wiki links in cells](tests/shots/19-links-checkboxes-light.png)
+
+![The same sheet in the dark theme](tests/shots/20-links-checkboxes-dark.png)
+
+![The same sheet as it goes to the printer](tests/shots/21-print-light.png)
 
 ![Fill colour palette](tests/shots/06-palette-open-light.png)
 
@@ -124,8 +132,10 @@ A `.csv` opens in the same grid and is written back as plain CSV.
 - Line endings are LF, never CRLF, with a trailing newline.
 - Formatting (bold, fill, font size, borders) applies on screen but is **not
   saved**: a CSV file has nowhere to put it. Neither are column widths, row
-  heights, merges, frozen panes or filters. Sorting is the exception: it moves
-  the values themselves, so a sorted CSV stays sorted on disk.
+  heights, merges, frozen panes, filters or checkbox cells - a checkbox in a CSV
+  is the word `true` after a reload. Sorting is the exception: it moves the
+  values themselves, so a sorted CSV stays sorted on disk. A `[[wiki link]]` is
+  a plain string and survives, links and all.
 - Typing a formula works and it recalculates live, but the file stores the
   formula **text** (`=SUM(A1:A2)`), because that is all a CSV cell can hold.
   Open the same file in Excel and you get a real formula; open it in pandas and
@@ -165,6 +175,11 @@ wide as the cell.
 | Save now | `Ctrl+S` |
 | Exact column width | The `↔` toolbar button, or `Sheets: Set column width` |
 | Fit a column to its content | Double-click the right edge of its header |
+| Merge or split cells | The merge toolbar button, or `Sheets: Merge or split cells` |
+| Turn cells into checkboxes | The checkbox toolbar button |
+| Open a `[[link]]` in a cell | Click it (`Ctrl`-click for a new tab) |
+| Print | `Sheets: Print spreadsheet` |
+| Excel | `Sheets: Export as .xlsx` / `Sheets: Import .xlsx as sheet` |
 
 Hold `Shift` with any of the movement keys to extend the selection instead of
 moving it. These keys are live only while the grid itself has the focus: typing
@@ -193,6 +208,8 @@ icon buttons with thin separators between groups.
 | Number format, `# ⌄` | Menu: Auto, `0.00`, `#,##0`, `#,##0.00`, `0%`, currency in $, € or ₽, `yyyy-mm-dd`, date and time. The live mask is shown on the button |
 | Alignment | One menu for both axes: left / center / right, then top / middle / bottom |
 | Wrap text | Toggle. Long text wraps inside the cell and the row grows to fit it |
+| Merge (`⧉`) | Merges the selection into its top-left cell, or splits it again when the selection is already merged |
+| Checkbox (`☑`) | Turns the selected cells into tick boxes, and back |
 | Sort (`⇅`) | Sort A → Z, Z → A, or drop the sort marker. Acts on the column the selection starts in |
 | Filter (funnel) | The distinct values of that column as checkable items, plus "Show all" and "Clear all filters" |
 | Freeze (pin) | Freeze the rows above the selection, the columns before it, or both. "Unfreeze" undoes it |
@@ -237,6 +254,134 @@ and pick what to freeze.
 ![A sorted, filtered sheet with a frozen row](tests/shots/15-data-light.png)
 
 ![The frozen row stays while the sheet scrolls under it](tests/shots/18-freeze-scrolled-light.png)
+
+### Merged cells
+
+Select a range and press the merge button: the cells become one, and the value
+of the top-left one is what stays. Anything else the range held is emptied, so
+you are asked first, with the number of cells that are about to lose their
+content. When nothing would be lost, nothing is asked.
+
+The same button splits a merge again — it lights up while the cursor is inside
+one — and splitting asks nothing, because a split cannot lose anything. The
+cells that come back are empty; the value that survived the merge stays where it
+was.
+
+Merges live in the file (`"merges": { "A6": [2, 1] }`, columns first, then rows)
+and are restored on open. **A sheet with merged cells cannot be sorted**: a merge
+spans addresses, and permuting the rows underneath one would tear it apart. That
+was true before the button existed, and the button does not change it — the
+notice after a merge says so.
+
+### Checkbox cells
+
+The checkbox button turns the selected cells into tick boxes. A checkbox is a
+cell TYPE, not a format: the file grows one key, `"t": "cb"`, and the value
+underneath it becomes a real boolean.
+
+```json
+"B2": { "v": true, "t": "cb" }
+```
+
+- Clicking the box writes `true` or `false` and saves like any other edit.
+- The values are left alone when you switch a column over: a column of
+  `true`/`false` becomes a column of ticked and unticked boxes, and pressing the
+  button again gives the words back.
+- A cell that has never been ticked still ends up in the file (as `false`), or
+  the box would vanish on the next save.
+- A box is drawn in the middle of its cell, so a horizontal alignment set on a
+  checkbox cell does not show.
+- Fills, borders and the rest still apply, and a checkbox column exports to
+  `.xlsx` as Excel's own TRUE/FALSE.
+
+**Dropdown cells were cut.** The grid engine's cell types are a property of a
+COLUMN (`columns[].type`), not of a cell: a dropdown would have to own the whole
+column, with its option list living somewhere the column has no room for, and a
+single-cell dropdown would fight the engine on every row insert. The checkbox
+escapes that because it needs no per-cell configuration at all — it is drawn by
+this plugin over the engine's own rendering, exactly like a number mask is. A
+dropdown would need the engine's cooperation, and the engine offers it only per
+column.
+
+### Links to notes in cells
+
+A cell whose text contains `[[Note]]` shows a real link, and clicking it opens
+the note (`Ctrl`-click opens it in a new tab). Hovering it asks Obsidian for the
+usual page preview, so the popover is the real one, with your own delay and
+modifier settings.
+
+- The FILE keeps the text exactly as typed. `[[Note]]` is a string like any
+  other; nothing in the format knows about links, and an older build of the
+  plugin shows the same cell as plain text.
+- Aliases and headings work: `[[Note|shown text]]`, `[[Note#Heading]]`,
+  `[[Note#^block]]`. Without an alias, `Note#Heading` reads as `Note > Heading`.
+- While you EDIT the cell you see the raw text, brackets included, because that
+  is what you are editing. The link comes back when you commit.
+- `![[embeds]]` are not links: a note rendered inside a table cell is not a
+  thing, so the `!` keeps the text as text.
+- Links work in an embedded sheet too, where the click opens the note like a
+  link in the surrounding note would.
+- `Sheets: Copy selection as Markdown table` copies the SOURCE of a link cell,
+  not its label, so the link keeps working in the note you paste it into.
+
+### Printing
+
+`Sheets: Print spreadsheet` opens the system print dialog with the sheet on the
+page and nothing else: no toolbar, no formula bar, no ribbon, no tab bar, no
+status bar. The grid stops being a scroll box and lays itself out in full, so
+what prints is every row the sheet has rather than the part that was on screen,
+and the column letters repeat at the top of every page.
+
+Fills, borders and the number formats print as they are; the selection and the
+frozen panes do not (a frozen pane is a scrolling idea, and `position: sticky`
+on paper parks the pinned row on the first page and leaves a hole on the rest).
+A checkbox prints as `☐` or `☑`, as a character rather than as a drawn control,
+so it survives a printer with "background graphics" switched off and lands in
+the text layer of a PDF.
+
+Anything else in the window is left alone: the print rules only apply while a
+spreadsheet is the active tab, so printing a note is Obsidian's own business,
+exactly as before.
+
+### Excel files
+
+Two commands move a whole document between this plugin and Excel, LibreOffice,
+Google Sheets or anything else that speaks `.xlsx`.
+
+**`Sheets: Export as .xlsx`** (also on the right-click menu of a `.sheet` or
+`.lsheet` file) writes `name.xlsx` next to the sheet and tells you where it
+landed. It carries values, formulas, bold, font size, fills, borders, number
+formats, alignment, text wrapping, column widths, row heights, merged cells, and
+one worksheet per page. An existing `name.xlsx` is replaced: it is this sheet's
+export, and exporting twice should leave one file rather than a numbered pile.
+Exporting a file that is open in a tab exports what is IN the tab, including the
+last second of typing that has not been saved yet.
+
+**`Sheets: Import .xlsx as sheet`** asks for a file anywhere on disk; the
+right-click menu of an `.xlsx` already in the vault does the same for that one.
+Everything the export writes comes back, plus whatever Excel put there: a
+multi-worksheet workbook becomes a multi-page document. The new file never
+overwrites anything — `Budget.sheet`, then `Budget 1.sheet` — and opens in a new
+tab.
+
+What does not survive the trip:
+
+- **Checkbox cells** become Excel's TRUE/FALSE, because `.xlsx` has no checkbox
+  cell type. Importing them back gives booleans, and the checkbox button turns
+  them into boxes again in one click.
+- **Formula separators** are translated: `=IF(A1>5;"yes";"no")` is written as
+  `IF(A1>5,"yes","no")`, which is the only form a `.xlsx` has. Semicolons inside
+  a quoted string are left alone.
+- **Formula results** are not written; Excel recalculates on open, which is the
+  same rule this format follows.
+- **Sort, filters and frozen panes** stay in the `.sheet` file. They are how the
+  page is being looked at, and Excel models all three differently enough that a
+  faithful translation would be a guess.
+- **Everything Excel has and this plugin does not**: charts, images, pivot
+  tables, conditional formats, defined names, several fonts, cell colours per
+  character. They are dropped on import rather than half-rendered.
+- **Worksheet names** are cut to 31 characters and lose `[ ] : * ? / \`, because
+  Excel refuses to open a file whose sheet names do not follow its own rules.
 
 ### Finding text
 
@@ -330,7 +475,7 @@ Plain JSON, sparse, with a strictly fixed key order:
 ```json
 {
   "format": "leovale-sheet",
-  "version": 3,
+  "version": 4,
   "sheets": [
     {
       "name": "Sheet1",
@@ -338,7 +483,7 @@ Plain JSON, sparse, with a strictly fixed key order:
       "cols": 26,
       "colWidths": { "0": 180 },
       "rowHeights": { "1": 51 },
-      "merges": {},
+      "merges": { "A6": [2, 1] },
       "view": {
         "sort": { "col": 0, "dir": "asc" },
         "filters": {
@@ -353,7 +498,9 @@ Plain JSON, sparse, with a strictly fixed key order:
         "A1": { "v": "Item", "s": { "b": true, "fs": 18, "bg": "#fff2cc", "bd": "trbl" } },
         "B2": { "v": 3, "s": { "nf": "$#,##0.00", "ha": "r" } },
         "C2": { "f": "=B2*2" },
-        "D2": { "v": "a long sentence", "s": { "wrap": true } }
+        "D2": { "v": "a long sentence", "s": { "wrap": true } },
+        "E2": { "v": true, "t": "cb" },
+        "F2": { "v": "see [[Budget notes]]" }
       }
     }
   ]
@@ -380,27 +527,47 @@ Cell keys, always in this order:
   top/right/bottom/left, in that order), `nf` (number/date mask),
   `ha` (horizontal alignment, `l` / `c` / `r`), `va` (vertical alignment,
   `t` / `m` / `b`), `wrap` (`true`)
+- `t` is the cell TYPE, and there is one: `"cb"`, a checkbox, whose `v` is a
+  boolean. Arrived in 1.4.0, and it goes after `s` for the same reason every new
+  key is appended rather than sorted in: a re-saved file differs from the older
+  one only by the added tail of each cell
+
+A type is deliberately not a style. `s` says how a value LOOKS, `t` changes what
+the cell IS — which is also what lets a checkbox keep a fill, a border and an
+alignment.
+
+A `[[wiki link]]` needs no key at all: it is an ordinary string in `v`, and only
+the rendering knows about it. That is why a build without the feature shows the
+same cell as text and loses nothing.
 
 ### Format versions
 
-`version` is 3 since release 1.3.0, which is when the `view` and `freeze` blocks
-were added; 2 was 1.2.0 (`nf`, `ha`, `va`, `wrap`) and 1 was 1.1.x. Two rules
-follow and both matter:
+`version` is 4 since release 1.4.0, which is when the cell type `t` was added; 3
+was 1.3.0 (the `view` and `freeze` blocks), 2 was 1.2.0 (`nf`, `ha`, `va`,
+`wrap`) and 1 was 1.1.x. Two rules follow and both matter:
 
 - **Older files keep opening**, with everything in them. Nothing is migrated or
-  rewritten; the version line and the two new empty blocks are the only
-  difference when such a file is saved.
-- **Every save writes version 3.** This is deliberate, and it is the same
-  argument every time: a build that cannot see a key DROPS it. A 1.2.0 build's
-  page parser copies the keys it knows onto a fresh page and never looks at the
-  rest, so opening a 1.3.0 file there and saving it would silently throw away
-  the sort, the filters and the frozen panes. Version 3 is newer than that build
+  rewritten; the version line, and whatever blocks a page did not have yet, are
+  the only difference when such a file is saved.
+- **Every save writes version 4.** This is deliberate, and it is the same
+  argument every time: a build that cannot see a key DROPS it. A 1.3.0 build's
+  cell parser copies `v`, `f` and `s` onto a fresh cell and never looks at `t`,
+  so opening a 1.4.0 file there and saving it would turn a checkbox column into
+  a column of `true`/`false` text. Version 4 is newer than that build
   understands, so it opens the file read-only instead - which is the whole point
-  of the version field. Same for 1.1.x builds and the style keys of version 2.
+  of the version field. Same for 1.2.0 builds and the `view`/`freeze` blocks of
+  version 3, and for 1.1.x builds and the style keys of version 2.
+
+Not every feature costs a version. 1.4.0 added three things and only one of them
+is in the file: merged cells have been in the format since 1.1.x (`merges`),
+1.4.0 only added a button for them, and a `[[wiki link]]` is a plain string that
+every build stores and returns unchanged. The bump is for `t` alone, and it was
+checked against the 1.3.0 parser rather than assumed.
 
 New keys are appended rather than sorted in - the 1.2.0 style keys after `bd`,
-the 1.3.0 blocks after `merges` - so a file re-saved by this release differs
-from the older one only by the added lines.
+the 1.3.0 blocks after `merges`, `t` after `s` - so a file re-saved by this
+release differs from the older one only by the added lines. A v3 file with no
+checkboxes in it gains exactly one changed line, the version.
 
 The serialisation rules exist for one reason: sync. Obsidian LiveSync resolves
 conflicts on non-Markdown files last-write-wins, without merging, so the file
@@ -449,14 +616,25 @@ Three safeguards here:
 ## Development
 
 ```bash
-npm install          # node_modules ~40 MB
+npm install          # node_modules ~56 MB
 npm run build        # tsc --noEmit + esbuild production -> main.js, styles.css
 npm run dev          # esbuild --watch
-npm test             # 163 unit tests: format, styles, masks, CSV, embeds, i18n, sort/filter/markdown
+npm test             # 200 unit tests: format, styles, masks, CSV, embeds, i18n,
+                     # sort/filter/markdown, wiki links, the xlsx round trip
 npm run e2e          # e2e in a sandboxed Obsidian, screenshots into tests/shots/
 ```
 
-Build output: `main.js` ~620 KB, `styles.css` ~112 KB.
+Build output: `main.js` ~1.07 MB, `styles.css` ~121 KB.
+
+Two thirds of `main.js` is the grid engine and the `.xlsx` library; the plugin's
+own code is about 90 KB of it. The xlsx half (~470 KB) arrived in 1.4.0 and is
+behind a dynamic `import()`, which does NOT keep it out of the file: an Obsidian
+plugin is one `main.js`, esbuild cannot split a CJS bundle into chunks Obsidian
+would know how to load, and a second file would not survive a BRAT install. What
+the dynamic import buys is that esbuild wraps the module in a lazy initializer,
+so none of it is EXECUTED until the first import or export - the cost at startup
+is bytes on disk, not milliseconds. Measured, same build, before and after:
+623 018 B -> 1 094 019 B.
 
 Notes on the build configuration:
 
@@ -470,7 +648,7 @@ Notes on the build configuration:
 - The engine's hard-coded colours (`#fff`, `#ccc`, `#f3f3f3`) are remapped to
   Obsidian CSS variables. No `filter: invert(1)` anywhere.
 
-The e2e suite (325 assertions) launches a separate Obsidian instance with its
+The e2e suite (406 assertions) launches a separate Obsidian instance with its
 own `--user-data-dir` on CDP port 9333, so your running Obsidian is left alone.
 It installs and enables the plugin, creates a sheet, types values and formulas
 with real keyboard events, drags column and row edges, formats a selection with
@@ -488,11 +666,17 @@ fills landed on the lines of the values they belong to, filters a column and
 checks which rows the DOM hides, scrolls a frozen row and measures where it
 parked, drives the find strip, F2, Ctrl+D, Home/End and Ctrl+arrows as real
 keystrokes, round-trips a Markdown table through the real clipboard, resizes a
-column through the dialog and by double-clicking its header edge, and finally
+column through the dialog and by double-clicking its header edge, ticks a
+checkbox cell with a real click and reads the boolean back out of the file,
+hovers a `[[link]]` to catch the `hover-link` event and clicks it to see the
+note open, merges a range from the toolbar (through the confirm dialog) and
+splits it again, exports an `.xlsx` and imports it back through the file menu to
+compare the values, the formulas, the bold, the fill and the column widths,
+prints the sheet to a real PDF and reads the text back out of it, and finally
 pretends a foreign plugin owns `.sheet` to check the notice and the `.lsheet`
-fallback. Screenshots land in `tests/shots/`. Playwright is
-needed for e2e only: either `npm i -D playwright` or point `SHEETS_PLAYWRIGHT`
-at an existing install.
+fallback. Screenshots land in `tests/shots/`, and the printed PDF next to them
+as `22-print.pdf`. Playwright is needed for e2e only: either
+`npm i -D playwright` or point `SHEETS_PLAYWRIGHT` at an existing install.
 
 Two things the harness does that are worth knowing before touching it. It
 refuses to drive anything that is not a desktop Obsidian it launched: a leftover
@@ -519,14 +703,24 @@ without releasing. See `.github/workflows/release.yml` and
 - Formatting covers fill, font size, bold, borders, number and date formats,
   alignment and text wrapping. No italics, underline or font family.
 - Number formats are display masks read by this plugin. Excel understands the
-  same strings, but nothing converts them: a `.sheet` file is not an `.xlsx`.
+  same strings, and since 1.4.0 there is a converter both ways, but a `.sheet`
+  file is still not an `.xlsx`: see the list of what the trip drops, above.
 - Multi-section masks (`positive;negative;zero`) are stored but only their first
   section is interpreted; there is no calendar picker, a date is a value plus a
   date mask.
 - The format supports multiple sheets per file, but there is no UI yet for
-  creating a second sheet.
-- Merged cells (`merges`) are saved and restored, but there is no toolbar
-  button for them, only the engine's own context menu.
+  creating a second sheet. Importing a multi-worksheet `.xlsx` does produce one,
+  and the engine shows a tab strip for it.
+- There are no dropdown cells, and the reason is in "Checkbox cells" above: the
+  engine's cell types belong to a column, not to a cell.
+- A checkbox cell is always drawn in the middle of its cell, so a horizontal
+  alignment on it has no visible effect.
+- Printing prints the sheet that is on screen, all of it. There is no page
+  setup, no print range, no repeated first COLUMN, and frozen panes are ignored
+  on paper.
+- The `.xlsx` bridge is a document converter, not a live link: exporting twice
+  overwrites `name.xlsx`, and importing always makes a new file rather than
+  updating one that came from the same workbook.
 - Styles are bound to cell addresses. Inserting a row or column shifts them via
   the engine; sorting sidesteps the problem entirely by rewriting the document
   (see Sorting above), which is why it is the one operation that rebuilds the
@@ -700,12 +894,92 @@ Do not pass a second argument to `getNewFileParent()`. Calling
 `getNewFileParent(path, "Untitled.sheet")` makes Obsidian look for a file
 creator for that extension and log an error. The first argument is enough.
 
+Obsidian prints by hiding the app. Its own print stylesheet sets
+`.app-container { display: none }` and shows a `.print` element that the Markdown
+exporter fills in. A spreadsheet is not Markdown and has no such element, so the
+first print of a sheet produced a genuinely blank page - 979 bytes of PDF, with
+the grid perfectly present in the DOM. The print rules therefore bring the app
+container back and flatten every box between it and the grid, because Obsidian's
+layout is nested absolutely positioned flex boxes sized to the WINDOW, which is
+the one shape a printer cannot page through.
+
+`contain: strict` means "size me as if I were empty". After the boxes were
+flattened the page was still blank, and the reason was one property on the
+workspace leaf: with `contain: strict` the element sizes itself as if it had no
+content at all, so a 1161 px grid lived inside a 0 px page. `contain: none` in
+the print block is what let the layout out.
+
+Flattening the workspace un-hides the other tabs. Obsidian keeps an inactive
+leaf at `display: none`, and a rule that sets every leaf to `display: block`
+brings all of them back - the first real PDF had a Markdown note printed above
+the grid. Inactive leaves are hidden again explicitly, and the whole print block
+is fenced behind `body:has(.workspace-leaf.mod-active .leovale-sheet-content)`,
+so that printing a NOTE while a sheet happens to be open elsewhere is untouched.
+
+SheetJS's community edition ignores `cell.s` when it writes. The reader and the
+writer are asymmetric in a way the documentation does not put in one place, and
+both halves cost a workaround. A workbook written by `xlsx@0.18.5` with a bold,
+filled, bordered cell comes back with none of the three - the writer never looks
+at the style - which is why the bundled package is `xlsx-js-style`, the same
+version and the same licence with style writing added. And its READER (SheetJS's
+own) resolves the number format and the fill onto the cell, then throws away the
+pointer to the font and the border: `styles.Borders` is an array of empty
+objects, one per border, in the right order and with nothing in them. The style
+index of a cell and the border sides are therefore read out of the raw
+`xl/styles.xml` and `xl/worksheets/sheetN.xml`, which `bookFiles: true` hands
+over already unzipped. Everything SheetJS does parse - fonts, fills, alignment -
+comes from `wb.Styles` rather than being parsed twice.
+
+A drawn checkbox does not print. Chromium's print painter ignores what a styled
+`appearance: none` checkbox looks like: the accent fill and the `::after` tick
+both went missing and every box printed as an empty square, ticked or not, which
+is the one thing a checkbox column must never do. On paper the box is a
+character instead (`☐` / `☑`), which also puts it in the PDF's text layer - and
+the text-presentation selector `U+FE0E` is part of it, because without it the
+ticked box comes out of the emoji font as a blue picture that is not text at
+all: it was missing from the PDF's text layer while the empty box was in it.
+
+An `<input type="checkbox">` in the grid is invisible unless you draw it
+yourself. Obsidian sets `appearance: none` on every checkbox in the app and
+paints its own with a rule that the vendor's scoped stylesheet then overrides
+(`background: #fff; border: none`), so the box had no edges and no tick: an
+empty column in both themes, with the element provably there and `checked` true.
+The box is drawn here instead, in Obsidian's variables, with its tick as a
+rotated `::after` sized in percentages so it survives the 20 px touch size.
+
+Electron has no `Page.printToPDF`. The CDP method is a browser-process handler
+that Chromium wires up for headless printing and Electron's embedder never
+registers, so the documented way to check a print stylesheet answers
+"'Page.printToPDF' wasn't found". The e2e asks for it first anyway and falls back
+to `webContents.printToPDF()` through `@electron/remote`, which is the same
+printing pipeline that Ctrl+P uses.
+
+Chromium prints text as glyph ids. The PDF the e2e reads back has no readable
+strings in it: the fonts are subsets with Identity-H encoding, so a content
+stream holds `<0024> Tj`, not letters. The suite decodes them through the fonts'
+own `/ToUnicode` CMaps, which are in the file. Finding those needs one more
+piece of care: an embedded font is binary and the seven bytes `stream\n` turn up
+inside one, so a scanner that looks for `stream` alone reads nine of ten streams
+from the wrong offset. The dictionary end (`>>\s*stream`) is part of the pattern.
+
 ## License
 
 MIT, see [LICENSE](LICENSE).
 
 The grid engine is [Jspreadsheet CE](https://github.com/jspreadsheet/ce) 5.0.4
 (MIT), with `jsuites` (MIT) and the `@jspreadsheet/formula` "Formula Basic"
-engine (MIT per the vendor's banner in the distributed files). Full notices are
-in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md), and the bundle carries
-them in a footer comment in `main.js`.
+engine (MIT per the vendor's banner in the distributed files).
+
+`.xlsx` is read and written by
+[xlsx-js-style](https://github.com/gitbrent/xlsx-js-style) 1.2.0, which is
+SheetJS Community Edition 0.18.5 with cell-style writing added. **Apache License
+2.0** — verified in the package itself: `"license": "Apache-2.0"` in its
+`package.json`, and the Apache 2.0 text in its `LICENSE`, carrying SheetJS's own
+copyright line (`Copyright (C) 2012-present SheetJS LLC`). The plain `xlsx`
+package is the same licence and would have been the obvious choice; it is not
+used because its writer drops cell styles, which is half of what an export is
+for.
+
+Full notices are in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md), and the
+bundle carries them in a footer comment in `main.js`, as Apache 2.0 section 4
+requires.

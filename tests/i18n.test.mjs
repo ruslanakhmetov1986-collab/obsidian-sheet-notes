@@ -29,6 +29,8 @@ const ALLOWED = [
 	// "Markdown" is the name of the format, exactly like CSV: it is not
 	// translated in Obsidian's own interface either.
 	/\bMarkdown\b/g,
+	// ...and so is ".xlsx", which is a file extension in every language.
+	/\bxlsx\b/gi,
 	/yyyy|mm|dd|hh/g,
 	/\{\w+\}/g,
 ];
@@ -199,6 +201,8 @@ test("t() works for every locale and every key without throwing", () => {
 				list: "A, B",
 				index: 1,
 				total: 5,
+				sheets: 2,
+				cells: 17,
 			});
 			assert.ok(value.length > 0, `${code}.${key} rendered empty`);
 			assert.ok(!/\{\w+\}/.test(value), `${code}.${key} left a placeholder: ${value}`);

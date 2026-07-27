@@ -24,6 +24,7 @@
 
 import {
 	type App,
+	type HoverPopover,
 	MarkdownRenderChild,
 	type MarkdownPostProcessorContext,
 	Plugin,
@@ -69,6 +70,8 @@ export function pickPage(doc: SheetDoc, name?: string): SheetPage | null {
  * and it is enough: `registerEvent` on the child unsubscribes with it.
  */
 export class SheetEmbed extends MarkdownRenderChild {
+	/** Home for the page-preview popover of a `[[link]]` inside an embedded cell. */
+	hoverPopover: HoverPopover | null = null;
 	private app: App;
 	private ref: EmbedRef;
 	private engine: SheetEngine | null = null;
@@ -211,7 +214,29 @@ export class SheetEmbed extends MarkdownRenderChild {
 			this.engine = new SheetEngine(
 				this.body,
 				{ format: doc.format, version: doc.version, sheets: [page] },
-				{ onChange: () => undefined, readOnly: true },
+				{
+					onChange: () => undefined,
+					readOnly: true,
+					// An embed is read-only, but a link is not an edit: clicking one
+					// inside an embedded sheet opens the note, exactly like a link in
+					// the surrounding text does. The source path is the SPREADSHEET's,
+					// so relative links resolve from where the data lives.
+					links: {
+						open: (target, newTab) => {
+							void this.app.workspace.openLinkText(target, file.path, newTab);
+						},
+						hover: (el, target, event) => {
+							this.app.workspace.trigger("hover-link", {
+								event,
+								source: "leovale-sheets",
+								hoverParent: this,
+								targetEl: el,
+								linktext: target,
+								sourcePath: file.path,
+							});
+						},
+					},
+				},
 			);
 		} catch (e) {
 			console.error("leovale-sheets: embed engine failed", e);

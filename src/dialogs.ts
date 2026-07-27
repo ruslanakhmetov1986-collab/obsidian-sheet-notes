@@ -1,4 +1,6 @@
 /**
+ * The plugin's two modals: a column width, and a yes/no question.
+ *
  * The column-width dialog: an exact pixel width for the selected columns, or
  * "fit to content" if the number is the wrong question.
  *
@@ -83,6 +85,53 @@ export class ColumnWidthModal extends Modal {
 		const raw = Number.parseInt(this.input?.value ?? "", 10);
 		if (Number.isFinite(raw) && raw > 0) this.opts.onApply(raw);
 		this.close();
+	}
+
+	override onClose(): void {
+		this.contentEl.empty();
+	}
+}
+
+export interface ConfirmOptions {
+	title: string;
+	body: string;
+	/** Label of the button that goes ahead. Cancel is always the other one. */
+	confirmText: string;
+	onConfirm: () => void;
+}
+
+/**
+ * A yes/no question, in Obsidian's own modal rather than `window.confirm()`.
+ *
+ * The native dialog is what the grid engine puts up on its own (deleting a row,
+ * merging over data), and it is the wrong thing here twice over: it is not
+ * themed, and it blocks the renderer so nothing else in the app - a save, a
+ * test - can proceed while it waits.
+ */
+export class ConfirmModal extends Modal {
+	private opts: ConfirmOptions;
+
+	constructor(app: App, opts: ConfirmOptions) {
+		super(app);
+		this.opts = opts;
+	}
+
+	override onOpen(): void {
+		const { contentEl, titleEl } = this;
+		titleEl.setText(this.opts.title);
+		contentEl.addClass("leovale-sheet-confirm-modal");
+		contentEl.createDiv({ cls: "leovale-sheet-confirm-body", text: this.opts.body });
+		new Setting(contentEl)
+			.addButton((b) => b.setButtonText(t("commonCancel")).onClick(() => this.close()))
+			.addButton((b) =>
+				b
+					.setButtonText(this.opts.confirmText)
+					.setCta()
+					.onClick(() => {
+						this.close();
+						this.opts.onConfirm();
+					}),
+			);
 	}
 
 	override onClose(): void {

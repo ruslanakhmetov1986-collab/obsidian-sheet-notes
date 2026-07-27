@@ -32,6 +32,8 @@ export interface ToolbarActions {
 	sort: (dir: SortDir | null) => void;
 	toggleFind: () => void;
 	columnWidth: () => void;
+	/** Merge or split the selection; asks first when a value would be dropped. */
+	merge: () => void;
 }
 
 /** How many distinct values a filter menu will list before it gives up. */
@@ -119,6 +121,8 @@ export class SheetToolbar {
 	private alignButton!: HTMLButtonElement;
 	private alignIcon!: HTMLElement;
 	private wrapButton!: HTMLButtonElement;
+	private mergeButton!: HTMLButtonElement;
+	private checkboxButton!: HTMLButtonElement;
 	private sortButton!: HTMLButtonElement;
 	private filterButton!: HTMLButtonElement;
 	private freezeButton!: HTMLButtonElement;
@@ -281,10 +285,30 @@ export class SheetToolbar {
 
 		this.el.createDiv({ cls: "leovale-sheet-tb-sep" });
 
-		// --- group 6: data (sort, filter, freeze) -----------------------------
+		// --- group 6: cell shape (merge, checkbox) ---------------------------
 		const group6 = this.el.createDiv({ cls: "leovale-sheet-tb-group" });
-		this.sortButton = this.iconButton(
+		this.mergeButton = this.iconButton(
 			group6,
+			"leovale-sheet-tb-merge",
+			"combine",
+			t("tbMerge"),
+		);
+		this.mergeButton.onclick = () => this.actions.merge();
+
+		this.checkboxButton = this.iconButton(
+			group6,
+			"leovale-sheet-tb-checkbox",
+			"check-square",
+			t("tbCheckbox"),
+		);
+		this.checkboxButton.onclick = () => this.toggleCheckbox();
+
+		this.el.createDiv({ cls: "leovale-sheet-tb-sep" });
+
+		// --- group 7: data (sort, filter, freeze) -----------------------------
+		const group7 = this.el.createDiv({ cls: "leovale-sheet-tb-group" });
+		this.sortButton = this.iconButton(
+			group7,
 			"leovale-sheet-tb-sort",
 			"arrow-up-down",
 			t("tbSort"),
@@ -292,7 +316,7 @@ export class SheetToolbar {
 		this.sortButton.onclick = () => this.openSortMenu();
 
 		this.filterButton = this.iconButton(
-			group6,
+			group7,
 			"leovale-sheet-tb-filter",
 			"filter",
 			t("tbFilter"),
@@ -300,7 +324,7 @@ export class SheetToolbar {
 		this.filterButton.onclick = () => this.openFilterMenu();
 
 		this.freezeButton = this.iconButton(
-			group6,
+			group7,
 			"leovale-sheet-tb-freeze",
 			"pin",
 			t("tbFreeze"),
@@ -309,13 +333,13 @@ export class SheetToolbar {
 
 		this.el.createDiv({ cls: "leovale-sheet-tb-sep" });
 
-		// --- group 7: find + column width -------------------------------------
-		const group7 = this.el.createDiv({ cls: "leovale-sheet-tb-group" });
-		this.findButton = this.iconButton(group7, "leovale-sheet-tb-find", "search", t("tbFind"));
+		// --- group 8: find + column width -------------------------------------
+		const group8 = this.el.createDiv({ cls: "leovale-sheet-tb-group" });
+		this.findButton = this.iconButton(group8, "leovale-sheet-tb-find", "search", t("tbFind"));
 		this.findButton.onclick = () => this.actions.toggleFind();
 
 		this.widthButton = this.iconButton(
-			group7,
+			group8,
 			"leovale-sheet-tb-width",
 			"move-horizontal",
 			t("tbColWidth"),
@@ -631,6 +655,21 @@ export class SheetToolbar {
 		this.sync();
 	}
 
+	/**
+	 * Checkbox cells. Same "any of them is off means turn them all on" rule as
+	 * Bold, and the values are left alone: a column of `true`/`false` becomes a
+	 * column of ticked boxes, and switching it back gives the words back.
+	 */
+	private toggleCheckbox(): void {
+		const engine = this.getEngine();
+		if (!engine) return;
+		const refs = this.targetRefs();
+		if (refs.length === 0) return;
+		const makeCheckbox = refs.some((r) => engine.getCellType(r) !== "cb");
+		engine.setCellType(refs, makeCheckbox ? "cb" : null);
+		this.sync();
+	}
+
 	/* -------------------------------------------------------------- popups */
 
 	private togglePalette(): void {
@@ -765,6 +804,8 @@ export class SheetToolbar {
 			this.numberButton,
 			this.alignButton,
 			this.wrapButton,
+			this.mergeButton,
+			this.checkboxButton,
 			this.sortButton,
 			this.filterButton,
 			this.freezeButton,
@@ -813,6 +854,19 @@ export class SheetToolbar {
 		setIcon(this.alignIcon, alignName);
 		this.alignButton.toggleClass("is-active", !!first.ha || !!first.va);
 		this.wrapButton.toggleClass("is-active", !!first.wrap);
+
+		// The merge button is a toggle in the Google Sheets sense: lit while the
+		// selection sits in a merge, in which case pressing it splits it again.
+		const anchor = refs[0] ? parseRef(refs[0]) : null;
+		const merged = anchor ? !!engine.mergeAt(anchor.row, anchor.col) : false;
+		this.mergeButton.toggleClass("is-active", merged);
+		const mergeLabel = merged ? t("tbUnmerge") : t("tbMerge");
+		this.mergeButton.setAttribute("title", mergeLabel);
+		this.mergeButton.setAttribute("aria-label", mergeLabel);
+		this.checkboxButton.toggleClass(
+			"is-active",
+			!!refs[0] && engine.getCellType(refs[0] as string) === "cb",
+		);
 	}
 
 	destroy(): void {

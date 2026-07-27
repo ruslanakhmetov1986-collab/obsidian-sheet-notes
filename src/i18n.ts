@@ -159,6 +159,22 @@ const EN = {
 	mdNoTable: "The clipboard does not hold a Markdown table.",
 	clipboardFailed: "Could not reach the clipboard ({message})",
 	sheetReadOnly: "This spreadsheet is open read-only.",
+
+	/* 1.4.0: merged cells, checkbox cells, xlsx exchange */
+	tbMerge: "Merge cells",
+	tbUnmerge: "Split merged cells",
+	tbCheckbox: "Checkbox",
+	mergeNeedsRange: "Select at least two cells to merge.",
+	mergeConfirmTitle: "Merge cells?",
+	mergeConfirmBody: "Only the top-left value is kept. {count} other filled cells will be emptied.",
+	mergeConfirmOk: "Merge",
+	mergeDone: "Cells merged. A sheet with merged cells cannot be sorted.",
+	unmergeDone: "The merge was split.",
+	commonCancel: "Cancel",
+	xlsxExported: "Saved {path}",
+	xlsxExportFailed: "Spreadsheet Notes: could not export this sheet ({message})",
+	xlsxImported: "Imported {path}: worksheets {sheets}, filled cells {cells}",
+	xlsxImportFailed: "Spreadsheet Notes: could not read this .xlsx file ({message})",
 } as const;
 
 export type StringKey = keyof typeof EN;
@@ -277,6 +293,22 @@ const RU: Record<StringKey, string> = {
 	mdNoTable: "В буфере обмена нет таблицы Markdown.",
 	clipboardFailed: "Не удалось обратиться к буферу обмена ({message})",
 	sheetReadOnly: "Таблица открыта только для чтения.",
+
+	/* 1.4.0: merged cells, checkbox cells, xlsx exchange */
+	tbMerge: "Объединить ячейки",
+	tbUnmerge: "Разъединить ячейки",
+	tbCheckbox: "Флажок",
+	mergeNeedsRange: "Выделите хотя бы две ячейки.",
+	mergeConfirmTitle: "Объединить ячейки?",
+	mergeConfirmBody: "Останется только значение левой верхней ячейки. Ещё {count} заполненных ячеек будут очищены.",
+	mergeConfirmOk: "Объединить",
+	mergeDone: "Ячейки объединены. Лист с объединёнными ячейками нельзя сортировать.",
+	unmergeDone: "Объединение снято.",
+	commonCancel: "Отмена",
+	xlsxExported: "Сохранено: {path}",
+	xlsxExportFailed: "Spreadsheet Notes: не удалось выгрузить этот лист ({message})",
+	xlsxImported: "Импортировано {path}: листов {sheets}, заполненных ячеек {cells}",
+	xlsxImportFailed: "Spreadsheet Notes: не удалось прочитать этот файл .xlsx ({message})",
 };
 
 const ZH: Record<StringKey, string> = {
@@ -392,6 +424,22 @@ const ZH: Record<StringKey, string> = {
 	mdNoTable: "剪贴板中没有 Markdown 表格。",
 	clipboardFailed: "无法访问剪贴板（{message}）",
 	sheetReadOnly: "此表格以只读方式打开。",
+
+	/* 1.4.0: merged cells, checkbox cells, xlsx exchange */
+	tbMerge: "合并单元格",
+	tbUnmerge: "取消合并",
+	tbCheckbox: "复选框",
+	mergeNeedsRange: "请至少选择两个单元格。",
+	mergeConfirmTitle: "合并单元格？",
+	mergeConfirmBody: "只保留左上角的值，另外 {count} 个已填写的单元格将被清空。",
+	mergeConfirmOk: "合并",
+	mergeDone: "已合并单元格。含合并单元格的工作表无法排序。",
+	unmergeDone: "已取消合并。",
+	commonCancel: "取消",
+	xlsxExported: "已保存：{path}",
+	xlsxExportFailed: "Spreadsheet Notes：导出失败（{message}）",
+	xlsxImported: "已导入 {path}：工作表 {sheets} 个，已填写单元格 {cells} 个",
+	xlsxImportFailed: "Spreadsheet Notes：无法读取该 .xlsx 文件（{message}）",
 };
 
 const ZH_TW: Record<StringKey, string> = {
@@ -507,6 +555,22 @@ const ZH_TW: Record<StringKey, string> = {
 	mdNoTable: "剪貼簿中沒有 Markdown 表格。",
 	clipboardFailed: "無法存取剪貼簿（{message}）",
 	sheetReadOnly: "此表格以唯讀方式開啟。",
+
+	/* 1.4.0: merged cells, checkbox cells, xlsx exchange */
+	tbMerge: "合併儲存格",
+	tbUnmerge: "取消合併",
+	tbCheckbox: "核取方塊",
+	mergeNeedsRange: "請至少選取兩個儲存格。",
+	mergeConfirmTitle: "合併儲存格？",
+	mergeConfirmBody: "只保留左上角的值，另外 {count} 個已填寫的儲存格將被清空。",
+	mergeConfirmOk: "合併",
+	mergeDone: "已合併儲存格。含合併儲存格的工作表無法排序。",
+	unmergeDone: "已取消合併。",
+	commonCancel: "取消",
+	xlsxExported: "已儲存：{path}",
+	xlsxExportFailed: "Spreadsheet Notes：匯出失敗（{message}）",
+	xlsxImported: "已匯入 {path}：工作表 {sheets} 個，已填寫儲存格 {cells} 個",
+	xlsxImportFailed: "Spreadsheet Notes：無法讀取此 .xlsx 檔案（{message}）",
 };
 
 const DE: Record<StringKey, string> = {
@@ -624,6 +688,22 @@ const DE: Record<StringKey, string> = {
 	mdNoTable: "In der Zwischenablage ist keine Markdown-Tabelle.",
 	clipboardFailed: "Kein Zugriff auf die Zwischenablage ({message})",
 	sheetReadOnly: "Diese Tabelle ist schreibgeschützt geöffnet.",
+
+	/* 1.4.0: merged cells, checkbox cells, xlsx exchange */
+	tbMerge: "Zellen verbinden",
+	tbUnmerge: "Verbindung aufheben",
+	tbCheckbox: "Kontrollkästchen",
+	mergeNeedsRange: "Wählen Sie mindestens zwei Zellen aus.",
+	mergeConfirmTitle: "Zellen verbinden?",
+	mergeConfirmBody: "Nur der Wert oben links bleibt erhalten. {count} weitere gefüllte Zellen werden geleert.",
+	mergeConfirmOk: "Verbinden",
+	mergeDone: "Zellen verbunden. Ein Blatt mit verbundenen Zellen lässt sich nicht sortieren.",
+	unmergeDone: "Verbindung aufgehoben.",
+	commonCancel: "Abbrechen",
+	xlsxExported: "Gespeichert: {path}",
+	xlsxExportFailed: "Spreadsheet Notes: Export fehlgeschlagen ({message})",
+	xlsxImported: "{path} importiert: Arbeitsblätter {sheets}, gefüllte Zellen {cells}",
+	xlsxImportFailed: "Spreadsheet Notes: Diese .xlsx-Datei ist nicht lesbar ({message})",
 };
 
 const FR: Record<StringKey, string> = {
@@ -741,6 +821,22 @@ const FR: Record<StringKey, string> = {
 	mdNoTable: "Le presse-papiers ne contient pas de tableau Markdown.",
 	clipboardFailed: "Accès au presse-papiers impossible ({message})",
 	sheetReadOnly: "Cette feuille est ouverte en lecture seule.",
+
+	/* 1.4.0: merged cells, checkbox cells, xlsx exchange */
+	tbMerge: "Fusionner les cellules",
+	tbUnmerge: "Annuler la fusion",
+	tbCheckbox: "Case à cocher",
+	mergeNeedsRange: "Sélectionnez au moins deux cellules.",
+	mergeConfirmTitle: "Fusionner les cellules ?",
+	mergeConfirmBody: "Seule la valeur en haut à gauche est conservée. {count} autres cellules remplies seront vidées.",
+	mergeConfirmOk: "Fusionner",
+	mergeDone: "Cellules fusionnées. Une feuille contenant des cellules fusionnées ne peut pas être triée.",
+	unmergeDone: "Fusion annulée.",
+	commonCancel: "Annuler",
+	xlsxExported: "Enregistré : {path}",
+	xlsxExportFailed: "Spreadsheet Notes : export impossible ({message})",
+	xlsxImported: "{path} importé : feuilles {sheets}, cellules remplies {cells}",
+	xlsxImportFailed: "Spreadsheet Notes : fichier .xlsx illisible ({message})",
 };
 
 const ES: Record<StringKey, string> = {
@@ -858,6 +954,22 @@ const ES: Record<StringKey, string> = {
 	mdNoTable: "El portapapeles no contiene una tabla Markdown.",
 	clipboardFailed: "No se pudo acceder al portapapeles ({message})",
 	sheetReadOnly: "Esta hoja está abierta en modo de solo lectura.",
+
+	/* 1.4.0: merged cells, checkbox cells, xlsx exchange */
+	tbMerge: "Combinar celdas",
+	tbUnmerge: "Separar celdas combinadas",
+	tbCheckbox: "Casilla",
+	mergeNeedsRange: "Seleccione al menos dos celdas.",
+	mergeConfirmTitle: "¿Combinar celdas?",
+	mergeConfirmBody: "Solo se conserva el valor superior izquierdo. Se vaciarán {count} celdas con contenido.",
+	mergeConfirmOk: "Combinar",
+	mergeDone: "Celdas combinadas. Una hoja con celdas combinadas no se puede ordenar.",
+	unmergeDone: "Se separaron las celdas.",
+	commonCancel: "Cancelar",
+	xlsxExported: "Guardado: {path}",
+	xlsxExportFailed: "Spreadsheet Notes: no se pudo exportar esta hoja ({message})",
+	xlsxImported: "{path} importado: hojas {sheets}, celdas con contenido {cells}",
+	xlsxImportFailed: "Spreadsheet Notes: no se pudo leer este archivo .xlsx ({message})",
 };
 
 const JA: Record<StringKey, string> = {
@@ -975,6 +1087,22 @@ const JA: Record<StringKey, string> = {
 	mdNoTable: "クリップボードに Markdown の表がありません。",
 	clipboardFailed: "クリップボードにアクセスできません（{message}）",
 	sheetReadOnly: "このシートは読み取り専用で開いています。",
+
+	/* 1.4.0: merged cells, checkbox cells, xlsx exchange */
+	tbMerge: "セルを結合",
+	tbUnmerge: "結合を解除",
+	tbCheckbox: "チェックボックス",
+	mergeNeedsRange: "2つ以上のセルを選択してください。",
+	mergeConfirmTitle: "セルを結合しますか？",
+	mergeConfirmBody: "左上の値だけが残ります。ほかの {count} 個の入力済みセルは空になります。",
+	mergeConfirmOk: "結合",
+	mergeDone: "セルを結合しました。結合セルのあるシートは並べ替えできません。",
+	unmergeDone: "結合を解除しました。",
+	commonCancel: "キャンセル",
+	xlsxExported: "保存しました: {path}",
+	xlsxExportFailed: "Spreadsheet Notes: 書き出しに失敗しました（{message}）",
+	xlsxImported: "{path} を読み込みました: シート {sheets}、入力済みセル {cells}",
+	xlsxImportFailed: "Spreadsheet Notes: この .xlsx を読み取れません（{message}）",
 };
 
 const KO: Record<StringKey, string> = {
@@ -1090,6 +1218,22 @@ const KO: Record<StringKey, string> = {
 	mdNoTable: "클립보드에 Markdown 표가 없습니다.",
 	clipboardFailed: "클립보드에 접근할 수 없습니다({message})",
 	sheetReadOnly: "이 시트는 읽기 전용으로 열렸습니다.",
+
+	/* 1.4.0: merged cells, checkbox cells, xlsx exchange */
+	tbMerge: "셀 병합",
+	tbUnmerge: "병합 해제",
+	tbCheckbox: "체크박스",
+	mergeNeedsRange: "셀을 두 개 이상 선택하세요.",
+	mergeConfirmTitle: "셀을 병합할까요?",
+	mergeConfirmBody: "왼쪽 위 값만 남습니다. 내용이 있는 다른 셀 {count}개는 비워집니다.",
+	mergeConfirmOk: "병합",
+	mergeDone: "셀을 병합했습니다. 병합된 셀이 있는 시트는 정렬할 수 없습니다.",
+	unmergeDone: "병합을 해제했습니다.",
+	commonCancel: "취소",
+	xlsxExported: "저장했습니다: {path}",
+	xlsxExportFailed: "Spreadsheet Notes: 내보내지 못했습니다 ({message})",
+	xlsxImported: "{path} 가져왔습니다: 시트 {sheets}개, 내용이 있는 셀 {cells}개",
+	xlsxImportFailed: "Spreadsheet Notes: 이 .xlsx 파일을 읽지 못했습니다 ({message})",
 };
 
 const PT_BR: Record<StringKey, string> = {
@@ -1207,6 +1351,22 @@ const PT_BR: Record<StringKey, string> = {
 	mdNoTable: "A área de transferência não contém uma tabela Markdown.",
 	clipboardFailed: "Não foi possível acessar a área de transferência ({message})",
 	sheetReadOnly: "Esta planilha está aberta somente para leitura.",
+
+	/* 1.4.0: merged cells, checkbox cells, xlsx exchange */
+	tbMerge: "Mesclar células",
+	tbUnmerge: "Desfazer mesclagem",
+	tbCheckbox: "Caixa de seleção",
+	mergeNeedsRange: "Selecione pelo menos duas células.",
+	mergeConfirmTitle: "Mesclar células?",
+	mergeConfirmBody: "Somente o valor superior esquerdo é mantido. Outras {count} células preenchidas serão esvaziadas.",
+	mergeConfirmOk: "Mesclar",
+	mergeDone: "Células mescladas. Uma planilha com células mescladas não pode ser ordenada.",
+	unmergeDone: "Mesclagem desfeita.",
+	commonCancel: "Cancelar",
+	xlsxExported: "Salvo: {path}",
+	xlsxExportFailed: "Spreadsheet Notes: não foi possível exportar esta planilha ({message})",
+	xlsxImported: "{path} importado: planilhas {sheets}, células preenchidas {cells}",
+	xlsxImportFailed: "Spreadsheet Notes: não foi possível ler este arquivo .xlsx ({message})",
 };
 
 const IT: Record<StringKey, string> = {
@@ -1324,6 +1484,22 @@ const IT: Record<StringKey, string> = {
 	mdNoTable: "Negli appunti non c'è una tabella Markdown.",
 	clipboardFailed: "Impossibile accedere agli appunti ({message})",
 	sheetReadOnly: "Questo foglio è aperto in sola lettura.",
+
+	/* 1.4.0: merged cells, checkbox cells, xlsx exchange */
+	tbMerge: "Unisci celle",
+	tbUnmerge: "Dividi celle unite",
+	tbCheckbox: "Casella di controllo",
+	mergeNeedsRange: "Seleziona almeno due celle.",
+	mergeConfirmTitle: "Unire le celle?",
+	mergeConfirmBody: "Resta solo il valore in alto a sinistra. Altre {count} celle piene verranno svuotate.",
+	mergeConfirmOk: "Unisci",
+	mergeDone: "Celle unite. Un foglio con celle unite non può essere ordinato.",
+	unmergeDone: "Unione annullata.",
+	commonCancel: "Annulla",
+	xlsxExported: "Salvato: {path}",
+	xlsxExportFailed: "Spreadsheet Notes: esportazione non riuscita ({message})",
+	xlsxImported: "{path} importato: fogli {sheets}, celle piene {cells}",
+	xlsxImportFailed: "Spreadsheet Notes: impossibile leggere questo file .xlsx ({message})",
 };
 
 const PL: Record<StringKey, string> = {
@@ -1441,6 +1617,22 @@ const PL: Record<StringKey, string> = {
 	mdNoTable: "W schowku nie ma tabeli Markdown.",
 	clipboardFailed: "Brak dostępu do schowka ({message})",
 	sheetReadOnly: "Ten arkusz jest otwarty tylko do odczytu.",
+
+	/* 1.4.0: merged cells, checkbox cells, xlsx exchange */
+	tbMerge: "Scal komórki",
+	tbUnmerge: "Rozdziel komórki",
+	tbCheckbox: "Pole wyboru",
+	mergeNeedsRange: "Zaznacz co najmniej dwie komórki.",
+	mergeConfirmTitle: "Scalić komórki?",
+	mergeConfirmBody: "Zostanie tylko wartość z lewego górnego rogu. Pozostałe wypełnione komórki ({count}) zostaną wyczyszczone.",
+	mergeConfirmOk: "Scal",
+	mergeDone: "Komórki scalone. Arkusza ze scalonymi komórkami nie można sortować.",
+	unmergeDone: "Scalenie usunięte.",
+	commonCancel: "Anuluj",
+	xlsxExported: "Zapisano: {path}",
+	xlsxExportFailed: "Spreadsheet Notes: nie udało się wyeksportować tego arkusza ({message})",
+	xlsxImported: "Zaimportowano {path}: arkusze {sheets}, wypełnione komórki {cells}",
+	xlsxImportFailed: "Spreadsheet Notes: nie można odczytać tego pliku .xlsx ({message})",
 };
 
 export const TABLES: Record<Lang, Record<StringKey, string>> = {

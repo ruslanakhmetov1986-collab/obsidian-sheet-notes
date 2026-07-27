@@ -1,4 +1,5 @@
 import {
+	type HoverPopover,
 	type Modifier,
 	Notice,
 	Platform,
@@ -11,7 +12,8 @@ import { SheetEngine } from "./engine";
 import { SheetToolbar } from "./toolbar";
 import { SheetFormulaBar } from "./formulabar";
 import { SheetFind } from "./find";
-import { ColumnWidthModal } from "./dialogs";
+import { ColumnWidthModal, ConfirmModal } from "./dialogs";
+import { exportDocAsXlsx } from "./xlsxio";
 import {
 	type CsvDelimiter,
 	DEFAULT_DELIMITER,
@@ -70,6 +72,13 @@ const LOAD_QUIET_MS = 250;
  * so the file kept its creation-time contents). Do not un-prefix these.
  */
 export class SheetView extends TextFileView {
+	/**
+	 * Where Obsidian's Page Preview parks the popover it opens for a link in a
+	 * cell. It is the one field here that is NOT prefixed with `sheet`, and it
+	 * cannot be: the core plugin looks for this exact name on the `hoverParent`
+	 * it is handed (see {@link linkHandlers}).
+	 */
+	hoverPopover: HoverPopover | null = null;
 	private sheetEngine: SheetEngine | null = null;
 	private sheetToolbar: SheetToolbar | null = null;
 	private sheetFormulaBar: SheetFormulaBar | null = null;
@@ -348,6 +357,7 @@ export class SheetView extends TextFileView {
 			sort: (dir) => this.sortSelectedColumn(dir),
 			toggleFind: () => this.sheetFind?.toggle(),
 			columnWidth: () => this.openColumnWidthDialog(),
+			merge: () => this.mergeSelection(),
 		});
 		this.sheetFind = new SheetFind(this.contentEl, () => this.sheetEngine);
 		this.sheetWrapper = this.contentEl.createDiv({ cls: "leovale-sheet-wrapper" });
@@ -358,6 +368,7 @@ export class SheetView extends TextFileView {
 				onChange: () => this.scheduleSave(),
 				onSelection: () => this.syncChrome(),
 				readOnly: this.sheetReadOnly,
+				links: this.linkHandlers(),
 			});
 		} catch (e) {
 			console.error("leovale-sheets: engine init failed", e);
@@ -408,6 +419,111 @@ export class SheetView extends TextFileView {
 		e.preventDefault();
 		e.stopPropagation();
 		engine.autofitColumn(col);
+	}
+
+	/**
+	 * What a `[[wiki link]]` inside a cell does.
+	 *
+	 * Both are Obsidian's own machinery rather than an imitation of it:
+	 * `openLinkText` resolves the link the way every other link in the vault is
+	 * resolved (including "create the note if it is not there yet"), and the
+	 * `hover-link` event is what the core Page Preview plugin listens for, so the
+	 * popover is the real one, with the user's own delay and modifier settings.
+	 *
+	 * `sourcePath` is the spreadsheet itself, which is what makes a relative link
+	 * resolve from the sheet's folder.
+	 */
+	private linkHandlers(): { open: (target: string, newTab: boolean) => void;
+		hover: (el: HTMLElement, target: string, event: MouseEvent) => void } {
+		const source = () => this.file?.path ?? "";
+		return {
+			open: (target, newTab) => {
+				void this.app.workspace.openLinkText(target, source(), newTab);
+			},
+			hover: (el, target, event) => {
+				this.app.workspace.trigger("hover-link", {
+					event,
+					source: "leovale-sheets",
+					hoverParent: this,
+					targetEl: el,
+					linktext: target,
+					sourcePath: source(),
+				});
+			},
+		};
+	}
+
+	/**
+	 * Merge the selection, or split it if it is already merged.
+	 *
+	 * The confirm is not decoration: merging keeps the top-left value and drops
+	 * every other one, and "the cells you cannot see any more were emptied" is a
+	 * thing a user is entitled to hear BEFORE it happens. Nothing is asked when
+	 * there is nothing to lose.
+	 *
+	 * Sorting refuses to run on a sheet with merges (a merge spans addresses, and
+	 * permuting the rows underneath one would tear it apart), so this is also the
+	 * button that turns sorting off - which is why the notice says so.
+	 */
+	mergeSelection(): void {
+		const engine = this.sheetEngine;
+		if (!engine) return;
+		if (this.sheetReadOnly) {
+			new Notice(t("sheetReadOnly"));
+			return;
+		}
+		const rect = engine.selectionRect();
+		if (!rect) {
+			new Notice(t("mergeNeedsRange"));
+			return;
+		}
+
+		// Anything merged inside the selection means the button splits instead.
+		let merged = false;
+		for (let r = rect.r1; r <= rect.r2 && !merged; r++) {
+			for (let c = rect.c1; c <= rect.c2 && !merged; c++) {
+				if (engine.mergeAt(r, c)) merged = true;
+			}
+		}
+		if (merged) {
+			if (engine.unmergeSelection()) new Notice(t("unmergeDone"));
+			this.syncChrome();
+			return;
+		}
+
+		if (rect.r1 === rect.r2 && rect.c1 === rect.c2) {
+			new Notice(t("mergeNeedsRange"));
+			return;
+		}
+
+		const losses = engine.mergeLosses();
+		const run = () => {
+			if (engine.mergeSelection()) new Notice(t("mergeDone"));
+			this.syncChrome();
+		};
+		if (losses.length === 0) {
+			run();
+			return;
+		}
+		new ConfirmModal(this.app, {
+			title: t("mergeConfirmTitle"),
+			body: t("mergeConfirmBody", { count: losses.length }),
+			confirmText: t("mergeConfirmOk"),
+			onConfirm: run,
+		}).open();
+	}
+
+	/**
+	 * Write the sheet next to itself as `name.xlsx`.
+	 *
+	 * The document comes from the live grid rather than from disk, so an export
+	 * fired 200 ms after a keystroke carries that keystroke.
+	 */
+	async exportXlsx(): Promise<void> {
+		const engine = this.sheetEngine;
+		const file = this.file;
+		if (!engine || !file) return;
+		await exportDocAsXlsx(this.app, file, engine.readDoc());
 	}
 
 	/** Refresh both chrome strips from the current grid selection. */
