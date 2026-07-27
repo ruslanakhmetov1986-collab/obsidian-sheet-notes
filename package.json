@@ -1,6 +1,6 @@
 {
   "name": "leovale-sheets",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "Spreadsheet notes stored as .sheet files in your Obsidian vault.",
   "type": "module",
   "private": true,
