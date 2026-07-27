@@ -1,6 +1,7 @@
 name: Auto-release
 
-# Every push to master: build + unit tests, then automatically bump the version
+# Every push to master: build, unit tests and the full e2e suite against a real
+# (headless) Obsidian, then automatically bump the version
 # (patch by default; put [minor] or [major] in the commit message to bump more;
 # put [skip release] to only build and test), tag it and publish a GitHub
 # release with main.js / manifest.json / styles.css - the assets BRAT and the
@@ -20,6 +21,12 @@ permissions:
 concurrency:
   group: release
   cancel-in-progress: false
+
+env:
+  # The Obsidian the e2e suite drives on CI. Pinned on purpose: the suite reads
+  # the app's own DOM, so a silent upgrade would show up as a plugin bug. This
+  # is the build the suite was last verified against by hand.
+  OBSIDIAN_VERSION: "1.12.4"
 
 jobs:
   release:
@@ -41,6 +48,92 @@ jobs:
 
       - name: Unit tests
         run: npm test
+
+      # ---------------------------------------------------------------- e2e
+      # The gate. The fill palette shipped invisible for three releases because
+      # nothing drove the real app before a tag was cut; from here on a release
+      # cannot happen unless the suite passes against a real Obsidian.
+      #
+      # The app is a pinned AppImage, unpacked (no FUSE on the runner) and
+      # cached by version, and it runs under a virtual X server. Everything is
+      # logged: when this breaks, it breaks on a machine nobody can look at.
+      - name: Cache the Obsidian AppImage
+        id: obsidian-cache
+        uses: actions/cache@v4
+        with:
+          path: .obsidian-app
+          key: obsidian-appimage-${{ env.OBSIDIAN_VERSION }}
+
+      - name: Download Obsidian ${{ env.OBSIDIAN_VERSION }}
+        if: steps.obsidian-cache.outputs.cache-hit != 'true'
+        run: |
+          set -eux
+          mkdir -p .obsidian-app
+          curl -fL --retry 3 --retry-delay 5 \
+            -o .obsidian-app/Obsidian.AppImage \
+            "https://github.com/obsidianmd/obsidian-releases/releases/download/v${OBSIDIAN_VERSION}/Obsidian-${OBSIDIAN_VERSION}.AppImage"
+          chmod +x .obsidian-app/Obsidian.AppImage
+          # --appimage-extract needs no FUSE, which ubuntu-latest does not have.
+          cd .obsidian-app
+          ./Obsidian.AppImage --appimage-extract
+          rm -f Obsidian.AppImage
+          ls -la squashfs-root/AppRun
+
+      - name: Install the e2e driver
+        run: |
+          set -eux
+          # playwright-core speaks CDP and downloads no browsers: the suite
+          # attaches to Obsidian's own Chromium, it never launches one.
+          # --no-package-lock so the lock file the release step commits is not
+          # quietly given a dev-only dependency.
+          npm install --no-save --no-package-lock --no-audit --no-fund playwright-core@1.49.1
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xvfb libgbm1 libnss3 libgtk-3-0 libsecret-1-0
+          # ALSA is `libasound2t64` on Ubuntu 24.04 and `libasound2` before it,
+          # and Electron starts without either - so neither is worth failing on.
+          sudo apt-get install -y --no-install-recommends libasound2t64 \
+            || sudo apt-get install -y --no-install-recommends libasound2 \
+            || echo "::warning::no ALSA package installed, continuing"
+
+      - name: End-to-end tests (headless Obsidian)
+        env:
+          SHEETS_OBSIDIAN_BIN: ${{ github.workspace }}/.obsidian-app/squashfs-root/AppRun
+          SHEETS_PLAYWRIGHT: playwright-core
+          # Never 9222: that is a developer's own Obsidian on the machine where
+          # this suite is also run by hand.
+          SHEETS_CDP_PORT: "9455"
+        run: |
+          set -eux
+          ls -la "$SHEETS_OBSIDIAN_BIN"
+          run_suite() {
+            xvfb-run --auto-servernum --server-args="-screen 0 1280x1024x24" \
+              node tests/e2e.mjs --fresh
+          }
+          # One retry, and one only: a cold Electron on a cold runner sometimes
+          # never reaches CDP. A suite that fails twice is a real failure.
+          if ! run_suite; then
+            echo "::warning::first e2e attempt failed, retrying once"
+            cat .sandbox/obsidian.log || true
+            pkill -f '\.sandbox/udata' || true
+            sleep 10
+            run_suite
+          fi
+
+      - name: Obsidian log and screenshots
+        if: always()
+        run: |
+          echo "---- .sandbox/obsidian.log ----"
+          cat .sandbox/obsidian.log || echo "(no log)"
+          ls -la tests/shots || true
+
+      - name: Upload the e2e screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-shots
+          path: tests/shots
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Decide bump kind
         id: bump

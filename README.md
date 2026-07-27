@@ -708,7 +708,7 @@ Notes on the build configuration:
 - The engine's hard-coded colours (`#fff`, `#ccc`, `#f3f3f3`) are remapped to
   Obsidian CSS variables. No `filter: invert(1)` anywhere.
 
-The e2e suite (445 assertions) launches a separate Obsidian instance with its
+The e2e suite (665 assertions) launches a separate Obsidian instance with its
 own `--user-data-dir` on CDP port 9333, so your running Obsidian is left alone.
 It installs and enables the plugin, creates a sheet, types values and formulas
 with real keyboard events, drags column and row edges, formats a selection with
@@ -738,10 +738,16 @@ hovers a `[[link]]` to catch the `hover-link` event and clicks it to see the
 note open, merges a range from the toolbar (through the confirm dialog) and
 splits it again, exports an `.xlsx` and imports it back through the file menu to
 compare the values, the formulas, the bold, the fill and the column widths,
-prints the sheet to a real PDF and reads the text back out of it, and finally
-pretends a foreign plugin owns `.sheet` to check the notice and the `.lsheet`
-fallback. Screenshots land in `tests/shots/`, and the printed PDF next to them
-as `22-print.pdf`. Playwright is needed for e2e only: either
+prints the sheet to a real PDF and reads the text back out of it, pretends a
+foreign plugin owns `.sheet` to check the notice and the `.lsheet` fallback,
+and finally drives every one of the toolbar's controls - the fill palette, the
+size, borders, number-format, alignment, sort, filter and freeze menus, the find
+strip, the column-width dialog, merge, checkbox, bold and wrap - in four
+contexts: the main window, both halves of a split, an Obsidian pop-out window,
+and by tap with touch emulation on. Each control has to open somewhere the user
+can actually see it (`document.elementFromPoint`, not a class name), to open in
+that window and in no other, and to still do its work. Screenshots land in
+`tests/shots/`, and the printed PDF next to them as `22-print.pdf`. Playwright is needed for e2e only: either
 `npm i -D playwright` or point `SHEETS_PLAYWRIGHT` at an existing install.
 
 Two things the harness does that are worth knowing before touching it. It
@@ -761,6 +767,13 @@ automatically, with a patch version bump. Commit message markers: `[minor]`
 and `[major]` bump the respective part, `[skip release]` builds and tests
 without releasing. See `.github/workflows/release.yml` and
 `scripts/bump-version.mjs`.
+
+"Tested" now means the e2e suite too, and it is a gate: the workflow downloads
+a pinned Obsidian AppImage (cached by version, unpacked because the runner has
+no FUSE), runs it under `xvfb` against the sandbox vault and drives the whole
+suite. Nothing is tagged or published if it fails. The reason for the gate is in
+"Gotchas" below: the fill palette shipped invisible in three releases because
+nothing drove the real app between the unit tests and the tag.
 
 ## Limitations
 
@@ -824,6 +837,38 @@ without releasing. See `.github/workflows/release.yml` and
   800x1340; phones untested.
 
 ## Gotchas worth knowing
+
+A scrolling toolbar clips its own popovers, and no selector will tell you. When
+the bar grew to twelve controls it was given `overflow-x: auto; overflow-y:
+hidden` so it could scroll sideways in a narrow pane instead of wrapping to two
+rows. That turned it into a clipping box, and the fill palette - `position:
+absolute`, anchored under the bucket, 67 px tall against a 36 px bar - was
+painted precisely nowhere from that release on. Everything a test can cheaply
+ask still answered correctly: the `is-open` class went on, the button lit up,
+`getBoundingClientRect()` returned a healthy 175x67 box, Playwright's
+`isVisible()` said true, and clicks on the swatches landed and applied the fill.
+The user saw the icon blink and no palette. The popover is a child of
+`.leovale-sheet-content` now, positioned from the button's rect on every open;
+and the suite asks `document.elementFromPoint()` at five points of every popover
+it opens, because that is the one DOM call that honours ancestor clipping.
+
+A pop-out window is a different `document`, and nearly everything global is
+therefore wrong in one. Three separate faults came out of that: the toolbar's
+outside-click and Escape handlers were registered on the main window's
+`document`, so the palette in a pop-out never closed; `Menu.showAtPosition()`
+without its second argument builds the menu in whichever window Obsidian
+currently calls active, so every dropdown opened in the MAIN window at
+coordinates measured in the pop-out; and the grid engine binds its pointer
+handlers to the global `document` unless it is given a `root`, so a sheet in a
+pop-out could not be selected at all - which made every toolbar action a silent
+no-op on an empty selection. All three are fixed by naming the view's own
+document. One gap is left, and it belongs to the vendor: its `setEvents()` binds
+every pointer handler to the `root` it is given but `keydown` to the global
+`document` regardless, so in a pop-out the arrow keys do not move the selection
+and typing on the grid writes nothing. Measured: a click selects, the toolbar
+and the menus work, a double click opens the in-cell editor, and the plugin's
+own formula bar (whose listeners are on its own input) writes the value - so a
+pop-out is usable, just not from the keyboard on the grid itself.
 
 Obsidian eats F2 and Ctrl+F before the grid ever sees them. Its keymap listens on
 `window` in the capture phase, and `F2` is "Rename file" while `Ctrl+F` is

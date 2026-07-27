@@ -133,6 +133,16 @@ export interface GridMenuContext {
 	y: number;
 	/** True when a finger asked for it: no keyboard hints, bigger rows. */
 	touch: boolean;
+	/**
+	 * The document {@link x}/{@link y} are viewport coordinates OF.
+	 *
+	 * A sheet tab can be dragged into an Obsidian pop-out window, and a menu
+	 * shown without naming its document is built in whatever window Obsidian
+	 * currently calls active - so the menu appeared in the main window, at
+	 * coordinates measured in the pop-out. The host passes this straight to
+	 * `Menu.showAtPosition`.
+	 */
+	doc: Document;
 }
 
 /** Distinct root class per live grid, so the freeze rules of one cannot hit another. */
@@ -391,6 +401,15 @@ export class SheetEngine {
 		this.notify = notify;
 
 		this.worksheets = jspreadsheet(this.host as HTMLDivElement, {
+			// The document the vendor hangs its pointer handlers on. Left out it
+			// takes the global `document`, which is the MAIN window's - so a sheet
+			// dragged into an Obsidian pop-out could not be selected at all: the
+			// clicks happened in a window nothing was listening to, the selection
+			// stayed empty, and every toolbar action was a silent no-op on it.
+			// In the main window this is the same object it would have picked
+			// anyway. (Typed `HTMLElement` by the vendor, used by it as an event
+			// target and for `getSelection()`, both of which a Document is.)
+			root: this.root.ownerDocument as unknown as HTMLElement,
 			worksheets: docToWorksheets(doc, this.readOnly) as never,
 			parseFormulas: true,
 			tabs: doc.sheets.length > 1,
@@ -617,7 +636,7 @@ export class SheetEngine {
 	 * whose WebView does not fire `contextmenu`), so the same press must not open
 	 * two menus: one within a second of another is dropped.
 	 */
-	private openMenu(ctx: GridMenuContext, event?: MouseEvent): void {
+	private openMenu(ctx: Omit<GridMenuContext, "doc">, event?: MouseEvent): void {
 		event?.preventDefault();
 		event?.stopPropagation();
 		const now = Date.now();
@@ -628,7 +647,9 @@ export class SheetEngine {
 		// selection (the vendor does that before asking us), so the menu acts on
 		// what the user is looking at.
 		try {
-			this.menuBuilder(ctx);
+			// The window the grid is really in, which is not necessarily the one
+			// Obsidian considers active (pop-out sheets).
+			this.menuBuilder({ ...ctx, doc: this.root.ownerDocument });
 		} catch (e) {
 			console.error("leovale-sheets: building the context menu failed", e);
 		}

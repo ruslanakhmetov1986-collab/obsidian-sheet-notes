@@ -106,8 +106,32 @@ const BORDER_ITEMS: { value: BorderMode; label: StringKey; icon: string }[] = [
 	{ value: "l", label: "borderLeft", icon: "panel-left" },
 ];
 
+/** Gap in px between the fill button and its popover, and from the pane edges. */
+const PALETTE_GAP = 6;
+
 export class SheetToolbar {
 	private el: HTMLElement;
+	/**
+	 * The view's own root. The fill popover hangs off THIS, not off the toolbar.
+	 *
+	 * The toolbar is a horizontal scroller (`overflow: auto hidden`, 36 px tall)
+	 * so that twelve controls fit a narrow pane. A scroller CLIPS its overflow,
+	 * and the popover sits below the bar by design, so from the moment that
+	 * scrolling was introduced the palette was painted nowhere: the class went
+	 * on, the button lit up, `getBoundingClientRect()` reported a healthy 175x67
+	 * box - and `elementFromPoint()` at the centre of that box answered with a
+	 * grid cell. "The icon blinks and nothing opens", exactly as reported.
+	 */
+	private host: HTMLElement;
+	/**
+	 * The document this toolbar lives in.
+	 *
+	 * NOT the global one: a sheet tab can be dragged into an Obsidian pop-out
+	 * window, and then `document` is the MAIN window's - listeners registered on
+	 * it never fire for the pop-out (the palette would never close), and menus
+	 * shown without it open in the wrong window entirely.
+	 */
+	private doc: Document;
 	private getEngine: () => SheetEngine | null;
 	private boldButton!: HTMLButtonElement;
 	private sizeButton!: HTMLButtonElement;
@@ -131,17 +155,24 @@ export class SheetToolbar {
 	private actions: ToolbarActions;
 	private onPointerDown: (e: MouseEvent) => void;
 	private onKeyDown: (e: KeyboardEvent) => void;
+	private onBarScroll: () => void;
 	/** Selection snapshot taken before a toolbar click can clear the grid's own. */
 	private pendingRefs: string[] = [];
 
 	constructor(parent: HTMLElement, getEngine: () => SheetEngine | null, actions: ToolbarActions) {
 		this.getEngine = getEngine;
 		this.actions = actions;
+		this.host = parent;
+		this.doc = parent.ownerDocument;
 		this.el = parent.createDiv({ cls: "leovale-sheet-toolbar" });
 		this.build();
 
 		this.onPointerDown = (e: MouseEvent) => {
-			if (this.el.contains(e.target as Node)) {
+			const target = e.target as Node;
+			// The palette is outside the bar in the DOM now, so it has to be named
+			// here too - otherwise a swatch would be hidden on `mousedown` and its
+			// own `click` would never arrive.
+			if (this.el.contains(target) || this.palette.contains(target)) {
 				// The grid drops its selection the moment we click outside it.
 				const refs = this.getEngine()?.getSelectionRefs() ?? [];
 				if (refs.length > 0) this.pendingRefs = refs;
@@ -149,14 +180,29 @@ export class SheetToolbar {
 			}
 			this.closePalette();
 		};
-		document.addEventListener("mousedown", this.onPointerDown, true);
+		this.doc.addEventListener("mousedown", this.onPointerDown, true);
 
 		// Escape closes the palette. It used to only close native menus, so the
 		// fill popover stayed open (and its button lit) until the next click.
 		this.onKeyDown = (e: KeyboardEvent) => {
 			if (e.key === "Escape") this.closePalette();
 		};
-		document.addEventListener("keydown", this.onKeyDown, true);
+		this.doc.addEventListener("keydown", this.onKeyDown, true);
+
+		// The popover is anchored once, on open, so a sideways scroll of the bar
+		// has to move it along with its button.
+		//
+		// It CLOSED the palette here at first, and that was wrong in a way worth
+		// remembering: a `scroll` event is delivered at the next rendering
+		// opportunity, not synchronously, and Playwright (like Obsidian itself)
+		// scrolls a button into view before pressing it. So the queued scroll
+		// arrived one frame AFTER the click that opened the popover and shut it
+		// again - the icon blinked and nothing appeared, i.e. precisely the bug
+		// this file is being fixed for, reintroduced by its own fix.
+		this.onBarScroll = () => {
+			if (this.palette.hasClass("is-open")) this.positionPalette();
+		};
+		this.el.addEventListener("scroll", this.onBarScroll, { passive: true });
 	}
 
 	/** Cells a toolbar action should act on. */
@@ -214,7 +260,10 @@ export class SheetToolbar {
 		// Google Sheets shows the current colour as a bar under the bucket.
 		this.fillSwatch = this.fillButton.createSpan({ cls: "leovale-sheet-tb-swatch is-empty" });
 
-		this.palette = group2.createDiv({ cls: "leovale-sheet-palette" });
+		// Deliberately a child of the view root rather than of `group2`: see the
+		// note on {@link host}. Its position is set on every open, in host
+		// coordinates, by {@link positionPalette}.
+		this.palette = this.host.createDiv({ cls: "leovale-sheet-palette" });
 		for (const { value, label } of FILL_COLORS) {
 			const text = t(label);
 			const swatch = this.palette.createEl("button", {
@@ -673,9 +722,38 @@ export class SheetToolbar {
 	/* -------------------------------------------------------------- popups */
 
 	private togglePalette(): void {
-		const open = !this.palette.hasClass("is-open");
-		this.palette.toggleClass("is-open", open);
-		this.fillButton.toggleClass("is-active", open);
+		if (this.palette.hasClass("is-open")) {
+			this.closePalette();
+			return;
+		}
+		this.palette.addClass("is-open");
+		this.fillButton.addClass("is-active");
+		// Only a laid-out element can be measured, so the class goes on first.
+		this.positionPalette();
+	}
+
+	/**
+	 * Anchor the popover under the fill button, in the view root's coordinates.
+	 *
+	 * Both rects are viewport-relative and both come from the SAME window, which
+	 * is what makes this correct inside an Obsidian pop-out as well: the element
+	 * belongs to that window's document, so its host rect is measured there too.
+	 * The clamp keeps the box inside the pane when the bar has been scrolled far
+	 * to the right, which is exactly the narrow-pane case the bar scrolls for.
+	 */
+	private positionPalette(): void {
+		const button = this.fillButton.getBoundingClientRect();
+		const host = this.host.getBoundingClientRect();
+		const rightMost = Math.max(PALETTE_GAP, host.width - this.palette.offsetWidth - PALETTE_GAP);
+		const left = Math.min(Math.max(button.left - host.left, PALETTE_GAP), rightMost);
+		// The host clips too (`overflow: hidden`), so a pane too short for the
+		// popover gets it overlapping the bar rather than swallowed whole. That
+		// is the failure this whole change is about, and it is not to happen on
+		// a small pane either.
+		const lowest = Math.max(0, host.height - this.palette.offsetHeight - PALETTE_GAP);
+		const top = Math.min(button.bottom - host.top + PALETTE_GAP, lowest);
+		this.palette.style.left = `${Math.round(left)}px`;
+		this.palette.style.top = `${Math.round(top)}px`;
 	}
 
 	private closePalette(): void {
@@ -701,7 +779,11 @@ export class SheetToolbar {
 			(button as HTMLButtonElement).blur();
 			this.sync();
 		});
-		menu.showAtPosition({ x: rect.left, y: rect.bottom + 4 });
+		// The document matters: without it Obsidian builds the menu in the window
+		// it thinks is active, so a sheet in a pop-out opened its menus in the
+		// MAIN window - at pop-out coordinates, over a different sheet. Verified:
+		// `.menu` elements after a click in the pop-out were 0 there and 1 here.
+		menu.showAtPosition({ x: rect.left, y: rect.bottom + 4 }, this.doc);
 	}
 
 	private openSizeMenu(): void {
@@ -870,8 +952,11 @@ export class SheetToolbar {
 	}
 
 	destroy(): void {
-		document.removeEventListener("mousedown", this.onPointerDown, true);
-		document.removeEventListener("keydown", this.onKeyDown, true);
+		this.doc.removeEventListener("mousedown", this.onPointerDown, true);
+		this.doc.removeEventListener("keydown", this.onKeyDown, true);
+		this.el.removeEventListener("scroll", this.onBarScroll);
+		// The popover is a sibling of the bar, so detaching the bar alone leaves it.
+		this.palette.detach();
 		this.el.detach();
 	}
 }

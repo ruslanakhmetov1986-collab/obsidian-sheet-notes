@@ -15,6 +15,10 @@
 	overflow: hidden;
 	display: flex;
 	flex-direction: column;
+	/* The fill popover is an absolutely positioned CHILD of this box (it cannot
+	   live in the toolbar, which clips - see the palette rules below), so this
+	   box has to be the one it measures against. */
+	position: relative;
 }
 
 .leovale-sheet-wrapper {
@@ -286,10 +290,17 @@ body.is-mobile .leovale-sheet-wrapper,
 
 /* ---- fill palette popover ---------------------------------------------- */
 
+/* The popover is a child of `.leovale-sheet-content`, NOT of the toolbar, and
+   `top`/`left` are written by the toolbar on every open. It used to hang off
+   the fill button's group with `top: calc(100% + 6px)`, which stopped working
+   the day the bar became a horizontal scroller: `overflow: auto hidden` clips,
+   and everything below 36 px is overflow. The popover was still in the DOM with
+   a real box - only nothing was ever painted, so the button lit up and the user
+   saw no palette at all. */
 .leovale-sheet-palette {
 	display: none;
 	position: absolute;
-	top: calc(100% + 6px);
+	top: 0;
 	left: 0;
 	z-index: var(--layer-menu, 50);
 	grid-template-columns: repeat(6, 22px);
@@ -305,7 +316,7 @@ body.is-mobile .leovale-sheet-wrapper,
 	display: grid;
 }
 
-.leovale-sheet-toolbar .leovale-sheet-swatch {
+.leovale-sheet-palette .leovale-sheet-swatch {
 	width: 22px;
 	height: 22px;
 	padding: 0;
@@ -320,13 +331,13 @@ body.is-mobile .leovale-sheet-wrapper,
 	appearance: none;
 }
 
-.leovale-sheet-toolbar .leovale-sheet-swatch:hover {
+.leovale-sheet-palette .leovale-sheet-swatch:hover {
 	border-color: var(--interactive-accent);
 	box-shadow: 0 0 0 1px var(--interactive-accent);
 }
 
 /* "no fill" swatch: empty square crossed by a red diagonal */
-.leovale-sheet-toolbar .leovale-sheet-swatch.is-none {
+.leovale-sheet-palette .leovale-sheet-swatch.is-none {
 	background-color: var(--background-primary);
 	background-image: linear-gradient(
 		to top right,
@@ -778,8 +789,8 @@ body.is-mobile .leovale-sheet-palette,
 	gap: 6px;
 }
 
-body.is-mobile .leovale-sheet-toolbar .leovale-sheet-swatch,
-.leovale-sheet-content.is-mobile .leovale-sheet-toolbar .leovale-sheet-swatch {
+body.is-mobile .leovale-sheet-palette .leovale-sheet-swatch,
+.leovale-sheet-content.is-mobile .leovale-sheet-palette .leovale-sheet-swatch {
 	width: 44px;
 	height: 44px;
 }

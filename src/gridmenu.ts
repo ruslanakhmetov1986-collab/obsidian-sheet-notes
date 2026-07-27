@@ -177,5 +177,7 @@ export function openGridMenu(
 	dom?.addClass(MENU_CLASS);
 	if (ctx.touch || isTouchUi() || Platform.isMobile) dom?.addClass("is-touch");
 
-	menu.showAtPosition({ x: ctx.x, y: ctx.y });
+	// `ctx.doc` and not the global one: `ctx.x`/`ctx.y` were measured in the
+	// window the grid is in, and a sheet can be in an Obsidian pop-out.
+	menu.showAtPosition({ x: ctx.x, y: ctx.y }, ctx.doc);
 }

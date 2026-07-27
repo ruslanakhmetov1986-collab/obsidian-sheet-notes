@@ -305,6 +305,289 @@ function menuTitles(page, cls = ".leovale-sheet-menu") {
 	);
 }
 
+/* ------------------------------------------------- is it really on screen? */
+
+/**
+ * Is this popover something a HUMAN can see, or only something a selector can
+ * find?
+ *
+ * The distinction is the whole point of this helper and it is not academic. The
+ * fill palette used to live inside the toolbar, and the toolbar is a horizontal
+ * scroller (`overflow: auto hidden`, 36 px tall) so that twelve controls fit a
+ * narrow pane - which means every pixel of a popover hanging BELOW it was
+ * clipped away. `is-open` was on, Playwright's `isVisible()` answered true,
+ * `getBoundingClientRect()` reported a healthy 175x67 box, and clicks on its
+ * swatches landed and applied the fill. The user saw the bucket icon light up
+ * and nothing else appear, for three releases, with this suite green.
+ *
+ * `elementFromPoint` is the one DOM call that honours ancestor clipping, so it
+ * is the one asked here - at the centre and the four corners of the box.
+ */
+async function seenByUser(page, selector, nth = 0) {
+	return page.evaluate(
+		([sel, i]) => {
+			const el = document.querySelectorAll(sel)[i];
+			if (!el) return { found: false, painted: false };
+			const r = el.getBoundingClientRect();
+			const cs = getComputedStyle(el);
+			const inset = 4;
+			const points = [
+				[r.left + r.width / 2, r.top + r.height / 2],
+				[r.left + inset, r.top + inset],
+				[r.right - inset, r.top + inset],
+				[r.left + inset, r.bottom - inset],
+				[r.right - inset, r.bottom - inset],
+			];
+			const hits = points.filter(([x, y]) => {
+				const hit = document.elementFromPoint(Math.round(x), Math.round(y));
+				return !!hit && (hit === el || el.contains(hit));
+			}).length;
+			const onScreen =
+				r.width > 1 &&
+				r.height > 1 &&
+				r.right > 0 &&
+				r.bottom > 0 &&
+				r.left < window.innerWidth &&
+				r.top < window.innerHeight;
+			const shown = cs.display !== "none" && cs.visibility !== "hidden" && Number(cs.opacity) > 0.05;
+			return {
+				found: true,
+				rect: [Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height)],
+				hits,
+				onScreen,
+				shown,
+				// Four points of five: a corner may legitimately fall under a
+				// scrollbar or a rounded edge, all five may not.
+				painted: shown && onScreen && hits >= 4,
+			};
+		},
+		[selector, nth],
+	);
+}
+
+/* ----------------------------------------- the toolbar-in-every-context matrix */
+
+/** Per-window handle on the view that owns the nth grid in THIS document. */
+async function installViewIndex(p) {
+	await p.evaluate(() => {
+		window.sheetViewAt = (i) => {
+			const el = document.querySelectorAll(".leovale-sheet-content")[i];
+			return window.app.workspace
+				.getLeavesOfType("leovale-sheet-view")
+				.map((l) => l.view)
+				.find((v) => v && v.contentEl === el);
+		};
+		window.engineAt = (i) => window.sheetViewAt(i)?.sheetEngine ?? null;
+	});
+}
+
+/**
+ * Tap something the way a finger does.
+ *
+ * A dispatched `TouchEvent` is not enough here: the browser generates the
+ * compatibility mouse events (and therefore the `click` a button listens for)
+ * only for real input, so the tap goes in through CDP with touch emulation on.
+ */
+function makeTapper(cdp) {
+	return async (p, locator) => {
+		const box = await locator.boundingBox();
+		if (!box) throw new Error("nothing to tap");
+		const x = Math.round(box.x + box.width / 2);
+		const y = Math.round(box.y + box.height / 2);
+		await cdp.send("Input.dispatchTouchEvent", {
+			type: "touchStart",
+			touchPoints: [{ x, y, radiusX: 8, radiusY: 8, force: 1 }],
+		});
+		await p.waitForTimeout(50);
+		await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+	};
+}
+
+/**
+ * Drive every control of ONE toolbar and prove each one opens where the user is
+ * looking and still does its job.
+ *
+ * `nth` picks the grid within `p`'s document (a split puts two in one), `other`
+ * is the window that has to stay EMPTY - a menu shown without naming its
+ * document is built in whatever window Obsidian currently calls active, which
+ * for a sheet in a pop-out is the wrong one - and `tap` swaps every press for a
+ * finger.
+ */
+async function toolbarMatrix({ p, label, nth = 0, other = null, tap = null }) {
+	const root = p.locator(".leovale-sheet-content").nth(nth);
+	const cellSel = (x, y) => `.leovale-sheet-root td[data-x="${x}"][data-y="${y}"]`;
+
+	const press = async (cls) => {
+		if (tap) await tap(p, root.locator(cls));
+		else await root.locator(cls).click();
+		await p.waitForTimeout(260);
+	};
+	const clickCell = async (x, y) => {
+		await root.locator(cellSel(x, y)).click();
+		await p.waitForTimeout(160);
+	};
+	const styleAt = (ref) =>
+		p.evaluate(([i, r]) => window.engineAt(i)?.getStyleAt(r) ?? {}, [nth, ref]);
+	const menuCount = (q) => q.evaluate(() => document.querySelectorAll(".menu").length);
+	const menuItems = () =>
+		p.evaluate(() =>
+			[...document.querySelectorAll(".menu .menu-item-title")].map((i) => i.textContent),
+		);
+	const pickMenuItem = async (title) => {
+		await p.locator(`.menu .menu-item:has(.menu-item-title:text-is("${title}"))`).click();
+		await p.waitForTimeout(320);
+	};
+
+	await installViewIndex(p);
+	await clickCell(0, 0);
+
+	/* ------------------------------------------------------------ fill palette */
+	await press(".leovale-sheet-tb-fillbtn");
+	const pal = await seenByUser(p, ".leovale-sheet-palette.is-open");
+	console.log(`  [${label}] palette:`, JSON.stringify(pal));
+	check(`${label}: the fill palette is painted where the user is looking`, pal.painted,
+		JSON.stringify(pal));
+	check(
+		`${label}: the palette carries all 12 swatches`,
+		(await root.locator(".leovale-sheet-palette .leovale-sheet-swatch").count()) === 12,
+	);
+	await root.locator('.leovale-sheet-palette .leovale-sheet-swatch[data-color="#fff2cc"]').click();
+	await p.waitForTimeout(320);
+	check(`${label}: picking a swatch fills the cell`, (await styleAt("A1")).bg === "#fff2cc",
+		JSON.stringify(await styleAt("A1")));
+	check(`${label}: and closes the palette`,
+		(await root.locator(".leovale-sheet-palette.is-open").count()) === 0);
+	await press(".leovale-sheet-tb-fillbtn");
+	await root.locator(".leovale-sheet-palette .leovale-sheet-swatch.is-none").click();
+	await p.waitForTimeout(300);
+	check(`${label}: "no fill" clears it again`, (await styleAt("A1")).bg === undefined,
+		JSON.stringify(await styleAt("A1")));
+
+	/* -------------------------------------------------- the four style menus */
+	const styleMenus = [
+		{ name: "font size", cls: ".leovale-sheet-tb-size", pick: "18", back: "Default",
+			ok: (s) => s.fs === 18, gone: (s) => s.fs === undefined },
+		{ name: "borders", cls: ".leovale-sheet-tb-border", pick: "All borders", back: "No borders",
+			ok: (s) => !!s.bd, gone: (s) => !s.bd },
+		{ name: "number format", cls: ".leovale-sheet-tb-number", pick: "0%", back: "Auto",
+			ok: (s) => s.nf === "0%", gone: (s) => s.nf === undefined },
+		// "Left" IS the reset for the horizontal axis: it stores no key at all.
+		{ name: "alignment", cls: ".leovale-sheet-tb-align", pick: "Center", back: "Left",
+			ok: (s) => s.ha === "c", gone: (s) => s.ha === undefined },
+	];
+	for (const m of styleMenus) {
+		await clickCell(0, 0);
+		await press(m.cls);
+		const seen = await seenByUser(p, ".menu");
+		check(`${label}: the ${m.name} menu is painted in this window`, seen.painted,
+			JSON.stringify(seen));
+		if (other) {
+			check(`${label}: the ${m.name} menu is in no OTHER window`, (await menuCount(other)) === 0);
+		}
+		const items = await menuItems();
+		check(`${label}: the ${m.name} menu has its items`, items.length >= 5, JSON.stringify(items));
+		await pickMenuItem(m.pick);
+		check(`${label}: ${m.name} applied`, m.ok(await styleAt("A1")),
+			JSON.stringify(await styleAt("A1")));
+		await press(m.cls);
+		await pickMenuItem(m.back);
+		check(`${label}: ${m.name} undone`, m.gone(await styleAt("A1")),
+			JSON.stringify(await styleAt("A1")));
+	}
+
+	/* ------------------------- sort, filter, freeze: open, look, walk away */
+	for (const [name, cls] of [
+		["sort", ".leovale-sheet-tb-sort"],
+		["filter", ".leovale-sheet-tb-filter"],
+		["freeze", ".leovale-sheet-tb-freeze"],
+	]) {
+		await clickCell(0, 0);
+		await press(cls);
+		const seen = await seenByUser(p, ".menu");
+		const items = await menuItems();
+		check(`${label}: the ${name} menu is painted in this window`, seen.painted, JSON.stringify(seen));
+		check(`${label}: the ${name} menu has its items`, items.length >= 2, JSON.stringify(items));
+		if (other) {
+			check(`${label}: the ${name} menu is in no OTHER window`, (await menuCount(other)) === 0);
+		}
+		await p.keyboard.press("Escape");
+		await p.waitForTimeout(220);
+		check(`${label}: Escape closes the ${name} menu`, (await menuCount(p)) === 0);
+	}
+
+	/* ---------------------------------------------------------- the find strip */
+	await press(".leovale-sheet-tb-find");
+	// Index 0 and not `nth`: only one strip in the document is ever open.
+	const find = await seenByUser(p, ".leovale-sheet-find.is-open");
+	check(`${label}: the find strip is painted`, find.painted, JSON.stringify(find));
+	await press(".leovale-sheet-tb-find");
+	check(`${label}: and the same button closes it`,
+		(await root.locator(".leovale-sheet-find.is-open").count()) === 0);
+
+	/* -------------------------------------------------------- the width dialog */
+	await clickCell(0, 0);
+	await press(".leovale-sheet-tb-width");
+	const modalHere = await p.evaluate(() => document.querySelectorAll(".modal").length);
+	const modalThere = other
+		? await other.evaluate(() => document.querySelectorAll(".modal").length)
+		: 0;
+	console.log(`  [${label}] width dialog: here=${modalHere} elsewhere=${modalThere}`);
+	// Obsidian owns where a Modal is mounted, so this asks only that one opened.
+	check(`${label}: the column-width dialog opened`, modalHere + modalThere >= 1,
+		`${modalHere}/${modalThere}`);
+	await (modalHere ? p : other).keyboard.press("Escape");
+	await p.waitForTimeout(300);
+
+	/* ------------------------------------------------------- merge and checkbox */
+	const a7 = await root.locator(cellSel(0, 6)).boundingBox();
+	const b7 = await root.locator(cellSel(1, 6)).boundingBox();
+	await p.mouse.move(a7.x + a7.width / 2, a7.y + a7.height / 2);
+	await p.mouse.down();
+	await p.mouse.move(b7.x + b7.width / 2, b7.y + b7.height / 2, { steps: 6 });
+	await p.mouse.up();
+	await p.waitForTimeout(200);
+	await press(".leovale-sheet-tb-merge");
+	const merged = await p.evaluate(
+		([i]) => {
+			const el = document.querySelectorAll(".leovale-sheet-content")[i];
+			const td = el.querySelector('.leovale-sheet-root td[data-x="0"][data-y="6"]');
+			return { colspan: td?.getAttribute("colspan"), merge: !!window.engineAt(i)?.mergeAt(6, 0) };
+		},
+		[nth],
+	);
+	check(`${label}: merge really merged`, merged.merge && merged.colspan === "2",
+		JSON.stringify(merged));
+	await press(".leovale-sheet-tb-merge");
+	check(`${label}: and the same button split it again`,
+		(await p.evaluate(([i]) => !!window.engineAt(i)?.mergeAt(6, 0), [nth])) === false);
+
+	const hasBox = () =>
+		p.evaluate(
+			([i]) =>
+				!!document
+					.querySelectorAll(".leovale-sheet-content")
+					[i].querySelector('.leovale-sheet-root td[data-x="0"][data-y="7"] input[type="checkbox"]'),
+			[nth],
+		);
+	await clickCell(0, 7);
+	await press(".leovale-sheet-tb-checkbox");
+	check(`${label}: the checkbox button really made one`, await hasBox());
+	await press(".leovale-sheet-tb-checkbox");
+	check(`${label}: and took it away again`, !(await hasBox()));
+
+	/* ---------------------------------------------------------- bold and wrap */
+	for (const [name, cls, key] of [
+		["bold", ".leovale-sheet-tb-bold", "b"],
+		["wrap", ".leovale-sheet-tb-wrap", "wrap"],
+	]) {
+		await clickCell(0, 0);
+		await press(cls);
+		check(`${label}: ${name} on`, !!(await styleAt("A1"))[key], JSON.stringify(await styleAt("A1")));
+		await press(cls);
+		check(`${label}: ${name} off`, !(await styleAt("A1"))[key], JSON.stringify(await styleAt("A1")));
+	}
+}
+
 function selectedCell(page) {
 	return page.evaluate(() => {
 		const td = document.querySelector(".leovale-sheet-content .leovale-sheet-root td.highlight-selected");
@@ -405,6 +688,15 @@ async function main() {
 		check("ribbon icon present", enabled.ribbon);
 
 		step("clean previous run");
+		// Both side docks shut, always. Their state is remembered per user-data-dir,
+		// so a sandbox that was poked at by hand (or by a run that opened the right
+		// dock to test a narrow pane) produced screenshots that differ from the
+		// committed ones in nothing but a file explorer - pure review noise.
+		await page.evaluate(() => {
+			window.app.workspace.leftSplit?.collapse?.();
+			window.app.workspace.rightSplit?.collapse?.();
+		});
+		await page.waitForTimeout(300);
 		// Close notes too, not just sheet tabs: a note left open from a previous
 		// run (with --keep the workspace is restored) contains EMBEDDED grids, and
 		// `.leovale-sheet-root td[data-x=...]` would then resolve to a cell of an
@@ -766,20 +1058,29 @@ async function main() {
 		);
 
 		// fill: bucket -> palette popover -> swatch (screenshot with it open)
+		//
+		// The popover is a child of `.leovale-sheet-content`, NOT of the bar: the
+		// bar is a horizontal scroller and clipped it out of existence for three
+		// releases. Hence `pal`, the scope, AND the paint check below - a class
+		// and a bounding box were exactly what said "fine" while it was invisible.
+		const pal = ".leovale-sheet-content .leovale-sheet-palette";
 		await page.click(`${tb} .leovale-sheet-tb-fillbtn`);
 		await page.waitForTimeout(200);
-		check("palette opened", await page.locator(`${tb} .leovale-sheet-palette.is-open`).isVisible());
+		check("palette opened", await page.locator(`${pal}.is-open`).isVisible());
+		const paletteSeen = await seenByUser(page, `${pal}.is-open`);
+		console.log("  palette paint:", paletteSeen);
+		check("and the user can actually SEE it", paletteSeen.painted, JSON.stringify(paletteSeen));
 		check(
 			"palette has 12 swatches incl. no-fill",
-			(await page.locator(`${tb} .leovale-sheet-swatch`).count()) === 12 &&
-				(await page.locator(`${tb} .leovale-sheet-swatch.is-none`).count()) === 1,
+			(await page.locator(`${pal} .leovale-sheet-swatch`).count()) === 12 &&
+				(await page.locator(`${pal} .leovale-sheet-swatch.is-none`).count()) === 1,
 		);
 		await shot(page, "06-palette-open-light");
-		await page.click(`${tb} .leovale-sheet-swatch[data-color="#fff2cc"]`);
+		await page.click(`${pal} .leovale-sheet-swatch[data-color="#fff2cc"]`);
 		await page.waitForTimeout(250);
 		check(
 			"palette closed after picking",
-			(await page.locator(`${tb} .leovale-sheet-palette.is-open`).count()) === 0,
+			(await page.locator(`${pal}.is-open`).count()) === 0,
 		);
 
 		// borders: button -> native Obsidian menu -> item
@@ -1334,8 +1635,11 @@ async function main() {
 		await page.waitForTimeout(250);
 		check(
 			"palette opens in dark theme too",
-			await page.locator(".leovale-sheet-toolbar .leovale-sheet-palette.is-open").isVisible(),
+			await page.locator(".leovale-sheet-content .leovale-sheet-palette.is-open").isVisible(),
 		);
+		const darkPaletteSeen = await seenByUser(page, ".leovale-sheet-palette.is-open");
+		check("and is painted in the dark theme too", darkPaletteSeen.painted,
+			JSON.stringify(darkPaletteSeen));
 		const paletteDark = await page.evaluate(() => {
 			const pal = document.querySelector(".leovale-sheet-palette");
 			const ps = getComputedStyle(pal);
@@ -3625,6 +3929,156 @@ async function main() {
 		console.log("  restored:", restored);
 		check("with .sheet free again the plugin takes it", restored.sheetOwner === "leovale-sheet-view" &&
 			restored.owned === true, JSON.stringify(restored));
+
+		/* ------------------------------------------------------------------------
+		 * Every toolbar control, in every context a sheet can be looked at from.
+		 *
+		 * This exists because the fill palette was invisible from 1.3.0 onwards
+		 * and this suite said it was fine: it asserted a class and a bounding
+		 * box, and both were healthy while the popover was clipped out of the
+		 * toolbar's own scroll box. So the assertion here is "the user can see
+		 * it" (elementFromPoint) and "it still does the work" (the engine's own
+		 * style, the cell's own DOM), in the main window, in each half of a
+		 * split, in a pop-out window, and under a finger.
+		 * -------------------------------------------------------------------- */
+		const MATRIX_PATH = "Matrix.sheet";
+		const MATRIX2_PATH = "Matrix-2.sheet";
+		const matrixSeed = JSON.stringify(
+			{
+				format: "leovale-sheet",
+				version: 4,
+				sheets: [
+					{
+						name: "Sheet1",
+						rows: 20,
+						cols: 8,
+						cells: { A1: { v: "alpha" }, A2: { v: "beta" } },
+					},
+				],
+			},
+			null,
+			2,
+		);
+
+		step("1.4.x: every toolbar control opens WHERE THE USER IS LOOKING");
+		await page.evaluate(
+			async ([a, b]) => {
+				const app = window.app;
+				app.workspace.detachLeavesOfType("leovale-sheet-view");
+				for (const name of [a, b]) {
+					const old = app.vault.getAbstractFileByPath(name);
+					if (old) await app.vault.delete(old);
+				}
+			},
+			[MATRIX_PATH, MATRIX2_PATH],
+		);
+		await page.waitForTimeout(400);
+		await page.evaluate(
+			async ([a, b, text]) => {
+				const app = window.app;
+				const fa = await app.vault.create(a, text);
+				await app.vault.create(b, text);
+				await app.workspace.getLeaf(true).openFile(fa);
+			},
+			[MATRIX_PATH, MATRIX2_PATH, matrixSeed],
+		);
+		await page.waitForTimeout(2200);
+		await toolbarMatrix({ p: page, label: "main window" });
+		await shot(page, "26-toolbar-matrix-main");
+
+		step("1.4.x: the same with two sheets side by side");
+		await page.evaluate(async (b) => {
+			const app = window.app;
+			const leaf = app.workspace.getLeavesOfType("leovale-sheet-view")[0];
+			const right = app.workspace.createLeafBySplit(leaf, "vertical");
+			await right.openFile(app.vault.getAbstractFileByPath(b));
+		}, MATRIX2_PATH);
+		await page.waitForTimeout(2000);
+		const panes = await page.evaluate(
+			() => document.querySelectorAll(".leovale-sheet-content .leovale-sheet-toolbar").length,
+		);
+		check("two grids are on screen at once", panes === 2, String(panes));
+		await toolbarMatrix({ p: page, label: "split, left pane", nth: 0 });
+		await toolbarMatrix({ p: page, label: "split, right pane", nth: 1 });
+		await shot(page, "27-toolbar-matrix-split");
+
+		step("1.4.x: the same in an Obsidian pop-out window");
+		const pagesBefore = new Set(ctx.pages());
+		await page.evaluate(async (a) => {
+			const app = window.app;
+			app.workspace.detachLeavesOfType("leovale-sheet-view");
+			await new Promise((r) => setTimeout(r, 400));
+			const leaf = app.workspace.openPopoutLeaf();
+			await leaf.openFile(app.vault.getAbstractFileByPath(a));
+		}, MATRIX_PATH);
+		let popout = null;
+		for (let i = 0; i < 40 && !popout; i++) {
+			await page.waitForTimeout(500);
+			// A pop-out is served from `about:blank` - Obsidian builds its DOM by
+			// hand - so it cannot be recognised by URL, only by being new.
+			popout = ctx.pages().find((q) => !pagesBefore.has(q));
+		}
+		check("the pop-out window appeared over CDP", !!popout,
+			JSON.stringify(ctx.pages().map((q) => q.url())));
+		if (popout) {
+			await popout.waitForTimeout(1500);
+			const popoutErrors = [];
+			popout.on("pageerror", (e) => popoutErrors.push(e.message));
+			check(
+				"the sheet really moved to the pop-out",
+				(await popout.evaluate(() => document.querySelectorAll(".leovale-sheet-content").length)) ===
+					1 &&
+					(await page.evaluate(() => document.querySelectorAll(".leovale-sheet-content").length)) === 0,
+			);
+			await toolbarMatrix({ p: popout, label: "pop-out", other: page });
+			// The screenshot this whole fix exists for.
+			await popout.locator(".leovale-sheet-tb-fillbtn").click();
+			await popout.waitForTimeout(300);
+			const popoutPalette = await seenByUser(popout, ".leovale-sheet-palette.is-open");
+			check("pop-out: the palette is painted for the screenshot", popoutPalette.painted,
+				JSON.stringify(popoutPalette));
+			await shot(popout, "28-palette-open-popout");
+			await popout.keyboard.press("Escape");
+			check("nothing threw inside the pop-out", popoutErrors.length === 0, popoutErrors.join(" | "));
+			await page.evaluate(() => {
+				for (const l of window.app.workspace.getLeavesOfType("leovale-sheet-view")) l.detach();
+			});
+			await page.waitForTimeout(1000);
+		}
+
+		step("1.4.x: the same by TAP, with touch emulation on");
+		await page.evaluate(async (a) => {
+			const app = window.app;
+			await app.workspace.getLeaf(true).openFile(app.vault.getAbstractFileByPath(a));
+		}, MATRIX_PATH);
+		await page.waitForTimeout(2000);
+		const tapCdp = await ctx.newCDPSession(page);
+		await tapCdp.send("Emulation.setTouchEmulationEnabled", { enabled: true, maxTouchPoints: 5 });
+		await page.evaluate(() => document.body.classList.add("is-mobile"));
+		await page.waitForTimeout(600);
+		await toolbarMatrix({ p: page, label: "touch tap", tap: makeTapper(tapCdp) });
+		await page.locator(".leovale-sheet-tb-fillbtn").click();
+		await page.waitForTimeout(300);
+		const tapPalette = await seenByUser(page, ".leovale-sheet-palette.is-open");
+		check("touch: the palette is painted under a finger too", tapPalette.painted,
+			JSON.stringify(tapPalette));
+		await shot(page, "29-palette-open-touch");
+		await page.keyboard.press("Escape");
+		await page.evaluate(() => document.body.classList.remove("is-mobile"));
+		await tapCdp.send("Emulation.setTouchEmulationEnabled", { enabled: false });
+		await page.waitForTimeout(400);
+		await page.evaluate(
+			async ([a, b]) => {
+				const app = window.app;
+				app.workspace.detachLeavesOfType("leovale-sheet-view");
+				for (const name of [a, b]) {
+					const f = app.vault.getAbstractFileByPath(name);
+					if (f) await app.vault.delete(f);
+				}
+			},
+			[MATRIX_PATH, MATRIX2_PATH],
+		);
+		await page.waitForTimeout(500);
 
 		const realErrors = pageErrors.filter(
 			(e) =>

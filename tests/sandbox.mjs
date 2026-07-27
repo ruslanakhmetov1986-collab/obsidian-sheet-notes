@@ -26,7 +26,25 @@ export const SHOTS = path.join(PROJECT_ROOT, "tests", "shots");
  */
 export const CDP_PORT = Number(process.env.SHEETS_CDP_PORT) || 9333;
 export const PLUGIN_ID = "leovale-sheets";
-export const OBSIDIAN_EXE = "C:\\Program Files\\Obsidian\\Obsidian.exe";
+/**
+ * The Obsidian to drive.
+ *
+ * `SHEETS_OBSIDIAN_BIN` overrides the path, which is what CI uses: there the
+ * app is an AppImage unpacked into the workspace, not an installed program.
+ * Windows behaviour without the variable is exactly what it always was.
+ */
+export const OBSIDIAN_EXE =
+	process.env.SHEETS_OBSIDIAN_BIN || "C:\\Program Files\\Obsidian\\Obsidian.exe";
+/** True on the Linux CI runner, where Electron needs a few extra flags. */
+const ON_LINUX = process.platform === "linux";
+/** Where the CI run keeps the app's own stdout/stderr. */
+export const OBSIDIAN_LOG = path.join(SANDBOX, "obsidian.log");
+
+/** An append handle for {@link OBSIDIAN_LOG}, created on first use. */
+function logFd() {
+	fs.mkdirSync(SANDBOX, { recursive: true });
+	return fs.openSync(OBSIDIAN_LOG, "a");
+}
 
 /** Write UTF-8 with LF and no BOM (a BOM sends Obsidian to the vault picker). */
 export function writeNoBom(file, text) {
@@ -75,6 +93,21 @@ export function deployPlugin() {
 }
 
 function sandboxPids() {
+	// Same rule as on Windows: only processes whose command line names OUR
+	// --user-data-dir, so a developer's real Obsidian is never in the list.
+	if (ON_LINUX) {
+		try {
+			const out = execFileSync("pgrep", ["-f", "\\.sandbox/udata"], { encoding: "utf8" });
+			return out
+				.split(/\r?\n/)
+				.map((s) => s.trim())
+				.filter((s) => /^[0-9]+$/.test(s))
+				.map(Number)
+				.filter((pid) => pid !== process.pid);
+		} catch {
+			return [];
+		}
+	}
 	try {
 		const out = execFileSync(
 			"powershell.exe",
@@ -159,6 +192,10 @@ export async function launchSandbox({ fresh = false } = {}) {
 		[
 			`--user-data-dir=${UDATA}`,
 			`--remote-debugging-port=${CDP_PORT}`,
+			// CI only. An unpacked AppImage has no SUID `chrome-sandbox`, the
+			// runner has no GPU, and /dev/shm on a container is 64 MB - each of
+			// which stops Electron before it ever opens a window.
+			...(ON_LINUX ? ["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage"] : []),
 			// Without these, a sandbox window that ends up BEHIND other windows is
 			// reported as `document.visibilityState === "hidden"` by Chromium's
 			// native occlusion tracking. Rendering then stops, requestAnimationFrame
@@ -170,11 +207,19 @@ export async function launchSandbox({ fresh = false } = {}) {
 			"--disable-backgrounding-occluded-windows",
 			"--disable-renderer-backgrounding",
 		],
-		{ detached: true, stdio: "ignore" },
+		// On CI the app's own output is the only clue when it refuses to start
+		// (a missing shared library, a broken sandbox, no display), so it goes to
+		// a file the workflow prints. Locally nothing changes.
+		ON_LINUX
+			? { detached: true, stdio: ["ignore", logFd(), logFd()] }
+			: { detached: true, stdio: "ignore" },
 	);
 	child.unref();
+	child.on("error", (e) => console.error("  sandbox spawn error:", e.message));
 
-	const deadline = Date.now() + 90_000;
+	// A cold CI runner unpacks and starts far slower than a warm desktop.
+	const budgetMs = ON_LINUX ? 180_000 : 90_000;
+	const deadline = Date.now() + budgetMs;
 	while (Date.now() < deadline) {
 		if (await portAlive(CDP_PORT)) {
 			await assertSandboxTarget(CDP_PORT);
@@ -182,5 +227,8 @@ export async function launchSandbox({ fresh = false } = {}) {
 		}
 		await new Promise((r) => setTimeout(r, 1000));
 	}
-	throw new Error(`sandbox Obsidian did not expose CDP on ${CDP_PORT} within 90 s`);
+	throw new Error(
+		`sandbox Obsidian did not expose CDP on ${CDP_PORT} within ${budgetMs / 1000} s` +
+			(ON_LINUX ? ` (see ${OBSIDIAN_LOG})` : ""),
+	);
 }

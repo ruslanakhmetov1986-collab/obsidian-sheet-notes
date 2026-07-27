@@ -1,5 +1,6 @@
 node_modules/
 .sandbox/
+.obsidian-app/
 tests/.build/
 main.js
 main.css
