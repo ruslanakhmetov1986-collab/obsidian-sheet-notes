@@ -17,17 +17,22 @@
 export const FORMAT_ID = "leovale-sheet";
 /**
  * 1 -> 2 (release 1.2.0): cell styles gained `nf`, `ha`, `va` and `wrap`.
+ * 2 -> 3 (release 1.3.0): a page gained the `view` (sort + filters) and
+ * `freeze` (frozen rows/columns) blocks.
  *
- * The bump is not cosmetic. A 1.1.x build knows nothing about those keys and
- * `normalizeStyle()` there DROPS unknown properties, so opening a v2 file in an
- * older build and saving it would silently strip every number format and
- * alignment in the document. Version 2 makes that build refuse to write the
- * file at all (`isSupportedVersion` -> read-only) instead.
+ * The bump is not cosmetic, and the rule behind it is always the same one: a
+ * build that cannot see a key DROPS it on save. A 1.1.x build's
+ * `normalizeStyle()` drops `nf`/`ha`/`va`/`wrap`; a 1.2.0 build's `parsePage()`
+ * drops `view` and `freeze` (it copies known keys onto a fresh page and never
+ * looks at the rest). So a 1.2.0 build opening a 1.3.0 file and saving it would
+ * silently throw away the sort, the filters and the frozen panes. Version 3
+ * makes that build refuse to write the file at all
+ * (`isSupportedVersion` -> read-only), which is the entire point of the field.
  *
- * Reading v1 keeps working forever; writing always emits the current version
- * (see {@link serializeSheet}).
+ * Reading v1 and v2 keeps working forever; writing always emits the current
+ * version (see {@link serializeSheet}).
  */
-export const CURRENT_VERSION = 2;
+export const CURRENT_VERSION = 3;
 
 /** Shortest plausible serialization; used by the view as an anti-truncation floor. */
 export const MIN_VALID = 60;
@@ -202,6 +207,112 @@ export function isEmptyStyle(style: CellStyle | undefined): boolean {
 	);
 }
 
+/* ------------------------------------------------------- view and freeze */
+
+export const SORT_DIRS = ["asc", "desc"] as const;
+export type SortDir = (typeof SORT_DIRS)[number];
+
+/** A column sort, as last applied by the user. `col` is a 0-based index. */
+export interface PageSort {
+	col: number;
+	dir: SortDir;
+}
+
+/**
+ * How the user is currently LOOKING at the page: which column it is sorted by
+ * and which values each filtered column is allowed to show. Neither changes a
+ * single cell, which is why both live outside `cells`.
+ *
+ * `filters` maps a column index (decimal string, like `colWidths`) to the list
+ * of ALLOWED display values; a row is visible when every filtered column of it
+ * is in its list. A column absent from the map is unfiltered.
+ */
+export interface PageView {
+	sort?: PageSort;
+	filters?: Record<string, string[]>;
+}
+
+/** Frozen panes: the first `rows` rows and `cols` columns stay put. */
+export interface PageFreeze {
+	rows?: number;
+	cols?: number;
+}
+
+/** Refuse absurd freezes: a pane taller than the window is a corrupt file. */
+export const MAX_FREEZE = 100;
+/** A filter list longer than this is a corrupt file, not a user's choice. */
+export const MAX_FILTER_VALUES = 5000;
+
+export function normalizeSort(input: unknown): PageSort | undefined {
+	if (!input || typeof input !== "object" || Array.isArray(input)) return undefined;
+	const src = input as Record<string, unknown>;
+	const colRaw = src["col"];
+	const col = typeof colRaw === "string" ? Number.parseInt(colRaw, 10) : colRaw;
+	if (typeof col !== "number" || !Number.isFinite(col) || col < 0) return undefined;
+	const dirRaw = typeof src["dir"] === "string" ? (src["dir"] as string).trim().toLowerCase() : "";
+	// Anything that is not literally "desc" is ascending: a sort direction we
+	// cannot read must still leave a usable sort rather than dropping the block.
+	const dir: SortDir = dirRaw === "desc" || dirRaw === "d" || dirRaw === "-1" ? "desc" : "asc";
+	return { col: Math.round(col), dir };
+}
+
+/**
+ * Keep only string lists keyed by a column index. Values are deduplicated and
+ * sorted, so toggling the same set of values twice produces the same bytes.
+ */
+export function normalizeFilters(input: unknown): Record<string, string[]> | undefined {
+	if (!input || typeof input !== "object" || Array.isArray(input)) return undefined;
+	const out: Record<string, string[]> = {};
+	for (const [k, v] of Object.entries(input as Record<string, unknown>)) {
+		if (!/^[0-9]+$/.test(k) || !Array.isArray(v)) continue;
+		const seen = new Set<string>();
+		for (const raw of v) {
+			if (typeof raw === "string") seen.add(raw);
+			else if (typeof raw === "number" && Number.isFinite(raw)) seen.add(String(raw));
+			else if (typeof raw === "boolean") seen.add(String(raw));
+			if (seen.size >= MAX_FILTER_VALUES) break;
+		}
+		// An empty allow-list would hide every row, which is never what a user
+		// means; it is stored as "no filter on this column" instead.
+		if (seen.size === 0) continue;
+		out[k] = [...seen].sort();
+	}
+	return Object.keys(out).length > 0 ? out : undefined;
+}
+
+export function normalizeView(input: unknown): PageView {
+	if (!input || typeof input !== "object" || Array.isArray(input)) return {};
+	const src = input as Record<string, unknown>;
+	const out: PageView = {};
+	const sort = normalizeSort(src["sort"]);
+	if (sort) out.sort = sort;
+	const filters = normalizeFilters(src["filters"]);
+	if (filters) out.filters = filters;
+	return out;
+}
+
+export function isEmptyView(view: PageView | undefined): boolean {
+	return !view || (!view.sort && !view.filters);
+}
+
+export function normalizeFreeze(input: unknown): PageFreeze {
+	if (!input || typeof input !== "object" || Array.isArray(input)) return {};
+	const src = input as Record<string, unknown>;
+	const out: PageFreeze = {};
+	for (const key of ["rows", "cols"] as const) {
+		const raw = src[key];
+		const n = typeof raw === "string" ? Number.parseInt(raw, 10) : raw;
+		if (typeof n !== "number" || !Number.isFinite(n)) continue;
+		const v = Math.round(n);
+		if (v > 0) out[key] = Math.min(v, MAX_FREEZE);
+	}
+	return out;
+}
+
+export function isEmptyFreeze(freeze: PageFreeze | undefined): boolean {
+	return !freeze || (!freeze.rows && !freeze.cols);
+}
+
 export interface SheetPage {
 	name: string;
 	rows: number;
@@ -212,6 +323,10 @@ export interface SheetPage {
 	rowHeights: Record<string, number>;
 	/** "A1" -> [colspan, rowspan] */
 	merges: Record<string, [number, number]>;
+	/** Sort and filters, i.e. how the page is being looked at. Since v3. */
+	view: PageView;
+	/** Frozen rows and columns. Since v3. */
+	freeze: PageFreeze;
 	/** "A1" -> cell */
 	cells: Record<string, SheetCell>;
 }
@@ -284,6 +399,8 @@ export function newSheetPage(name = "Sheet1"): SheetPage {
 		colWidths: {},
 		rowHeights: {},
 		merges: {},
+		view: {},
+		freeze: {},
 		cells: {},
 	};
 }
@@ -395,6 +512,19 @@ function parsePage(raw: unknown, index: number): SheetPage {
 	page.colWidths = parseIndexMap(src["colWidths"], page.cols);
 	page.rowHeights = parseIndexMap(src["rowHeights"], page.rows);
 	page.merges = parseMerges(src["merges"]);
+	page.view = normalizeView(src["view"]);
+	page.freeze = normalizeFreeze(src["freeze"]);
+	// A sort or a filter naming a column outside the grid is meaningless; drop it
+	// rather than carry a reference to a column that does not exist.
+	if (page.view.sort && page.view.sort.col >= page.cols) delete page.view.sort;
+	if (page.view.filters) {
+		for (const k of Object.keys(page.view.filters)) {
+			if (parseInt(k, 10) >= page.cols) delete page.view.filters[k];
+		}
+		if (Object.keys(page.view.filters).length === 0) delete page.view.filters;
+	}
+	if (page.freeze.rows !== undefined && page.freeze.rows >= page.rows) delete page.freeze.rows;
+	if (page.freeze.cols !== undefined && page.freeze.cols >= page.cols) delete page.freeze.cols;
 	return page;
 }
 
@@ -516,6 +646,43 @@ function serializeMerges(merges: Record<string, [number, number]>, indent: strin
 	return `{\n${lines.join(",\n")}\n${indent}}`;
 }
 
+/**
+ * The `view` block: `sort` first, then `filters`, both optional.
+ *
+ * Written as `{}` when there is nothing to say, exactly like `merges`, so the
+ * key order of a page is the same in every file and a diff of two versions of
+ * the same sheet never has to move lines around. Filter values get one line
+ * each: toggling a single value then changes a single line.
+ */
+function serializeView(view: PageView | undefined, indent: string): string {
+	const v = normalizeView(view);
+	if (isEmptyView(v)) return "{}";
+	const lines: string[] = [];
+	if (v.sort) {
+		lines.push(`${indent}  "sort": { "col": ${jnum(v.sort.col)}, "dir": ${jstr(v.sort.dir)} }`);
+	}
+	if (v.filters) {
+		const cols = Object.keys(v.filters).sort((a, b) => parseInt(a, 10) - parseInt(b, 10));
+		const blocks = cols.map((c) => {
+			const values = (v.filters as Record<string, string[]>)[c] as string[];
+			const items = values.map((s) => `${indent}      ${jstr(s)}`).join(",\n");
+			return `${indent}    ${jstr(c)}: [\n${items}\n${indent}    ]`;
+		});
+		lines.push(`${indent}  "filters": {\n${blocks.join(",\n")}\n${indent}  }`);
+	}
+	return `{\n${lines.join(",\n")}\n${indent}}`;
+}
+
+/** The `freeze` block, one line: `rows` then `cols`, zeroes omitted. */
+function serializeFreeze(freeze: PageFreeze | undefined): string {
+	const f = normalizeFreeze(freeze);
+	if (isEmptyFreeze(f)) return "{}";
+	const parts: string[] = [];
+	if (f.rows) parts.push(`"rows": ${jnum(f.rows)}`);
+	if (f.cols) parts.push(`"cols": ${jnum(f.cols)}`);
+	return `{ ${parts.join(", ")} }`;
+}
+
 function serializePage(page: SheetPage, indent: string): string {
 	const i2 = indent + "  ";
 	const cellKeys = Object.keys(page.cells).filter(isRef).sort(refOrder);
@@ -540,6 +707,8 @@ function serializePage(page: SheetPage, indent: string): string {
 		`${i2}"colWidths": ${serializeIndexMap(page.colWidths ?? {}, i2)},`,
 		`${i2}"rowHeights": ${serializeIndexMap(page.rowHeights ?? {}, i2)},`,
 		`${i2}"merges": ${serializeMerges(page.merges ?? {}, i2)},`,
+		`${i2}"view": ${serializeView(page.view, i2)},`,
+		`${i2}"freeze": ${serializeFreeze(page.freeze)},`,
 		`${i2}"cells": ${cells}`,
 		`${indent}}`,
 	].join("\n");

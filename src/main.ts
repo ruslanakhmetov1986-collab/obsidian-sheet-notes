@@ -100,6 +100,53 @@ export default class LeovaleSheetsPlugin extends Plugin {
 			},
 		});
 
+		// Markdown interop. Both are plain commands rather than editor commands:
+		// they act on the spreadsheet view, and Obsidian's editor commands are
+		// only offered while a Markdown editor has the focus.
+		this.addCommand({
+			id: "copy-markdown-table",
+			name: "Copy selection as Markdown table",
+			checkCallback: (checking: boolean) => {
+				const view = this.app.workspace.getActiveViewOfType(SheetView);
+				if (!view) return false;
+				if (!checking) void view.copySelectionAsMarkdown();
+				return true;
+			},
+		});
+
+		this.addCommand({
+			id: "paste-markdown-table",
+			name: "Paste Markdown table",
+			checkCallback: (checking: boolean) => {
+				const view = this.app.workspace.getActiveViewOfType(SheetView);
+				if (!view) return false;
+				if (!checking) void view.pasteMarkdownTable();
+				return true;
+			},
+		});
+
+		this.addCommand({
+			id: "find-in-sheet",
+			name: "Find in spreadsheet",
+			checkCallback: (checking: boolean) => {
+				const view = this.app.workspace.getActiveViewOfType(SheetView);
+				if (!view) return false;
+				if (!checking) view.toggleFind();
+				return true;
+			},
+		});
+
+		this.addCommand({
+			id: "column-width",
+			name: "Set column width",
+			checkCallback: (checking: boolean) => {
+				const view = this.app.workspace.getActiveViewOfType(SheetView);
+				if (!view) return false;
+				if (!checking) view.openColumnWidthDialog();
+				return true;
+			},
+		});
+
 		this.addRibbonIcon("table", "New spreadsheet", () =>
 			void createSheet(this.app, undefined, this.newSheetExt()),
 		);

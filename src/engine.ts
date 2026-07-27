@@ -21,16 +21,31 @@ import {
 	FORMAT_ID,
 	type CellStyle,
 	type CellValue,
+	type PageFreeze,
+	type PageView,
 	type SheetCell,
 	type SheetDoc,
 	type SheetPage,
 	cellRef,
+	isEmptyFreeze,
 	isEmptyStyle,
 	newSheetPage,
+	normalizeFreeze,
 	normalizeNf,
 	normalizeStyle,
+	normalizeView,
 	parseRef,
 } from "./format";
+import {
+	type Cursor,
+	type ValueReader,
+	dataEdge,
+	distinctValues,
+	findMatches,
+	hiddenRows,
+	rowEnd,
+	usedEnd,
+} from "./sheetops";
 
 export { cssToStyle, styleToCss };
 
@@ -51,6 +66,21 @@ export const NF_ATTR = "data-nf";
 const NF_SRC_ATTR = "data-nf-src";
 /** What we last wrote, so a value change can be told apart from our own output. */
 const NF_OUT_ATTR = "data-nf-out";
+
+/** Classes the in-sheet search puts on the cells it found. */
+export const FOUND_CLASS = "leovale-sheet-found";
+export const FOUND_CURRENT_CLASS = "leovale-sheet-found-current";
+/** Marks the column a filter is currently narrowing, in the header. */
+export const FILTERED_CLASS = "leovale-sheet-filtered";
+/** Marks the column the page is sorted by, in the header. */
+export const SORTED_CLASS = "leovale-sheet-sorted";
+
+/** Sane bounds for a column width, in px, whatever the user or autofit asks. */
+export const MIN_COL_WIDTH = 24;
+export const MAX_COL_WIDTH = 1200;
+
+/** Distinct root class per live grid, so the freeze rules of one cannot hit another. */
+let instanceCounter = 0;
 
 /* ------------------------------------------------------------- mapping */
 
@@ -209,13 +239,31 @@ export class SheetEngine {
 	private lastSelection: [number, number, number, number] | null = null;
 	/** Suppresses autosave while we replay the stored layout at load time. */
 	private suspend = false;
+	/** Sort + filters per page, as loaded and as the user changes them. */
+	private views: PageView[];
+	/** Frozen rows/columns per page. */
+	private freezes: PageFreeze[];
+	/** Per-instance class, so the generated freeze rules stay inside this grid. */
+	private uid: string;
+	/** Where those generated rules live; see {@link syncFreeze}. */
+	private freezeStyle: HTMLStyleElement | null = null;
+	private freezeCss = "";
+	/** Deferred re-measure of the frozen offsets; see {@link scheduleFreezeSync}. */
+	private freezeTimer: number | null = null;
+	/** Kept so keyboard-driven selection changes can refresh the chrome too. */
+	private selectionListener?: () => void;
 
 	constructor(parent: HTMLElement, doc: SheetDoc, opts: EngineOptions) {
 		this.readOnly = !!opts.readOnly;
 		this.pageNames = doc.sheets.map((s) => s.name);
 		this.version = doc.version;
+		this.views = doc.sheets.map((s) => normalizeView(s.view));
+		this.freezes = doc.sheets.map((s) => normalizeFreeze(s.freeze));
+		this.uid = `leovale-sheet-g${++instanceCounter}`;
 
+		this.selectionListener = opts.onSelection;
 		this.root = parent.createDiv({ cls: ROOT_CLASS });
+		this.root.addClass(this.uid);
 		this.host = this.root.createDiv({ cls: "leovale-sheet-host" });
 
 		// Decor (masked text, wrap class) is re-applied on EVERY engine event,
@@ -263,6 +311,17 @@ export class SheetEngine {
 
 		this.applyStoredRowHeights(doc);
 		this.applyStoredMasks(doc);
+		// The stored view is replayed like the row heights are, with autosave
+		// suppressed: merely opening a filtered, frozen sheet must not modify it.
+		this.suspend = true;
+		try {
+			this.applyFilters();
+			this.syncFreeze(true);
+			this.syncHeaderMarks();
+		} finally {
+			this.suspend = false;
+		}
+		this.scheduleFreezeSync();
 		this.syncDecor();
 		this.observeResize();
 	}
@@ -333,6 +392,7 @@ export class SheetEngine {
 		} catch {
 			/* engine already torn down */
 		}
+		if (!isEmptyFreeze(this.freezes[0] ?? {})) this.syncFreeze();
 	}
 
 	private first(): WorksheetInstance | null {
@@ -425,6 +485,277 @@ export class SheetEngine {
 		} catch (e) {
 			console.error("leovale-sheets: decor sync failed", e);
 		}
+		// Frozen panes are pixel offsets, so they go stale on any geometry change
+		// (a resized column, a row that grew because its text now wraps). Rebuilt
+		// here, but only written when the rule text actually differs.
+		if (!isEmptyFreeze(this.freezes[0] ?? {})) this.syncFreeze();
+	}
+
+	/* ------------------------------------------------- reading the live grid */
+
+	private worksheet(sheet = 0): WorksheetInstance | null {
+		return this.worksheets?.[sheet] ?? null;
+	}
+
+	private rawData(sheet = 0): unknown[][] {
+		const ws = this.worksheet(sheet);
+		return ((ws as unknown as { options?: { data?: unknown[][] } })?.options?.data ??
+			[]) as unknown[][];
+	}
+
+	/** The text a cell shows, with our own number mask peeled back off. */
+	private cellSourceText(el: HTMLElement | null | undefined): string {
+		if (!el) return "";
+		const shown = el.textContent ?? "";
+		const last = el.getAttribute(NF_OUT_ATTR);
+		const kept = el.getAttribute(NF_SRC_ATTR);
+		return last !== null && shown === last && kept !== null ? kept : shown;
+	}
+
+	/**
+	 * How sorting, filtering and searching see a cell.
+	 *
+	 * A literal is read from the data array, but a FORMULA is read from the
+	 * element, because the data array holds `=SUM(B2:B3)` and nobody wants to
+	 * sort by the letter S. The number mask is peeled off first, so a filter
+	 * stores `3` and keeps working when the column's currency format changes.
+	 */
+	reader(sheet = 0): ValueReader {
+		const data = this.rawData(sheet);
+		const records =
+			(this.worksheet(sheet) as unknown as { records?: { element?: HTMLElement }[][] })?.records ??
+			[];
+		return (row, col) => {
+			const raw = data[row]?.[col];
+			if (typeof raw === "string" && raw.startsWith("=")) {
+				const text = this.cellSourceText(records[row]?.[col]?.element);
+				return text === "" ? undefined : text;
+			}
+			if (raw === "" || raw === null || raw === undefined) return undefined;
+			if (typeof raw === "string" || typeof raw === "number" || typeof raw === "boolean") {
+				return raw;
+			}
+			return String(raw);
+		};
+	}
+
+	/** Is there anything in this cell? The keyboard's idea of a data block. */
+	private filled(sheet = 0): (row: number, col: number) => boolean {
+		const read = this.reader(sheet);
+		return (row, col) => read(row, col) !== undefined;
+	}
+
+	/**
+	 * A page-shaped object for the pure helpers in sheetops: dimensions and the
+	 * view, but no cells (everything they need comes through the reader).
+	 */
+	private shape(sheet = 0): SheetPage {
+		const page = newSheetPage(this.pageNames[sheet] ?? "Sheet1");
+		const { rows, cols } = this.dimensions();
+		page.rows = Math.max(1, rows);
+		page.cols = Math.max(1, cols);
+		page.view = this.views[sheet] ?? {};
+		page.freeze = this.freezes[sheet] ?? {};
+		return page;
+	}
+
+	/* ---------------------------------------------------------- view state */
+
+	getView(sheet = 0): PageView {
+		return this.views[sheet] ?? {};
+	}
+
+	getFreeze(sheet = 0): PageFreeze {
+		return this.freezes[sheet] ?? {};
+	}
+
+	/** Rows a sort or a filter must leave alone: the frozen ones are headers. */
+	headerRows(sheet = 0): number {
+		return this.freezes[sheet]?.rows ?? 0;
+	}
+
+	/** Distinct values of a column, i.e. the menu of its filter. */
+	columnValues(col: number, sheet = 0): string[] {
+		return distinctValues(this.shape(sheet), col, this.headerRows(sheet), this.reader(sheet));
+	}
+
+	/** Allowed values of one column; `null` removes the filter from it. */
+	setFilter(col: number, values: string[] | null, sheet = 0): void {
+		const view = { ...(this.views[sheet] ?? {}) };
+		const filters = { ...(view.filters ?? {}) };
+		if (values && values.length > 0) filters[String(col)] = [...values].sort();
+		else delete filters[String(col)];
+		if (Object.keys(filters).length > 0) view.filters = filters;
+		else delete view.filters;
+		this.views[sheet] = normalizeView(view);
+		this.applyFilters(sheet);
+		this.syncHeaderMarks(sheet);
+		this.notify();
+	}
+
+	clearFilters(sheet = 0): void {
+		const view = { ...(this.views[sheet] ?? {}) };
+		delete view.filters;
+		this.views[sheet] = view;
+		this.applyFilters(sheet);
+		this.syncHeaderMarks(sheet);
+		this.notify();
+	}
+
+	/** Rows the filters currently hide, so the caller can report "3 of 40". */
+	private hiddenByFilter: number[][] = [];
+
+	private applyFilters(sheet = 0): void {
+		const ws = this.worksheet(sheet);
+		if (!ws) return;
+		const previous = this.hiddenByFilter[sheet] ?? [];
+		const next = hiddenRows(this.shape(sheet), this.headerRows(sheet), this.reader(sheet));
+		const nextSet = new Set(next);
+		const reveal = previous.filter((r) => !nextSet.has(r));
+		try {
+			if (reveal.length > 0) ws.showRow(reveal);
+			if (next.length > 0) ws.hideRow(next);
+		} catch (e) {
+			console.error("leovale-sheets: applying filters failed", e);
+		}
+		this.hiddenByFilter[sheet] = next;
+	}
+
+	/** How many rows the filters are hiding right now. */
+	filteredOutCount(sheet = 0): number {
+		return (this.hiddenByFilter[sheet] ?? []).length;
+	}
+
+	/* -------------------------------------------------------------- freeze */
+
+	setFreeze(freeze: PageFreeze, sheet = 0): void {
+		this.freezes[sheet] = normalizeFreeze(freeze);
+		this.syncFreeze(true, sheet);
+		this.scheduleFreezeSync();
+		this.notify();
+	}
+
+	/**
+	 * Frozen panes, done with generated `position: sticky` rules.
+	 *
+	 * NOT with the engine's `freezeColumns`: that one drives off its INTERNAL
+	 * scroller (`tableOverflow: true`), and here the whole grid scrolls inside
+	 * our own wrapper - which is also why the row-number gutter is sticky in the
+	 * theme layer rather than frozen by the engine. Sticky needs pixel offsets,
+	 * so the rules are regenerated from the live geometry whenever the grid
+	 * changes, and only written when the text actually differs.
+	 */
+	private syncFreeze(force = false, sheet = 0): void {
+		const freeze = this.freezes[sheet] ?? {};
+		const css = isEmptyFreeze(freeze) ? "" : this.buildFreezeCss(freeze);
+		if (css === this.freezeCss && !force) return;
+		this.freezeCss = css;
+		this.root.toggleClass("has-freeze", css !== "");
+		if (css === "") {
+			this.freezeStyle?.remove();
+			this.freezeStyle = null;
+			return;
+		}
+		if (!this.freezeStyle) {
+			this.freezeStyle = this.root.createEl("style");
+		}
+		this.freezeStyle.textContent = css;
+	}
+
+	/**
+	 * Re-measure the frozen offsets once the layout has settled.
+	 *
+	 * The first pass runs while the grid is still being built, and the numbers it
+	 * reads are not the final ones - measured in the sandbox: a `top: 285px` for
+	 * a header row that is 26px tall, which parked the "frozen" row below the
+	 * fold and made it look like sticky was not working at all. Everything else
+	 * about the grid recovers on the next event; a freeze has no events of its
+	 * own, so it is re-measured explicitly.
+	 */
+	private scheduleFreezeSync(): void {
+		if (isEmptyFreeze(this.freezes[0] ?? {})) return;
+		if (typeof requestAnimationFrame === "function") {
+			requestAnimationFrame(() => {
+				if (this.worksheets) this.syncFreeze(true);
+			});
+		}
+		if (this.freezeTimer !== null) window.clearTimeout(this.freezeTimer);
+		this.freezeTimer = window.setTimeout(() => {
+			this.freezeTimer = null;
+			if (this.worksheets) this.syncFreeze(true);
+		}, 200);
+	}
+
+	private buildFreezeCss(freeze: PageFreeze): string {
+		const scope = `.${this.uid} .jss_worksheet`;
+		const px = (n: number) => `${Math.round(n)}px`;
+		const rules: string[] = [];
+
+		const gutter = this.host.querySelector<HTMLElement>("tbody > tr > td:first-child");
+		const gutterWidth = gutter?.getBoundingClientRect().width ?? 0;
+		const cols = Math.min(freeze.cols ?? 0, this.dimensions().cols);
+		let left = gutterWidth;
+		for (let c = 0; c < cols; c++) {
+			const cell = this.host.querySelector<HTMLElement>(`thead > tr > td[data-x="${c}"]`);
+			// A frozen data cell has to be opaque, and a styled-but-unfilled cell
+			// carries `background-color: var(--leovale-sheet-cell-bg)` inline, so
+			// redefining that variable here is what makes it so (see cellcss.ts).
+			rules.push(
+				`${scope} > tbody > tr > td[data-x="${c}"] { position: sticky; left: ${px(left)}; z-index: 2; ` +
+					`--leovale-sheet-cell-bg: var(--background-primary); background-color: var(--leovale-sheet-cell-bg); }`,
+			);
+			rules.push(
+				`${scope} > thead > tr > td[data-x="${c}"] { position: sticky; left: ${px(left)}; z-index: 4; }`,
+			);
+			// The seam: the last frozen column carries the edge of the pane, so the
+			// frozen part reads as a pane and not as columns that refuse to scroll.
+			if (c === cols - 1) {
+				rules.push(
+					`${scope} > tbody > tr > td[data-x="${c}"], ${scope} > thead > tr > td[data-x="${c}"] ` +
+						`{ box-shadow: 1px 0 0 var(--background-modifier-border); }`,
+				);
+			}
+			left += cell?.getBoundingClientRect().width ?? DEFAULT_COL_WIDTH;
+		}
+
+		const head = this.host.querySelector<HTMLElement>("thead > tr");
+		let top = head?.getBoundingClientRect().height ?? 0;
+		const rows = Math.min(freeze.rows ?? 0, this.dimensions().rows);
+		for (let r = 0; r < rows; r++) {
+			const tr = this.host.querySelector<HTMLElement>(`tbody > tr[data-y="${r}"]`);
+			rules.push(
+				`${scope} > tbody > tr[data-y="${r}"] > td { position: sticky; top: ${px(top)}; z-index: 2; ` +
+					`--leovale-sheet-cell-bg: var(--background-primary); background-color: var(--leovale-sheet-cell-bg); }`,
+			);
+			// the gutter cell of a frozen row is sticky on both axes
+			rules.push(`${scope} > tbody > tr[data-y="${r}"] > td:first-child { z-index: 4; }`);
+			if (r === rows - 1) {
+				rules.push(
+					`${scope} > tbody > tr[data-y="${r}"] > td { box-shadow: 0 1px 0 var(--background-modifier-border); }`,
+				);
+			}
+			for (let c = 0; c < cols; c++) {
+				rules.push(
+					`${scope} > tbody > tr[data-y="${r}"] > td[data-x="${c}"] { z-index: 3; }`,
+				);
+			}
+			top += tr?.getBoundingClientRect().height ?? 0;
+		}
+		return rules.join("\n");
+	}
+
+	/** Sort and filter markers on the column headers. */
+	private syncHeaderMarks(sheet = 0): void {
+		const view = this.views[sheet] ?? {};
+		const heads = this.host.querySelectorAll<HTMLElement>("thead > tr > td[data-x]");
+		heads.forEach((el) => {
+			const col = Number(el.getAttribute("data-x"));
+			const sorted = view.sort?.col === col;
+			el.toggleClass(SORTED_CLASS, sorted);
+			if (sorted) el.setAttribute("data-sort-dir", view.sort?.dir ?? "asc");
+			else el.removeAttribute("data-sort-dir");
+			el.toggleClass(FILTERED_CLASS, !!view.filters?.[String(col)]);
+		});
 	}
 
 	/* --------------------------------------------------------- selection */
@@ -463,6 +794,329 @@ export class SheetEngine {
 			for (let x = x1; x <= x2; x++) refs.push(cellRef(y, x));
 		}
 		return refs;
+	}
+
+	/** The selection as a rectangle of indexes, or null when there is none. */
+	selectionRect(): { r1: number; c1: number; r2: number; c2: number } | null {
+		const refs = this.getSelectionRefs();
+		if (refs.length === 0) return null;
+		let r1 = Infinity;
+		let c1 = Infinity;
+		let r2 = -Infinity;
+		let c2 = -Infinity;
+		for (const ref of refs) {
+			const { row, col } = parseRef(ref);
+			r1 = Math.min(r1, row);
+			c1 = Math.min(c1, col);
+			r2 = Math.max(r2, row);
+			c2 = Math.max(c2, col);
+		}
+		return { r1, c1, r2, c2 };
+	}
+
+	/** Anchor cell of the selection: what the formula bar and the toolbar act on. */
+	activeCell(): Cursor | null {
+		const rect = this.selectionRect();
+		return rect ? { row: rect.r1, col: rect.c1 } : null;
+	}
+
+	/**
+	 * Move (or extend) the selection to one cell and scroll it into view.
+	 *
+	 * `updateSelectionFromCoords` paints the selection but does not move the
+	 * engine's own `selectedCell`, which is what its arrow keys read - so both
+	 * are set here, or the next ArrowDown would jump back to where the mouse
+	 * last was.
+	 */
+	selectCell(row: number, col: number, extend = false): void {
+		const ws = this.first();
+		if (!ws) return;
+		const anchor = extend ? this.lastSelection : null;
+		const x1 = anchor ? (anchor[0] as number) : col;
+		const y1 = anchor ? (anchor[1] as number) : row;
+		try {
+			ws.updateSelectionFromCoords(x1, y1, col, row);
+			(ws as unknown as { selectedCell?: number[] }).selectedCell = [x1, y1, col, row];
+		} catch (e) {
+			console.error("leovale-sheets: selecting a cell failed", e);
+			return;
+		}
+		this.lastSelection = [x1, y1, col, row];
+		this.cellElement(cellRef(row, col))?.scrollIntoView({ block: "nearest", inline: "nearest" });
+		this.notifySelection();
+	}
+
+	private notifySelection(): void {
+		try {
+			this.selectionListener?.();
+		} catch (e) {
+			console.error("leovale-sheets: selection listener failed", e);
+		}
+	}
+
+	/* -------------------------------------------------------- keyboard ops */
+
+	/** F2 / double click: open the in-cell editor on the anchor cell. */
+	openEditorAt(row: number, col: number): void {
+		const ws = this.first();
+		if (!ws || this.readOnly) return;
+		const el = this.cellElement(cellRef(row, col)) as HTMLTableCellElement | null;
+		if (!el) return;
+		try {
+			(
+				ws as unknown as { openEditor?: (cell: HTMLTableCellElement, empty?: boolean) => void }
+			).openEditor?.(el, false);
+		} catch (e) {
+			console.error("leovale-sheets: opening the editor failed", e);
+		}
+	}
+
+	/** True while the engine has an in-cell editor open. */
+	isEditing(): boolean {
+		return !!(this.first() as unknown as { edition?: unknown } | null)?.edition;
+	}
+
+	/** Delete: empty every cell of the selection, styles and masks untouched. */
+	clearSelection(): void {
+		const ws = this.first();
+		if (!ws || this.readOnly) return;
+		const refs = this.getSelectionRefs();
+		if (refs.length === 0) return;
+		try {
+			ws.setValue(refs, "");
+		} catch (e) {
+			console.error("leovale-sheets: clearing the selection failed", e);
+			return;
+		}
+		this.notify();
+	}
+
+	/**
+	 * Ctrl+D. With a range selected the top row is copied down over the rest;
+	 * with a single cell selected the cell ABOVE is copied into it, which is
+	 * what the shortcut means in every spreadsheet.
+	 *
+	 * The style and the number mask travel with the value: filling down a
+	 * formatted row that only looks the part would be a bug report waiting to
+	 * happen.
+	 */
+	fillDown(): void {
+		const ws = this.first();
+		if (!ws || this.readOnly) return;
+		const rect = this.selectionRect();
+		if (!rect) return;
+		let src = rect.r1;
+		let from = rect.r1 + 1;
+		let to = rect.r2;
+		if (rect.r1 === rect.r2) {
+			if (rect.r1 === 0) return;
+			src = rect.r1 - 1;
+			from = rect.r1;
+			to = rect.r1;
+		}
+		if (from > to) return;
+
+		const data = this.rawData();
+		const styleByCol = new Map<number, CellStyle>();
+		try {
+			for (let c = rect.c1; c <= rect.c2; c++) {
+				const value = data[src]?.[c];
+				styleByCol.set(c, this.getStyleAt(cellRef(src, c)));
+				for (let r = from; r <= to; r++) {
+					ws.setValueFromCoords(c, r, (value ?? "") as JssCellValue);
+				}
+			}
+		} catch (e) {
+			console.error("leovale-sheets: fill down failed", e);
+			return;
+		}
+		const refs: string[] = [];
+		for (let r = from; r <= to; r++) {
+			for (let c = rect.c1; c <= rect.c2; c++) refs.push(cellRef(r, c));
+		}
+		this.applyStyle(refs, (_cur, ref) => styleByCol.get(parseRef(ref).col) ?? {});
+	}
+
+	/** Ctrl+Arrow, Home/End and their Ctrl variants, as computed in sheetops. */
+	moveToDataEdge(dRow: number, dCol: number, extend = false): void {
+		const cur = this.activeCell();
+		if (!cur) return;
+		const target = dataEdge(cur, dRow, dCol, this.filled(), this.dimensions());
+		this.selectCell(target.row, target.col, extend);
+	}
+
+	moveToRowStart(extend = false): void {
+		const cur = this.activeCell();
+		if (!cur) return;
+		this.selectCell(cur.row, 0, extend);
+	}
+
+	moveToRowEnd(extend = false): void {
+		const cur = this.activeCell();
+		if (!cur) return;
+		this.selectCell(cur.row, rowEnd(cur.row, this.filled(), this.dimensions()), extend);
+	}
+
+	moveToGridStart(extend = false): void {
+		this.selectCell(0, 0, extend);
+	}
+
+	moveToGridEnd(extend = false): void {
+		const end = usedEnd(this.filled(), this.dimensions());
+		this.selectCell(end.row, end.col, extend);
+	}
+
+	/* ---------------------------------------------------------- column width */
+
+	columnWidth(col: number): number {
+		const ws = this.first();
+		if (!ws) return DEFAULT_COL_WIDTH;
+		try {
+			const w = ws.getWidth(col);
+			const n = typeof w === "string" ? parseInt(w, 10) : (w as number);
+			if (Number.isFinite(n) && n > 0) return Math.round(n);
+		} catch {
+			/* fall through to the element */
+		}
+		const el = this.host.querySelector<HTMLElement>(`thead > tr > td[data-x="${col}"]`);
+		return Math.round(el?.getBoundingClientRect().width ?? DEFAULT_COL_WIDTH);
+	}
+
+	setColumnWidth(cols: number[], width: number): void {
+		const ws = this.first();
+		if (!ws || this.readOnly || cols.length === 0) return;
+		const px = Math.max(MIN_COL_WIDTH, Math.min(MAX_COL_WIDTH, Math.round(width)));
+		try {
+			for (const col of cols) ws.setWidth(col, px);
+		} catch (e) {
+			console.error("leovale-sheets: setting the column width failed", e);
+			return;
+		}
+		this.notify();
+	}
+
+	/**
+	 * Autofit: the width of the widest thing in the column, measured rather than
+	 * guessed. `measureText` on a canvas is used instead of the elements' own
+	 * widths because a cell is exactly as wide as its column - its content, which
+	 * is what we are asking about, is invisible to the layout.
+	 */
+	autofitColumn(col: number): number {
+		const { rows } = this.dimensions();
+		const canvas = document.createElement("canvas");
+		const ctx = canvas.getContext("2d");
+		let max = 0;
+		const header = this.host.querySelector<HTMLElement>(`thead > tr > td[data-x="${col}"]`);
+		if (ctx && header) {
+			const hcs = getComputedStyle(header);
+			ctx.font = `${hcs.fontWeight} ${hcs.fontSize} ${hcs.fontFamily}`;
+			max = ctx.measureText(header.textContent ?? "").width;
+		}
+		for (let r = 0; r < rows && ctx; r++) {
+			const el = this.cellElement(cellRef(r, col));
+			const text = el?.textContent ?? "";
+			if (!el || text === "") continue;
+			const cs = getComputedStyle(el);
+			ctx.font = `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
+			max = Math.max(max, ctx.measureText(text).width);
+		}
+		// cell padding (4+6 px each side in the theme layer) plus the borders
+		const width = Math.max(MIN_COL_WIDTH, Math.min(MAX_COL_WIDTH, Math.ceil(max) + 16));
+		this.setColumnWidth([col], width);
+		return width;
+	}
+
+	/* --------------------------------------------------------------- search */
+
+	private foundRefs: string[] = [];
+
+	/** Highlight every cell containing `query` and return them in reading order. */
+	search(query: string): string[] {
+		this.clearSearchHighlight();
+		const refs = findMatches(this.shape(), query, this.reader());
+		this.foundRefs = refs;
+		for (const ref of refs) this.cellElement(ref)?.classList.add(FOUND_CLASS);
+		return refs;
+	}
+
+	/** Make one of the matches the current one and put the cursor on it. */
+	focusMatch(ref: string): void {
+		for (const other of this.foundRefs) {
+			this.cellElement(other)?.classList.remove(FOUND_CURRENT_CLASS);
+		}
+		const el = this.cellElement(ref);
+		if (!el) return;
+		el.classList.add(FOUND_CURRENT_CLASS);
+		const { row, col } = parseRef(ref);
+		this.selectCell(row, col);
+	}
+
+	clearSearchHighlight(): void {
+		for (const ref of this.foundRefs) {
+			const el = this.cellElement(ref);
+			el?.classList.remove(FOUND_CLASS);
+			el?.classList.remove(FOUND_CURRENT_CLASS);
+		}
+		this.foundRefs = [];
+	}
+
+	/** The text a cell shows right now: what "copy as Markdown" copies. */
+	displayText(ref: string): string {
+		return this.cellElement(ref)?.textContent ?? "";
+	}
+
+	/* ------------------------------------------------------- writing a block */
+
+	/**
+	 * Write a rectangle of text into the grid at (row, col), clipped to the
+	 * grid's own size - a pasted table wider than the sheet loses its tail rather
+	 * than silently growing a file to 400 columns. Returns what was written.
+	 */
+	writeRange(row: number, col: number, values: string[][]): { rows: number; cols: number } {
+		const ws = this.first();
+		if (!ws || this.readOnly) return { rows: 0, cols: 0 };
+		const size = this.dimensions();
+		const rows = Math.max(0, Math.min(values.length, size.rows - row));
+		let cols = 0;
+		try {
+			for (let r = 0; r < rows; r++) {
+				const line = values[r] ?? [];
+				const width = Math.max(0, Math.min(line.length, size.cols - col));
+				cols = Math.max(cols, width);
+				for (let c = 0; c < width; c++) {
+					ws.setValueFromCoords(col + c, row + r, (line[c] ?? "") as JssCellValue);
+				}
+			}
+		} catch (e) {
+			console.error("leovale-sheets: writing a range failed", e);
+		}
+		this.notify();
+		return { rows, cols };
+	}
+
+	/** Apply one horizontal alignment per column over a written block. */
+	applyColumnAligns(
+		anchor: { row: number; col: number },
+		size: { rows: number; cols: number },
+		aligns: (CellStyle["ha"] | undefined)[],
+	): void {
+		if (size.rows === 0 || size.cols === 0) return;
+		const byCol = new Map<number, CellStyle["ha"] | undefined>();
+		const refs: string[] = [];
+		for (let c = 0; c < size.cols; c++) {
+			byCol.set(anchor.col + c, aligns[c]);
+			for (let r = 0; r < size.rows; r++) refs.push(cellRef(anchor.row + r, anchor.col + c));
+		}
+		// A table whose separator row says nothing about any column (`---`
+		// everywhere) must not clear the alignments the sheet already had.
+		if (![...byCol.values()].some(Boolean)) return;
+		this.applyStyle(refs, (cur, ref) => {
+			const next: CellStyle = { ...cur };
+			const ha = byCol.get(parseRef(ref).col);
+			if (ha) next.ha = ha;
+			else delete next.ha;
+			return next;
+		});
 	}
 
 	/* -------------------------------------------------------- raw cell value */
@@ -723,6 +1377,13 @@ export class SheetEngine {
 				}
 			}
 
+			// Sort, filters and frozen panes are OURS: the engine has no idea any of
+			// them exist, so they come from the state this wrapper keeps per page
+			// (which is also why they survive a round trip through a page the UI
+			// never touched).
+			page.view = normalizeView(this.views[index] ?? {});
+			page.freeze = normalizeFreeze(this.freezes[index] ?? {});
+
 			const merges = opts["mergeCells"];
 			if (merges && typeof merges === "object") {
 				for (const [k, span] of Object.entries(merges as Record<string, unknown>)) {
@@ -771,6 +1432,10 @@ export class SheetEngine {
 
 	destroy(): void {
 		this.discardOpenEditor();
+		if (this.freezeTimer !== null) {
+			window.clearTimeout(this.freezeTimer);
+			this.freezeTimer = null;
+		}
 		this.resizeObserver?.disconnect();
 		this.resizeObserver = null;
 		try {

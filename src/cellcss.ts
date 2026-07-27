@@ -62,6 +62,22 @@ export const V_ALIGN_CSS: Record<VAlign, string> = { t: "top", m: "middle", b: "
  * the wrapping itself is done by a stylesheet rule keyed on the class the
  * engine wrapper puts on wrapped cells.
  */
+/**
+ * What an UNFILLED cell's background is, as a variable rather than the literal
+ * `transparent`.
+ *
+ * Every styled cell carries an explicit `background-color`, because `setStyle`
+ * merges and a removed fill has to be actively reset. An inline declaration
+ * beats any stylesheet rule, so `transparent` there made it impossible for a
+ * frozen row or column to be opaque: the rows scrolling underneath showed
+ * through every bold-but-unfilled header cell. Referring to a custom property
+ * instead moves the decision back to the stylesheet - a rule can redefine the
+ * variable ON the frozen cell, and the inline declaration then resolves to the
+ * new value. See `--leovale-sheet-cell-bg` in styles/theme.css.
+ */
+export const CELL_BG_VAR = "--leovale-sheet-cell-bg";
+export const CELL_BG_NONE = `var(${CELL_BG_VAR})`;
+
 export const WRAP_ON = "break-word";
 export const WRAP_OFF = "normal";
 /** Class the engine adds to a wrapped cell; the theme layer does the wrapping. */
@@ -90,7 +106,7 @@ export function styleToCss(style: CellStyle | undefined): string {
 	const decls = [
 		`font-weight: ${s.b ? "bold" : "normal"}`,
 		`font-size: ${s.fs !== undefined ? `${s.fs}px` : "inherit"}`,
-		`background-color: ${s.bg ?? "transparent"}`,
+		`background-color: ${s.bg ?? CELL_BG_NONE}`,
 		`color: ${s.bg ? contrastColor(s.bg) : "inherit"}`,
 	];
 	for (const side of "tlrb") {

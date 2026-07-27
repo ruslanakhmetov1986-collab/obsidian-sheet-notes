@@ -124,7 +124,8 @@ A `.csv` opens in the same grid and is written back as plain CSV.
 - Line endings are LF, never CRLF, with a trailing newline.
 - Formatting (bold, fill, font size, borders) applies on screen but is **not
   saved**: a CSV file has nowhere to put it. Neither are column widths, row
-  heights or merges.
+  heights, merges, frozen panes or filters. Sorting is the exception: it moves
+  the values themselves, so a sorted CSV stays sorted on disk.
 - Typing a formula works and it recalculates live, but the file stores the
   formula **text** (`=SUM(A1:A2)`), because that is all a CSV cell can hold.
   Open the same file in Excel and you get a real formula; open it in pandas and
@@ -154,6 +155,21 @@ wide as the cell.
 | Resize a row | Drag the bottom edge of the row number |
 | Insert / delete rows and columns | Right-click a header |
 | Copy, paste, undo, redo | `Ctrl+C` / `Ctrl+V`, `Ctrl+Z` / `Ctrl+Y` |
+| Edit the active cell | `F2` |
+| Fill down | `Ctrl+D` (the top row of the selection over the rest, or the cell above into a single cell) |
+| Start / end of the row | `Home` / `End` (`End` stops at the last filled cell, not at column Z) |
+| A1 / the last used cell | `Ctrl+Home` / `Ctrl+End` |
+| Jump to the edge of the data | `Ctrl+←↑→↓` |
+| Clear the selection | `Delete` |
+| Find in the sheet | `Ctrl+F` |
+| Save now | `Ctrl+S` |
+| Exact column width | The `↔` toolbar button, or `Sheets: Set column width` |
+| Fit a column to its content | Double-click the right edge of its header |
+
+Hold `Shift` with any of the movement keys to extend the selection instead of
+moving it. These keys are live only while the grid itself has the focus: typing
+in the formula bar, in the find box or inside a cell editor leaves them to the
+text field, and everywhere else in Obsidian they stay Obsidian's own.
 
 Column widths and row heights are stored in the file, so they survive closing
 and reopening the note.
@@ -177,10 +193,77 @@ icon buttons with thin separators between groups.
 | Number format, `# ⌄` | Menu: Auto, `0.00`, `#,##0`, `#,##0.00`, `0%`, currency in $, € or ₽, `yyyy-mm-dd`, date and time. The live mask is shown on the button |
 | Alignment | One menu for both axes: left / center / right, then top / middle / bottom |
 | Wrap text | Toggle. Long text wraps inside the cell and the row grows to fit it |
+| Sort (`⇅`) | Sort A → Z, Z → A, or drop the sort marker. Acts on the column the selection starts in |
+| Filter (funnel) | The distinct values of that column as checkable items, plus "Show all" and "Clear all filters" |
+| Freeze (pin) | Freeze the rows above the selection, the columns before it, or both. "Unfreeze" undoes it |
+| Find (magnifier) | The find strip, same as `Ctrl+F` |
+| Column width (`↔`) | Exact width in pixels for every column in the selection, or "Fit to content" |
 
 Formatting applies to the entire selected range, not just the active cell.
 Text colour inside a filled cell is picked automatically from the fill's
 luminance, so a pale yellow background stays readable in the dark theme too.
+
+### Sorting, filters and frozen panes
+
+All three are saved in the file, so a sheet reopens the way you left it.
+
+**Sorting** moves whole rows. Fills, borders, number formats and everything else
+a row carries travel with it, because in this format a row is what carries them:
+the sort rewrites the document and rebuilds the grid rather than reordering the
+grid's own rows. The column the sheet is sorted by keeps a small arrow in its
+header.
+
+- **Frozen rows are never sorted.** They are the headings, exactly like in Google
+  Sheets. With nothing frozen, every row takes part.
+- A sheet with **merged cells cannot be sorted**, and says so instead of trying:
+  a merge spans addresses, and permuting the rows underneath one would tear it
+  apart.
+- **Formula references are not adjusted.** A formula that moves is moved as it
+  was written, so `=B2*2` in a row that lands three rows down still says `B2`.
+  You get a notice when that actually happened.
+- Sorting is not undone by "Clear sort": the new order is the file's order now,
+  and there is no previous one to go back to. The item only drops the marker.
+
+**Filters** hide rows, they never touch them. The menu lists the values the
+column actually holds; unticking one hides its rows, and the file remembers the
+values that are still allowed. Blank cells are never hidden - blank is not one
+of the values in the menu, so a filter that hid them would have no way back
+except clearing it. A filtered column keeps a dot in its header.
+
+**Frozen rows and columns** stay put while the rest of the grid scrolls. Put the
+cursor where the frozen part should end (`B3` freezes two rows and one column)
+and pick what to freeze.
+
+![A sorted, filtered sheet with a frozen row](tests/shots/15-data-light.png)
+
+![The frozen row stays while the sheet scrolls under it](tests/shots/18-freeze-scrolled-light.png)
+
+### Finding text
+
+`Ctrl+F` inside the grid (or the magnifier in the toolbar) opens a find strip
+above the sheet. Matching cells are highlighted as you type, `Enter` and
+`Shift+Enter` walk through them, the counter shows where you are, and `Escape`
+closes the strip and clears the highlights. It searches what the sheet shows,
+formula results included, and it changes nothing.
+
+![Find in sheet](tests/shots/16-find-light.png)
+
+### Markdown tables in and out
+
+Two commands move a rectangle of cells between the grid and any Markdown note:
+
+- `Sheets: Copy selection as Markdown table` puts the selection on the clipboard
+  as a GitHub-style table, alignment row included (from the cells' own
+  alignment). It copies what the sheet SHOWS, so `=SUM(B2:B3)` arrives as `7`
+  and a currency cell as `$7.00` - a Markdown table of formula sources would be
+  a table of something nobody asked for. Pipes in a value are escaped, and a
+  value with a line break in it becomes one line with `<br>`.
+- `Sheets: Paste Markdown table` reads a table from the clipboard into the grid,
+  starting at the selected cell. The alignment row is optional, ragged rows are
+  padded, outer pipes may be missing, and prose around the table is ignored. A
+  value that starts with `=` becomes a formula, exactly as if it had been typed.
+  Anything past the last row or column of the sheet is dropped rather than
+  silently growing the file.
 
 ### Number and date formats
 
@@ -247,7 +330,7 @@ Plain JSON, sparse, with a strictly fixed key order:
 ```json
 {
   "format": "leovale-sheet",
-  "version": 2,
+  "version": 3,
   "sheets": [
     {
       "name": "Sheet1",
@@ -256,6 +339,16 @@ Plain JSON, sparse, with a strictly fixed key order:
       "colWidths": { "0": 180 },
       "rowHeights": { "1": 51 },
       "merges": {},
+      "view": {
+        "sort": { "col": 0, "dir": "asc" },
+        "filters": {
+          "1": [
+            "Gadget",
+            "Widget"
+          ]
+        }
+      },
+      "freeze": { "rows": 1 },
       "cells": {
         "A1": { "v": "Item", "s": { "b": true, "fs": 18, "bg": "#fff2cc", "bd": "trbl" } },
         "B2": { "v": 3, "s": { "nf": "$#,##0.00", "ha": "r" } },
@@ -266,6 +359,17 @@ Plain JSON, sparse, with a strictly fixed key order:
   ]
 }
 ```
+
+Page keys are fixed too: `name`, `rows`, `cols`, `colWidths`, `rowHeights`,
+`merges`, `view`, `freeze`, `cells`. The last two arrived in 1.3.0:
+
+- `view` is how the page is being LOOKED at, and it never changes a cell:
+  `sort` (`col` is a 0-based column index, `dir` is `asc` or `desc`) records the
+  sort that was applied, and `filters` maps a column index to the values that
+  column is still allowed to show, one per line so that ticking one value off
+  changes one line. Both are omitted when unused, and the block is then `{}`.
+- `freeze` is `{ "rows": n, "cols": n }`, zeroes omitted, `{}` when nothing is
+  frozen.
 
 Cell keys, always in this order:
 
@@ -279,21 +383,24 @@ Cell keys, always in this order:
 
 ### Format versions
 
-`version` is 2 since release 1.2.0, which is when `nf`, `ha`, `va` and `wrap`
-were added. Two rules follow from it and both matter:
+`version` is 3 since release 1.3.0, which is when the `view` and `freeze` blocks
+were added; 2 was 1.2.0 (`nf`, `ha`, `va`, `wrap`) and 1 was 1.1.x. Two rules
+follow and both matter:
 
-- **Files written by 1.1.x (version 1) keep opening**, with everything in them.
-  Nothing is migrated or rewritten; the version line is the only thing that
-  changes when you save such a file.
-- **Every save writes version 2**, even for a document that came in as version 1.
-  This is deliberate: a 1.1.x build does not know the new style keys and its
-  normalizer DROPS unknown properties, so letting it write the file would
-  silently strip every number format and alignment in the document. Version 2 is
-  newer than that build understands, so it opens the file read-only instead -
-  which is the whole point of the version field.
+- **Older files keep opening**, with everything in them. Nothing is migrated or
+  rewritten; the version line and the two new empty blocks are the only
+  difference when such a file is saved.
+- **Every save writes version 3.** This is deliberate, and it is the same
+  argument every time: a build that cannot see a key DROPS it. A 1.2.0 build's
+  page parser copies the keys it knows onto a fresh page and never looks at the
+  rest, so opening a 1.3.0 file there and saving it would silently throw away
+  the sort, the filters and the frozen panes. Version 3 is newer than that build
+  understands, so it opens the file read-only instead - which is the whole point
+  of the version field. Same for 1.1.x builds and the style keys of version 2.
 
-The new keys are appended AFTER `bd` rather than sorted in, so a file re-saved
-by this release differs from the 1.1.x one only by the added tail of each style.
+New keys are appended rather than sorted in - the 1.2.0 style keys after `bd`,
+the 1.3.0 blocks after `merges` - so a file re-saved by this release differs
+from the older one only by the added lines.
 
 The serialisation rules exist for one reason: sync. Obsidian LiveSync resolves
 conflicts on non-Markdown files last-write-wins, without merging, so the file
@@ -345,11 +452,11 @@ Three safeguards here:
 npm install          # node_modules ~40 MB
 npm run build        # tsc --noEmit + esbuild production -> main.js, styles.css
 npm run dev          # esbuild --watch
-npm test             # 128 unit tests: format, styles, masks, CSV, embeds, i18n
+npm test             # 163 unit tests: format, styles, masks, CSV, embeds, i18n, sort/filter/markdown
 npm run e2e          # e2e in a sandboxed Obsidian, screenshots into tests/shots/
 ```
 
-Build output: `main.js` ~570 KB, `styles.css` ~107 KB.
+Build output: `main.js` ~620 KB, `styles.css` ~112 KB.
 
 Notes on the build configuration:
 
@@ -363,7 +470,7 @@ Notes on the build configuration:
 - The engine's hard-coded colours (`#fff`, `#ccc`, `#f3f3f3`) are remapped to
   Obsidian CSS variables. No `filter: invert(1)` anywhere.
 
-The e2e suite (243 assertions) launches a separate Obsidian instance with its
+The e2e suite (325 assertions) launches a separate Obsidian instance with its
 own `--user-data-dir` on CDP port 9333, so your running Obsidian is left alone.
 It installs and enables the plugin, creates a sheet, types values and formulas
 with real keyboard events, drags column and row edges, formats a selection with
@@ -376,8 +483,14 @@ plugin twice to prove the engine's global handlers are not doubled, embeds the
 sheet in a note in both markdown modes and edits the source while the embed is on
 screen, emulates the tablet (800x1340, `mobile: true`, `body.is-mobile`) to
 measure touch targets, round-trips a semicolon-delimited CSV through the real
-view, and finally pretends a foreign plugin owns `.sheet` to check the notice
-and the `.lsheet` fallback. Screenshots land in `tests/shots/`. Playwright is
+view, sorts a styled sheet from the toolbar and reads the file back to prove the
+fills landed on the lines of the values they belong to, filters a column and
+checks which rows the DOM hides, scrolls a frozen row and measures where it
+parked, drives the find strip, F2, Ctrl+D, Home/End and Ctrl+arrows as real
+keystrokes, round-trips a Markdown table through the real clipboard, resizes a
+column through the dialog and by double-clicking its header edge, and finally
+pretends a foreign plugin owns `.sheet` to check the notice and the `.lsheet`
+fallback. Screenshots land in `tests/shots/`. Playwright is
 needed for e2e only: either `npm i -D playwright` or point `SHEETS_PLAYWRIGHT`
 at an existing install.
 
@@ -415,7 +528,19 @@ without releasing. See `.github/workflows/release.yml` and
 - Merged cells (`merges`) are saved and restored, but there is no toolbar
   button for them, only the engine's own context menu.
 - Styles are bound to cell addresses. Inserting a row or column shifts them via
-  the engine; exotic scenarios (sorting with styles) are untested.
+  the engine; sorting sidesteps the problem entirely by rewriting the document
+  (see Sorting above), which is why it is the one operation that rebuilds the
+  grid instead of asking the engine to reorder it.
+- Sorting refuses to run on a sheet with merged cells, does not adjust formula
+  references in the rows it moves, and cannot be undone by "Clear sort" - the
+  new order is the file's order. `Ctrl+Z` still works while the tab is open.
+- Filters hide rows by value only: no ranges, no conditions, no "contains", and
+  blank cells are never hidden. Hidden rows are still in the file, and a filtered
+  sheet still saves every row it has.
+- Frozen panes are a display setting, not a print or export one, and freezing
+  more rows than fit on the screen leaves nothing to scroll.
+- Pasting a Markdown table clips at the last row and column of the sheet instead
+  of growing it.
 - When the plugin is disabled, already-open `.sheet` tabs show "no view of
   type…". That is intentional: closing the user's tabs in `onunload` would
   rearrange their workspace.
@@ -434,6 +559,47 @@ without releasing. See `.github/workflows/release.yml` and
   the formula bar. Fixed on an Android tablet at 800x1340; phones untested.
 
 ## Gotchas worth knowing
+
+Obsidian eats F2 and Ctrl+F before the grid ever sees them. Its keymap listens on
+`window` in the capture phase, and `F2` is "Rename file" while `Ctrl+F` is
+"Search current file". A `keydown` listener on the grid's own wrapper never fired
+for either - measured in the sandbox, with the listener provably attached and
+plain arrow keys arriving normally. `View.scope` is the sanctioned way round it:
+Obsidian pushes the active view's scope and consults it first, so the spreadsheet
+keys work inside the grid, stay Obsidian's everywhere else, and die with the view
+without a teardown of their own. A handler that returns `false` has handled the
+key; anything else lets Obsidian carry on, which is what the guards for the
+formula bar, the find box and an open cell editor do.
+
+`position: relative` on a header cell beats `position: sticky` on the same cell.
+The filter marker started as an absolutely positioned `::before`, which needs a
+positioned parent - and that quietly cancelled the vendor's sticky column
+headers. The symptom was very specific: with a filter on column A, scrolling the
+grid down made the letter A scroll away while B and C stayed pinned. The dot is a
+`radial-gradient` background now, which needs no positioning at all.
+
+A frozen pane cannot be measured while it is being built. Sticky needs pixel
+offsets, and the offsets read during the engine's first paint are not the final
+ones: a 26 px header row measured 285 px, so the "frozen" row parked below the
+fold and looked like sticky was broken. Everything else recovers on the next
+engine event; a freeze has no events of its own, so it is re-measured on the next
+animation frame and once more on a short timer.
+
+An unfilled cell cannot be `background-color: transparent` if it is ever going to
+be frozen. Every styled cell carries its background inline (the engine's
+`setStyle` merges, so a removed fill has to be actively reset), and no stylesheet
+rule can beat an inline declaration - the rows scrolling underneath showed
+straight through every bold-but-unfilled header cell. The inline value is
+`var(--leovale-sheet-cell-bg)` instead, and the frozen-pane rules redefine that
+variable on the cells they pin.
+
+Sorting through the engine would separate a row from its formatting. `orderBy()`
+permutes `options.data` and the `<tr>` elements, but styles live in
+`options.style` keyed by A1 address and number masks live in a `data-nf`
+attribute; after an engine sort the values have moved and the style map has not,
+so the bold red row would lend its formatting to whoever landed on its address -
+and that is what would be written to disk. Sorting is therefore a document
+operation: read the document out, move whole rows, rebuild the grid.
 
 Reloading the plugin doubled every arrow key. The grid engine installs `keydown`
 and `mousedown` handlers on `document` and only drops them from inside

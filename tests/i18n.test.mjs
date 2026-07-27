@@ -26,6 +26,9 @@ const ALLOWED = [
 	/Budget\.sheet#Sheet1!A1:D20/g,
 	/\bview\b/g,
 	/\bCSV\b/g,
+	// "Markdown" is the name of the format, exactly like CSV: it is not
+	// translated in Obsidian's own interface either.
+	/\bMarkdown\b/g,
 	/yyyy|mm|dd|hh/g,
 	/\{\w+\}/g,
 ];
@@ -181,7 +184,22 @@ test("t() works for every locale and every key without throwing", () => {
 	for (const code of LANGS) {
 		setLang(code);
 		for (const key of Object.keys(TABLES.en)) {
-			const value = t(key, { message: "m", version: 2, path: "p", name: "n", type: "v", ext: "sheet", fallback: "lsheet", owner: "o" });
+			const value = t(key, {
+				message: "m",
+				version: 2,
+				path: "p",
+				name: "n",
+				type: "v",
+				ext: "sheet",
+				fallback: "lsheet",
+				owner: "o",
+				count: 3,
+				rows: 2,
+				cols: 4,
+				list: "A, B",
+				index: 1,
+				total: 5,
+			});
 			assert.ok(value.length > 0, `${code}.${key} rendered empty`);
 			assert.ok(!/\{\w+\}/.test(value), `${code}.${key} left a placeholder: ${value}`);
 		}

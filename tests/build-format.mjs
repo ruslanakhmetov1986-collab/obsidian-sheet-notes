@@ -10,6 +10,7 @@ await esbuild.build({
 		"src/i18n.ts",
 		"src/numfmt.ts",
 		"src/embedsrc.ts",
+		"src/sheetops.ts",
 	],
 	bundle: true,
 	format: "esm",

@@ -30,6 +30,7 @@ import {
 } from "./.build/format.mjs";
 import {
 	BORDER_ON,
+	CELL_BG_NONE,
 	H_ALIGN_CSS,
 	V_ALIGN_CSS,
 	WRAP_CLASS,
@@ -278,7 +279,11 @@ test("styleToCss always writes every managed property", () => {
 	}
 	// "off" values must restore the grid's own look, not erase the gridlines
 	assert.ok(css.includes("font-weight: normal"));
-	assert.ok(css.includes("background-color: transparent"));
+	// "no fill" is a variable, not the literal `transparent`: an inline
+	// declaration cannot be overridden by a rule, but the variable it reads can,
+	// which is what makes a frozen row opaque. See CELL_BG_NONE in cellcss.ts.
+	assert.ok(css.includes(`background-color: ${CELL_BG_NONE}`), css);
+	assert.equal(cssToStyle(css)?.bg, undefined, "and it must not read back as a fill");
 	assert.ok(css.includes("color: inherit"), "no fill -> the theme's own text colour");
 	assert.ok(!css.includes(BORDER_ON));
 	assert.ok(css.includes("border-top: 1px solid var(--background-modifier-border)"));
@@ -679,18 +684,22 @@ test("a version 1 file loads with everything in it", () => {
 	assert.deepEqual(doc.sheets[0].colWidths, { 0: 180 });
 });
 
-test("writing always produces version 2, whatever the document claims", () => {
-	// The point of the bump: a 1.1.x build must refuse to WRITE a file that can
-	// carry style keys it would silently drop, so every save is a v2 save.
+test("writing always produces the current version, whatever the document claims", () => {
+	// The point of the bump: an older build must refuse to WRITE a file that can
+	// carry keys it would silently drop, so every save is a current-version save.
 	const written = serializeSheet(parseSheet(V1_FILE));
-	assert.match(written, /^\{\n  "format": "leovale-sheet",\n  "version": 2,/);
+	assert.match(written, /^\{\n  "format": "leovale-sheet",\n  "version": 3,/);
 	assert.equal(parseSheet(written).version, CURRENT_VERSION);
-	assert.equal(CURRENT_VERSION, 2);
+	assert.equal(CURRENT_VERSION, 3);
 
-	// nothing else about the document changed: exactly one line differs
-	const lines = written.split("\n");
-	const diff = V1_FILE.split("\n").filter((l, i) => l !== lines[i]);
-	assert.deepEqual(diff, ['  "version": 1,']);
+	// Nothing about the CONTENT changed: the version line, plus the two empty
+	// 1.3.0 blocks that every page now carries, and not a line more.
+	const before = V1_FILE.split("\n");
+	const after = written.split("\n");
+	const added = after.filter((l) => !before.includes(l));
+	assert.deepEqual(added, ['  "version": 3,', '      "view": {},', '      "freeze": {},']);
+	const removed = before.filter((l) => !after.includes(l));
+	assert.deepEqual(removed, ['  "version": 1,']);
 });
 
 test("a v1 file without the new keys does not grow them on save", () => {
@@ -701,9 +710,10 @@ test("a v1 file without the new keys does not grow them on save", () => {
 	}
 });
 
-test("a version 2 file is supported, a version 3 file is not", () => {
+test("versions 1..3 are supported, a version 4 file is not", () => {
 	assert.equal(isSupportedVersion(parseSheet(serializeSheet(newSheetDoc()))), true);
-	const future = parseSheet(serializeSheet(newSheetDoc()).replace('"version": 2', '"version": 3'));
+	assert.equal(isSupportedVersion(parseSheet(V1_FILE)), true);
+	const future = parseSheet(serializeSheet(newSheetDoc()).replace('"version": 3', '"version": 4'));
 	assert.equal(isSupportedVersion(future), false);
 });
 
@@ -789,4 +799,112 @@ test("the wrap class the engine adds is the one the stylesheet styles", () => {
 	// the mobile safe-area fix has to use Obsidian's own variable, because
 	// env(safe-area-inset-bottom) resolves to 0px in its Android WebView
 	assert.match(theme, /padding-bottom: calc\(12px \+ var\(--safe-area-inset-bottom/);
+});
+
+/* ------------------------------------------------- 1.3.0: view + freeze */
+
+test("fixed page key order: view and freeze sit between merges and cells", () => {
+	const text = serializeSheet(newSheetDoc());
+	const keys = text
+		.split("\n")
+		.map((l) => /^\s{6}"([a-zA-Z]+)":/.exec(l))
+		.filter(Boolean)
+		.map((m) => m[1]);
+	assert.deepEqual(keys, [
+		"name",
+		"rows",
+		"cols",
+		"colWidths",
+		"rowHeights",
+		"merges",
+		"view",
+		"freeze",
+		"cells",
+	]);
+});
+
+test("an untouched page writes both new blocks as empty objects", () => {
+	const text = serializeSheet(newSheetDoc());
+	assert.ok(text.includes('      "view": {},'), text);
+	assert.ok(text.includes('      "freeze": {},'), text);
+});
+
+test("sort and freeze round-trip through the file", () => {
+	const doc = newSheetDoc();
+	doc.sheets[0].view = { sort: { col: 2, dir: "desc" } };
+	doc.sheets[0].freeze = { rows: 1, cols: 2 };
+	const text = serializeSheet(doc);
+	assert.ok(text.includes('"sort": { "col": 2, "dir": "desc" }'), text);
+	assert.ok(text.includes('"freeze": { "rows": 1, "cols": 2 }'), text);
+	const back = parseSheet(text);
+	assert.deepEqual(back.sheets[0].view, { sort: { col: 2, dir: "desc" } });
+	assert.deepEqual(back.sheets[0].freeze, { rows: 1, cols: 2 });
+	assert.equal(serializeSheet(back), text);
+});
+
+test("filters round-trip, one value per line, sorted and deduplicated", () => {
+	const doc = newSheetDoc();
+	doc.sheets[0].view = { filters: { 1: ["Gadget", "Widget", "Gadget"], 0: ["b"] } };
+	const text = serializeSheet(doc);
+	const back = parseSheet(text);
+	assert.deepEqual(back.sheets[0].view.filters, { 0: ["b"], 1: ["Gadget", "Widget"] });
+	// columns in numeric order, values one per line (a LiveSync-sized diff)
+	assert.match(text, /"filters": \{\n\s+"0": \[\n\s+"b"\n\s+\],\n\s+"1": \[\n\s+"Gadget",\n\s+"Widget"\n\s+\]/);
+	assert.equal(serializeSheet(back), text);
+});
+
+test("view and freeze are deterministic whatever order they were built in", () => {
+	const a = newSheetDoc();
+	a.sheets[0].view = { sort: { col: 1, dir: "asc" }, filters: { 2: ["x", "y"], 0: ["q"] } };
+	a.sheets[0].freeze = { rows: 2, cols: 1 };
+
+	const b = newSheetDoc();
+	// same content, every key and every value inserted in the opposite order
+	b.sheets[0].view = { filters: { 0: ["q"], 2: ["y", "x"] }, sort: { dir: "asc", col: 1 } };
+	b.sheets[0].freeze = { cols: 1, rows: 2 };
+
+	assert.equal(serializeSheet(a), serializeSheet(b));
+	const once = serializeSheet(a);
+	assert.equal(serializeSheet(parseSheet(once)), once);
+	assert.equal(serializeSheet(parseSheet(serializeSheet(parseSheet(once)))), once);
+});
+
+test("garbage in view/freeze is dropped, never written back", () => {
+	const doc = parseSheet(
+		serializeSheet(newSheetDoc()).replace(
+			'"view": {},',
+			'"view": { "sort": { "col": -3, "dir": "sideways" }, "filters": { "x": ["a"], "1": "nope", "2": [] }, "zoom": 3 },',
+		).replace('"freeze": {},', '"freeze": { "rows": -1, "cols": 900, "depth": 4 },'),
+	);
+	// col -3 is not a column; "sideways" degrades to ascending, not to nothing
+	assert.deepEqual(doc.sheets[0].view, {});
+	// rows: -1 dropped, cols: 900 is beyond the grid, so it goes too
+	assert.deepEqual(doc.sheets[0].freeze, {});
+	const out = serializeSheet(doc);
+	assert.ok(!out.includes("zoom"), out);
+	assert.ok(!out.includes("depth"), out);
+});
+
+test("a sort or filter naming a column outside the grid is dropped on load", () => {
+	const doc = newSheetDoc();
+	doc.sheets[0].cols = 3;
+	doc.sheets[0].view = { sort: { col: 9, dir: "asc" }, filters: { 9: ["a"], 1: ["b"] } };
+	doc.sheets[0].freeze = { rows: 400, cols: 2 };
+	const back = parseSheet(serializeSheet(doc));
+	assert.deepEqual(back.sheets[0].view, { filters: { 1: ["b"] } });
+	assert.deepEqual(back.sheets[0].freeze, { cols: 2 });
+});
+
+test("a version 2 file gains only the two empty blocks", () => {
+	const v2 = serializeSheet(newSheetDoc())
+		.replace('"version": 3', '"version": 2')
+		.replace('      "view": {},\n', "")
+		.replace('      "freeze": {},\n', "");
+	const doc = parseSheet(v2);
+	assert.equal(doc.version, 2);
+	assert.deepEqual(doc.sheets[0].view, {});
+	assert.deepEqual(doc.sheets[0].freeze, {});
+	const written = serializeSheet(doc);
+	const added = written.split("\n").filter((l) => !v2.split("\n").includes(l));
+	assert.deepEqual(added, ['  "version": 3,', '      "view": {},', '      "freeze": {},']);
 });

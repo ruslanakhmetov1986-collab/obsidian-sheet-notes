@@ -15,10 +15,27 @@ import {
 	type HAlign,
 	MAX_FONT_SIZE,
 	MIN_FONT_SIZE,
+	type SortDir,
 	type VAlign,
+	colToName,
 	parseRef,
 } from "./format";
+import { freezeFromRef } from "./sheetops";
 import { type StringKey, t } from "./i18n";
+
+/**
+ * What the toolbar cannot do on its own, because it needs the DOCUMENT rather
+ * than the live grid (sorting rewrites the file and re-renders) or a piece of
+ * chrome it does not own (the find strip, the column-width modal).
+ */
+export interface ToolbarActions {
+	sort: (dir: SortDir | null) => void;
+	toggleFind: () => void;
+	columnWidth: () => void;
+}
+
+/** How many distinct values a filter menu will list before it gives up. */
+export const FILTER_MENU_LIMIT = 50;
 
 export const FONT_SIZES = [10, 12, 14, 16, 18, 24];
 
@@ -102,13 +119,20 @@ export class SheetToolbar {
 	private alignButton!: HTMLButtonElement;
 	private alignIcon!: HTMLElement;
 	private wrapButton!: HTMLButtonElement;
+	private sortButton!: HTMLButtonElement;
+	private filterButton!: HTMLButtonElement;
+	private freezeButton!: HTMLButtonElement;
+	private findButton!: HTMLButtonElement;
+	private widthButton!: HTMLButtonElement;
+	private actions: ToolbarActions;
 	private onPointerDown: (e: MouseEvent) => void;
 	private onKeyDown: (e: KeyboardEvent) => void;
 	/** Selection snapshot taken before a toolbar click can clear the grid's own. */
 	private pendingRefs: string[] = [];
 
-	constructor(parent: HTMLElement, getEngine: () => SheetEngine | null) {
+	constructor(parent: HTMLElement, getEngine: () => SheetEngine | null, actions: ToolbarActions) {
 		this.getEngine = getEngine;
+		this.actions = actions;
 		this.el = parent.createDiv({ cls: "leovale-sheet-toolbar" });
 		this.build();
 
@@ -254,6 +278,199 @@ export class SheetToolbar {
 			t("tbWrap"),
 		);
 		this.wrapButton.onclick = () => this.toggleWrap();
+
+		this.el.createDiv({ cls: "leovale-sheet-tb-sep" });
+
+		// --- group 6: data (sort, filter, freeze) -----------------------------
+		const group6 = this.el.createDiv({ cls: "leovale-sheet-tb-group" });
+		this.sortButton = this.iconButton(
+			group6,
+			"leovale-sheet-tb-sort",
+			"arrow-up-down",
+			t("tbSort"),
+		);
+		this.sortButton.onclick = () => this.openSortMenu();
+
+		this.filterButton = this.iconButton(
+			group6,
+			"leovale-sheet-tb-filter",
+			"filter",
+			t("tbFilter"),
+		);
+		this.filterButton.onclick = () => this.openFilterMenu();
+
+		this.freezeButton = this.iconButton(
+			group6,
+			"leovale-sheet-tb-freeze",
+			"pin",
+			t("tbFreeze"),
+		);
+		this.freezeButton.onclick = () => this.openFreezeMenu();
+
+		this.el.createDiv({ cls: "leovale-sheet-tb-sep" });
+
+		// --- group 7: find + column width -------------------------------------
+		const group7 = this.el.createDiv({ cls: "leovale-sheet-tb-group" });
+		this.findButton = this.iconButton(group7, "leovale-sheet-tb-find", "search", t("tbFind"));
+		this.findButton.onclick = () => this.actions.toggleFind();
+
+		this.widthButton = this.iconButton(
+			group7,
+			"leovale-sheet-tb-width",
+			"move-horizontal",
+			t("tbColWidth"),
+		);
+		this.widthButton.onclick = () => this.actions.columnWidth();
+	}
+
+	/* ------------------------------------------------- sort, filter, freeze */
+
+	/** The column a data action works on: the one the selection starts in. */
+	private targetColumn(): number | null {
+		const ref = this.targetRefs()[0];
+		if (!ref) return null;
+		return parseRef(ref).col;
+	}
+
+	private openSortMenu(): void {
+		this.closePalette();
+		const engine = this.getEngine();
+		const col = this.targetColumn();
+		const current = engine?.getView().sort;
+		const menu = new Menu();
+		menu.addItem((item) =>
+			item
+				.setTitle(t("sortAsc"))
+				.setIcon("arrow-down-a-z")
+				.setChecked(current?.col === col && current?.dir === "asc")
+				.onClick(() => this.actions.sort("asc")),
+		);
+		menu.addItem((item) =>
+			item
+				.setTitle(t("sortDesc"))
+				.setIcon("arrow-down-z-a")
+				.setChecked(current?.col === col && current?.dir === "desc")
+				.onClick(() => this.actions.sort("desc")),
+		);
+		menu.addSeparator();
+		menu.addItem((item) =>
+			item
+				.setTitle(t("sortClear"))
+				.setIcon("eraser")
+				.setDisabled(!current)
+				.onClick(() => this.actions.sort(null)),
+		);
+		this.showMenuUnder(menu, this.sortButton);
+	}
+
+	/**
+	 * The filter menu is the column's distinct values, each a checkable item.
+	 * A column with no filter shows every value checked, which is both true and
+	 * the state a first click has to toggle away from.
+	 */
+	private openFilterMenu(): void {
+		this.closePalette();
+		const engine = this.getEngine();
+		const col = this.targetColumn();
+		if (!engine || col === null) return;
+		const values = engine.columnValues(col, 0).slice(0, FILTER_MENU_LIMIT + 1);
+		const truncated = values.length > FILTER_MENU_LIMIT;
+		const listed = truncated ? values.slice(0, FILTER_MENU_LIMIT) : values;
+		const allowed = engine.getView().filters?.[String(col)];
+		const menu = new Menu();
+
+		menu.addItem((item) =>
+			item
+				.setTitle(t("filterShowAll"))
+				.setIcon("eye")
+				.setChecked(!allowed)
+				.onClick(() => engine.setFilter(col, null)),
+		);
+		menu.addItem((item) =>
+			item
+				.setTitle(t("filterClearAll"))
+				.setIcon("filter-x")
+				.setDisabled(!engine.getView().filters)
+				.onClick(() => engine.clearFilters()),
+		);
+		menu.addSeparator();
+
+		if (listed.length === 0) {
+			menu.addItem((item) => item.setTitle(t("filterNoValues")).setDisabled(true));
+		}
+		for (const value of listed) {
+			const on = !allowed || allowed.includes(value);
+			menu.addItem((item) =>
+				item
+					.setTitle(value)
+					.setChecked(on)
+					.onClick(() => {
+						const base = allowed ?? listed;
+						const next = on ? base.filter((v) => v !== value) : [...base, value];
+						// Unchecking the last value would hide every row; that is read
+						// as "show everything again" instead.
+						engine.setFilter(col, next.length > 0 ? next : null);
+					}),
+			);
+		}
+		if (truncated) {
+			menu.addSeparator();
+			menu.addItem((item) =>
+				item.setTitle(t("filterTruncated", { count: FILTER_MENU_LIMIT })).setDisabled(true),
+			);
+		}
+		this.showMenuUnder(menu, this.filterButton);
+	}
+
+	private openFreezeMenu(): void {
+		this.closePalette();
+		const engine = this.getEngine();
+		if (!engine) return;
+		const ref = this.targetRefs()[0] ?? "A1";
+		const current = engine.getFreeze();
+		const menu = new Menu();
+		menu.addItem((item) =>
+			item
+				.setTitle(t("freezeRows"))
+				.setIcon("panel-top")
+				.setChecked(!!current.rows && !current.cols)
+				.onClick(() => engine.setFreeze({ ...freezeFromRef(ref, "rows"), cols: current.cols })),
+		);
+		menu.addItem((item) =>
+			item
+				.setTitle(t("freezeCols"))
+				.setIcon("panel-left")
+				.setChecked(!!current.cols && !current.rows)
+				.onClick(() => engine.setFreeze({ ...freezeFromRef(ref, "cols"), rows: current.rows })),
+		);
+		menu.addItem((item) =>
+			item
+				.setTitle(t("freezeBoth"))
+				.setIcon("table")
+				.setChecked(!!current.rows && !!current.cols)
+				.onClick(() => engine.setFreeze(freezeFromRef(ref, "both"))),
+		);
+		menu.addSeparator();
+		menu.addItem((item) =>
+			item
+				.setTitle(t("freezeNone"))
+				.setIcon("eraser")
+				.setDisabled(!current.rows && !current.cols)
+				.onClick(() => engine.setFreeze({})),
+		);
+		this.showMenuUnder(menu, this.freezeButton);
+	}
+
+	/** Which columns a width change applies to: every column in the selection. */
+	selectedColumns(): number[] {
+		const cols = new Set<number>();
+		for (const ref of this.targetRefs()) cols.add(parseRef(ref).col);
+		return [...cols].sort((a, b) => a - b);
+	}
+
+	/** Human-readable list of those columns, for the dialog's subtitle. */
+	selectedColumnNames(): string {
+		return this.selectedColumns().map((c) => colToName(c)).join(", ");
 	}
 
 	/* ------------------------------------------------------------ actions */
@@ -548,10 +765,31 @@ export class SheetToolbar {
 			this.numberButton,
 			this.alignButton,
 			this.wrapButton,
+			this.sortButton,
+			this.filterButton,
+			this.freezeButton,
+			this.widthButton,
 		]) {
 			el.toggleAttribute("disabled", disabled);
 		}
+		// Find works on a read-only sheet: it changes nothing.
+		this.findButton.toggleAttribute("disabled", !engine);
 		if (!engine) return;
+
+		const view = engine.getView();
+		const freeze = engine.getFreeze();
+		const col = this.targetColumn();
+		this.sortButton.toggleClass("is-active", view.sort?.col === col);
+		this.filterButton.toggleClass("is-active", !!view.filters);
+		// A filter is the one toolbar state whose EFFECT is invisible (the rows it
+		// hides are simply not there), so the button says how many are missing.
+		const hidden = view.filters ? engine.filteredOutCount() : 0;
+		const filterLabel = hidden > 0
+			? `${t("tbFilter")} — ${t("filterHiddenRows", { count: hidden })}`
+			: t("tbFilter");
+		this.filterButton.setAttribute("title", filterLabel);
+		this.filterButton.setAttribute("aria-label", filterLabel);
+		this.freezeButton.toggleClass("is-active", !!freeze.rows || !!freeze.cols);
 
 		const refs = this.targetRefs();
 		const first = refs[0] ? engine.getStyleAt(refs[0]) : {};

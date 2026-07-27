@@ -138,6 +138,11 @@ body.is-mobile .leovale-sheet-wrapper,
 .leovale-sheet-toolbar {
 	flex: 0 0 auto;
 	display: flex;
+	/* Twelve controls do not fit a narrow pane. The bar scrolls sideways rather
+	   than wrapping: wrapping would double its height and push the grid down. */
+	overflow-x: auto;
+	overflow-y: hidden;
+	scrollbar-width: none;
 	align-items: center;
 	gap: 2px;
 	height: 36px;
@@ -155,6 +160,7 @@ body.is-mobile .leovale-sheet-wrapper,
 	align-items: center;
 	gap: 2px;
 	position: relative;
+	flex: 0 0 auto;
 }
 
 .leovale-sheet-tb-sep {
@@ -364,6 +370,114 @@ body.is-mobile .leovale-sheet-wrapper,
 	background-color: var(--background-modifier-border);
 }
 
+/* ---- find strip (Ctrl+F inside the grid) -------------------------------
+ * Sits between the toolbar and the grid and takes no room until it is opened.
+ * Its input stops its own key events in JS, or the engine's document-level
+ * keydown would open an in-cell editor for every letter typed here.
+ * ---------------------------------------------------------------------- */
+
+.leovale-sheet-find {
+	display: none;
+	flex: 0 0 auto;
+	align-items: center;
+	gap: 4px;
+	height: 32px;
+	padding: 0 8px;
+	background-color: var(--background-secondary);
+	border-bottom: 1px solid var(--background-modifier-border);
+	font-family: var(--font-interface);
+	font-size: var(--font-ui-smaller);
+}
+
+.leovale-sheet-find.is-open {
+	display: flex;
+}
+
+.leovale-sheet-find-icon {
+	display: inline-flex;
+	color: var(--text-faint);
+}
+
+.leovale-sheet-find-icon .svg-icon {
+	width: 14px;
+	height: 14px;
+}
+
+.leovale-sheet-find-input {
+	flex: 1 1 auto;
+	min-width: 0;
+	height: 24px;
+	padding: 0 6px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 4px;
+	background-color: var(--background-primary);
+	color: var(--text-normal);
+	font-size: var(--font-ui-smaller);
+}
+
+.leovale-sheet-find-input:focus,
+.leovale-sheet-find-input:focus-visible {
+	box-shadow: 0 0 0 1px var(--interactive-accent) inset;
+	outline: none;
+}
+
+.leovale-sheet-find-count {
+	flex: 0 0 auto;
+	min-width: 60px;
+	text-align: right;
+	color: var(--text-muted);
+	font-variant-numeric: tabular-nums;
+}
+
+.leovale-sheet-find-btn {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 24px;
+	height: 24px;
+	padding: 0;
+	border: none;
+	border-radius: 4px;
+	background-color: transparent;
+	box-shadow: none;
+	color: var(--text-normal);
+	cursor: pointer;
+}
+
+.leovale-sheet-find-btn:hover {
+	background-color: var(--background-modifier-hover);
+	box-shadow: none;
+}
+
+.leovale-sheet-find-btn .svg-icon {
+	width: 14px;
+	height: 14px;
+}
+
+body.is-mobile .leovale-sheet-find,
+.leovale-sheet-content.is-mobile .leovale-sheet-find {
+	height: 48px;
+}
+
+body.is-mobile .leovale-sheet-find-btn,
+.leovale-sheet-content.is-mobile .leovale-sheet-find-btn {
+	width: 44px;
+	height: 44px;
+}
+
+body.is-mobile .leovale-sheet-find-input,
+.leovale-sheet-content.is-mobile .leovale-sheet-find-input {
+	height: 36px;
+}
+
+/* ---- the column-width dialog ------------------------------------------ */
+
+.leovale-sheet-width-columns {
+	margin-bottom: 6px;
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+}
+
 /* ---- the grid ---------------------------------------------------------- */
 
 .leovale-sheet-root .jss_worksheet {
@@ -454,6 +568,69 @@ body.is-mobile .leovale-sheet-wrapper,
 
 .leovale-sheet-root .jss_worksheet > tbody > tr.dragging > td {
 	background-color: var(--background-modifier-hover);
+}
+
+/* ---- frozen panes, sort and filter markers, search hits ----------------
+ *
+ * The sticky offsets themselves are generated per grid at runtime (they are
+ * pixel values, and only the live geometry knows them): see
+ * SheetEngine.syncFreeze. What lives here is everything that does NOT depend on
+ * those numbers.
+ *
+ * `--leovale-sheet-cell-bg` is why a frozen row can be opaque at all. Every
+ * styled cell carries `background-color` INLINE (setStyle merges, so a removed
+ * fill has to be actively reset), and an inline declaration cannot be
+ * overridden by a rule - but the variable it reads can be, and the generated
+ * freeze rules do exactly that. Unfilled cells resolve it to `transparent`,
+ * which is the look the grid has always had.
+ * ---------------------------------------------------------------------- */
+
+.leovale-sheet-root {
+	--leovale-sheet-cell-bg: transparent;
+}
+
+/* A sorted column keeps a small arrow in its header, a filtered one a dot.
+   Both are drawn in the header cell's own corner: the letter stays centred. */
+.leovale-sheet-root .jss_worksheet > thead > tr > td.leovale-sheet-sorted::after {
+	content: "▲";
+	margin-left: 3px;
+	font-size: 8px;
+	color: var(--text-accent);
+	vertical-align: middle;
+}
+
+.leovale-sheet-root .jss_worksheet > thead > tr > td.leovale-sheet-sorted[data-sort-dir="desc"]::after {
+	content: "▼";
+}
+
+/* The dot is drawn INTO the background on purpose.
+ *
+ * The obvious version - an absolutely positioned ::before - needs
+ * `position: relative` on the header cell, and that quietly beats the VENDOR'S
+ * `position: sticky` on the same cell. Measured in the sandbox: with a filter
+ * on column A, scrolling the grid down made the letter A (and only the letter
+ * A) scroll away while B and C stayed pinned. A background image needs no
+ * positioning at all. */
+.leovale-sheet-root .jss_worksheet > thead > tr > td.leovale-sheet-filtered {
+	/* Top-RIGHT corner: the vendor left-aligns the column letter and the sort
+	   arrow follows it, so the left corner is where the letter actually is. */
+	background-image: radial-gradient(
+		circle at calc(100% - 5px) 6px,
+		var(--text-accent) 2.5px,
+		transparent 3px
+	);
+}
+
+/* In-sheet search. The current hit gets the accent ring, the others a tint;
+   both are drawn with box-shadow so a cell's own fill stays visible. */
+.leovale-sheet-root .jss_worksheet > tbody > tr > td.leovale-sheet-found {
+	box-shadow: inset 0 0 0 100px var(--text-highlight-bg, rgba(255, 208, 0, 0.35));
+}
+
+.leovale-sheet-root .jss_worksheet > tbody > tr > td.leovale-sheet-found-current {
+	box-shadow:
+		inset 0 0 0 100px var(--text-highlight-bg, rgba(255, 208, 0, 0.35)),
+		inset 0 0 0 2px var(--interactive-accent);
 }
 
 /* ---- selection --------------------------------------------------------- */

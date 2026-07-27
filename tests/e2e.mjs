@@ -493,7 +493,7 @@ async function main() {
 		console.log("  toolbar icons:", icons);
 		check(
 			"every icon button actually rendered its glyph",
-			icons.length === 7 && icons.every((i) => i.glyphs === 1 || i.cls.includes("tb-size")),
+			icons.length === 12 && icons.every((i) => i.glyphs === 1 || i.cls.includes("tb-size")),
 			JSON.stringify(icons),
 		);
 		check(
@@ -826,8 +826,8 @@ async function main() {
 		check("LF endings only", !onDisk.includes("\r"));
 		check("trailing newline", onDisk.endsWith("}\n"));
 		check(
-			"2-space indent header, format version 2",
-			onDisk.startsWith('{\n  "format": "leovale-sheet",\n  "version": 2,'),
+			"2-space indent header, format version 3",
+			onDisk.startsWith('{\n  "format": "leovale-sheet",\n  "version": 3,'),
 			onDisk.slice(0, 60),
 		);
 		check("valid JSON", (() => { try { JSON.parse(onDisk); return true; } catch { return false; } })());
@@ -1441,6 +1441,565 @@ async function main() {
 		check("the file is unchanged by reopening", fs.readFileSync(csvDisk, "utf8") === csvSaved);
 		await shot(page, "10-csv-light");
 
+		/* ================================================================
+		 * 1.3.0: sort, filters, frozen panes, find, keyboard, markdown,
+		 * column width. All of it on a sheet of its own, so the assertions
+		 * above (and the embeds below) keep their own file intact.
+		 * ============================================================= */
+
+		step("1.3.0: a data sheet with styled rows");
+		const DATA_PATH = "Data.sheet";
+		const dataDisk = path.join(VAULT, DATA_PATH);
+		const DATA_SOURCE = [
+			"{",
+			'  "format": "leovale-sheet",',
+			'  "version": 3,',
+			'  "sheets": [',
+			"    {",
+			'      "name": "Sheet1",',
+			'      "rows": 40,',
+			'      "cols": 3,',
+			'      "colWidths": {},',
+			'      "rowHeights": {},',
+			'      "merges": {},',
+			'      "view": {},',
+			'      "freeze": {},',
+			'      "cells": {',
+			'        "A1": { "v": "Fruit", "s": { "b": true } },',
+			'        "B1": { "v": "Qty", "s": { "b": true } },',
+			'        "C1": { "v": "Total", "s": { "b": true } },',
+			'        "A2": { "v": "cherry", "s": { "bg": "#ffe0e0" } },',
+			'        "B2": { "v": 3 },',
+			'        "A3": { "v": "apple", "s": { "bg": "#e2f0d9" } },',
+			'        "B3": { "v": 10 },',
+			'        "A4": { "v": "banana", "s": { "bg": "#fff2cc" } },',
+			'        "B4": { "v": 2 },',
+			'        "C6": { "f": "=SUM(B2:B4)" }',
+			"      }",
+			"    }",
+			"  ]",
+			"}",
+			"",
+		].join("\n");
+
+		const openData = async () => {
+			await page.evaluate(
+				async ([p, text]) => {
+					const app = window.app;
+					app.workspace.detachLeavesOfType("leovale-sheet-view");
+					const old = app.vault.getAbstractFileByPath(p);
+					if (old) await app.vault.delete(old);
+					const f = await app.vault.create(p, text);
+					await app.workspace.getLeaf(true).openFile(f);
+				},
+				[DATA_PATH, DATA_SOURCE],
+			);
+			await page.waitForFunction(
+				() => window.sheetView()?.file?.path === "Data.sheet" && !!window.wsHandle(),
+				null,
+				{ timeout: 20_000 },
+			);
+			await page.waitForTimeout(500);
+		};
+		await openData();
+
+		const dataCell = (x, y) =>
+			page.evaluate(
+				([cx, cy]) =>
+					document.querySelector(
+						`.leovale-sheet-content .leovale-sheet-root td[data-x="${cx}"][data-y="${cy}"]`,
+					)?.textContent,
+				[x, y],
+			);
+		const clickCell = async (x, y) => {
+			await page.click(
+				`.leovale-sheet-content .leovale-sheet-root td[data-x="${x}"][data-y="${y}"]`,
+			);
+			await page.waitForTimeout(120);
+		};
+
+		check("the data sheet mounted", (await dataCell(0, 1)) === "cherry", String(await dataCell(0, 1)));
+		check("the formula outside the data block computed", (await dataCell(2, 5)) === "15",
+			String(await dataCell(2, 5)));
+
+		step("1.3.0: frozen rows from the toolbar");
+		await clickCell(0, 1); // A2 -> everything above it freezes
+		await page.click(".leovale-sheet-toolbar .leovale-sheet-tb-freeze");
+		await page.waitForTimeout(250);
+		const freezeMenu = await page.evaluate(() =>
+			[...document.querySelectorAll(".menu .menu-item")].map((i) => ({
+				t: i.querySelector(".menu-item-title")?.textContent,
+				svg: !!i.querySelector(".menu-item-icon svg"),
+			})),
+		);
+		console.log("  freeze menu:", freezeMenu);
+		check(
+			"every freeze menu item rendered its icon",
+			freezeMenu.length === 4 && freezeMenu.every((i) => i.svg),
+			JSON.stringify(freezeMenu),
+		);
+		await page.click('.menu .menu-item:has(.menu-item-title:text-is("Freeze rows above the selection"))');
+		await page.waitForTimeout(400);
+
+		const frozen = await page.evaluate(() => {
+			const root = document.querySelector(".leovale-sheet-content .leovale-sheet-root");
+			const td = root.querySelector('tbody > tr[data-y="0"] > td[data-x="0"]');
+			const cs = getComputedStyle(td);
+			const below = root.querySelector('tbody > tr[data-y="2"] > td[data-x="0"]');
+			return {
+				state: window.sheetView().sheetEngine.getFreeze(),
+				styleTags: root.querySelectorAll("style").length,
+				css: [...root.querySelectorAll("style")].map((s) => s.textContent).join("\n"),
+				position: cs.position,
+				top: cs.top,
+				bg: cs.backgroundColor,
+				belowPosition: getComputedStyle(below).position,
+				hasClass: root.classList.contains("has-freeze"),
+			};
+		});
+		console.log("  freeze:", { ...frozen, css: frozen.css.split("\n")[0] });
+		check("the engine recorded the freeze", JSON.stringify(frozen.state) === '{"rows":1}',
+			JSON.stringify(frozen.state));
+		check("a generated stylesheet was written into the grid", frozen.styleTags === 1,
+			String(frozen.styleTags));
+		check("the frozen row is sticky", frozen.position === "sticky", frozen.position);
+		check("it sticks below the column headers, not at 0", frozen.top !== "0px" && frozen.top !== "auto",
+			frozen.top);
+		check("a frozen cell is opaque", frozen.bg !== "rgba(0, 0, 0, 0)", frozen.bg);
+		check("an unfrozen row is not sticky", frozen.belowPosition !== "sticky", frozen.belowPosition);
+		check("the root is marked as frozen", frozen.hasClass);
+
+		step("1.3.0: sorting moves styles with their rows");
+		await clickCell(0, 1); // a cell in column A
+		await page.click(".leovale-sheet-toolbar .leovale-sheet-tb-sort");
+		await page.waitForTimeout(250);
+		const sortMenu = await page.evaluate(() =>
+			[...document.querySelectorAll(".menu .menu-item-title")].map((i) => i.textContent),
+		);
+		console.log("  sort menu:", sortMenu);
+		check("the sort menu offers both directions and a clear",
+			sortMenu.includes("Sort A → Z") && sortMenu.includes("Sort Z → A") && sortMenu.includes("Clear sort"),
+			JSON.stringify(sortMenu));
+		await page.click('.menu .menu-item:has(.menu-item-title:text-is("Sort A → Z"))');
+		await page.waitForTimeout(900);
+
+		const sorted = await page.evaluate(() => {
+			const e = window.sheetView().sheetEngine;
+			const q = (x, y) =>
+				document.querySelector(
+					`.leovale-sheet-content .leovale-sheet-root td[data-x="${x}"][data-y="${y}"]`,
+				)?.textContent;
+			return {
+				col: [q(0, 0), q(0, 1), q(0, 2), q(0, 3)],
+				qty: [q(1, 1), q(1, 2), q(1, 3)],
+				styles: { A2: e.getStyleAt("A2"), A3: e.getStyleAt("A3"), A4: e.getStyleAt("A4"), A1: e.getStyleAt("A1") },
+				view: e.getView(),
+				total: q(2, 5),
+				headerMarked: !!document.querySelector(
+					'.leovale-sheet-content .leovale-sheet-root thead td[data-x="0"].leovale-sheet-sorted',
+				),
+			};
+		});
+		console.log("  sorted:", sorted);
+		check("the header row stayed put (it is frozen)", sorted.col[0] === "Fruit", String(sorted.col[0]));
+		check("rows are in ascending order", JSON.stringify(sorted.col.slice(1)) === '["apple","banana","cherry"]',
+			JSON.stringify(sorted.col));
+		check("each row's OWN number came with it", JSON.stringify(sorted.qty) === '["10","2","3"]',
+			JSON.stringify(sorted.qty));
+		check("apple kept its green fill", sorted.styles.A2.bg === "#e2f0d9", JSON.stringify(sorted.styles.A2));
+		check("banana kept its yellow fill", sorted.styles.A3.bg === "#fff2cc", JSON.stringify(sorted.styles.A3));
+		check("cherry kept its red fill", sorted.styles.A4.bg === "#ffe0e0", JSON.stringify(sorted.styles.A4));
+		check("the frozen header kept its bold", sorted.styles.A1.b === true, JSON.stringify(sorted.styles.A1));
+		check("the sort is recorded in the view", JSON.stringify(sorted.view.sort) === '{"col":0,"dir":"asc"}',
+			JSON.stringify(sorted.view));
+		check("the sorted column is marked in its header", sorted.headerMarked);
+		check("a formula outside the sorted block still computes", sorted.total === "15", String(sorted.total));
+
+		step("1.3.0: the sort and the freeze on disk, byte for byte");
+		await page.waitForTimeout(5000);
+		const dataSaved = fs.readFileSync(dataDisk, "utf8");
+		console.log("  ---- Data.sheet on disk ----");
+		console.log(dataSaved.split("\n").map((l) => "  | " + l).join("\n"));
+		check("still version 3 deterministic JSON",
+			dataSaved.startsWith('{\n  "format": "leovale-sheet",\n  "version": 3,'), dataSaved.slice(0, 50));
+		check("the view block holds the sort",
+			dataSaved.includes('"sort": { "col": 0, "dir": "asc" }'), dataSaved);
+		check("the freeze block holds the frozen row",
+			dataSaved.includes('"freeze": { "rows": 1 }'), dataSaved);
+		check("view and freeze sit between merges and cells",
+			/"merges": \{\},\n\s+"view": \{[\s\S]*?\n\s+"freeze": \{ "rows": 1 \},\n\s+"cells":/.test(dataSaved),
+			dataSaved);
+		// The whole point of the document-level sort: on disk, the style is on the
+		// line of the value it belongs to.
+		check('A2 on disk is apple WITH the green fill',
+			dataSaved.includes('"A2": { "v": "apple", "s": { "bg": "#e2f0d9" } }'), dataSaved);
+		check('A3 on disk is banana WITH the yellow fill',
+			dataSaved.includes('"A3": { "v": "banana", "s": { "bg": "#fff2cc" } }'), dataSaved);
+		check('A4 on disk is cherry WITH the red fill',
+			dataSaved.includes('"A4": { "v": "cherry", "s": { "bg": "#ffe0e0" } }'), dataSaved);
+		check('B2 on disk is apple\'s own 10', dataSaved.includes('"B2": { "v": 10 }'), dataSaved);
+		check("the header is untouched",
+			dataSaved.includes('"A1": { "v": "Fruit", "s": { "b": true } }'), dataSaved);
+		check("the formula is still stored as source",
+			dataSaved.includes('"C6": { "f": "=SUM(B2:B4)" }'), dataSaved);
+
+		step("1.3.0: filters hide rows and are persisted");
+		await clickCell(0, 1);
+		await page.click(".leovale-sheet-toolbar .leovale-sheet-tb-filter");
+		await page.waitForTimeout(300);
+		const filterMenu = await page.evaluate(() =>
+			[...document.querySelectorAll(".menu .menu-item-title")].map((i) => i.textContent),
+		);
+		console.log("  filter menu:", filterMenu);
+		check("the filter menu lists the column's values",
+			["apple", "banana", "cherry"].every((v) => filterMenu.includes(v)), JSON.stringify(filterMenu));
+		check("and offers show-all plus clear-all",
+			filterMenu.includes("Show all") && filterMenu.includes("Clear all filters"),
+			JSON.stringify(filterMenu));
+		await page.click('.menu .menu-item:has(.menu-item-title:text-is("banana"))');
+		await page.waitForTimeout(500);
+
+		const filtered = await page.evaluate(() => {
+			const rows = [...document.querySelectorAll(".leovale-sheet-content .leovale-sheet-root tbody tr")];
+			return {
+				view: window.sheetView().sheetEngine.getView(),
+				hidden: rows.filter((r) => getComputedStyle(r).display === "none").map((r) => r.getAttribute("data-y")),
+				marked: !!document.querySelector(
+					'.leovale-sheet-content .leovale-sheet-root thead td[data-x="0"].leovale-sheet-filtered',
+				),
+			};
+		});
+		console.log("  filtered:", filtered);
+		check("unchecking a value filters it out",
+			JSON.stringify(filtered.view.filters) === '{"0":["apple","cherry"]}', JSON.stringify(filtered.view));
+		// banana sorted to row index 2; the empty rows below the block stay visible
+		// on purpose - a blank is never filtered out (see sheetops.hiddenRows).
+		check("the banana row is hidden, and only it",
+			JSON.stringify(filtered.hidden) === '["2"]', JSON.stringify(filtered.hidden));
+		check("the filtered column is marked in its header", filtered.marked);
+		const filterTitle = await page.getAttribute(
+			".leovale-sheet-toolbar .leovale-sheet-tb-filter",
+			"title",
+		);
+		check(
+			"the filter button says how many rows are hidden",
+			/1 rows hidden/.test(filterTitle ?? ""),
+			String(filterTitle),
+		);
+
+		await page.waitForTimeout(5000);
+		const dataFiltered = fs.readFileSync(dataDisk, "utf8");
+		check("the filter is written into the view block, one value per line",
+			/"filters": \{\n\s+"0": \[\n\s+"apple",\n\s+"cherry"\n\s+\]\n\s+\}/.test(dataFiltered),
+			dataFiltered);
+		check("filtering hides rows, it never deletes them",
+			dataFiltered.includes('"A3": { "v": "banana", "s": { "bg": "#fff2cc" } }'), dataFiltered);
+
+		step("1.3.0: freeze, sort and filters survive a reopen");
+		await page.evaluate(async () => {
+			window.app.workspace.detachLeavesOfType("leovale-sheet-view");
+			await new Promise((r) => setTimeout(r, 500));
+			const f = window.app.vault.getAbstractFileByPath("Data.sheet");
+			await window.app.workspace.getLeaf(true).openFile(f);
+		});
+		await page.waitForFunction(() => !!window.wsHandle(), null, { timeout: 20_000 });
+		await page.waitForTimeout(900);
+		const reopenedData = await page.evaluate(() => {
+			const root = document.querySelector(".leovale-sheet-content .leovale-sheet-root");
+			const e = window.sheetView().sheetEngine;
+			const rows = [...root.querySelectorAll("tbody tr")];
+			return {
+				freeze: e.getFreeze(),
+				view: e.getView(),
+				sticky: getComputedStyle(root.querySelector('tbody > tr[data-y="0"] > td[data-x="0"]')).position,
+				hidden: rows.filter((r) => getComputedStyle(r).display === "none").map((r) => r.getAttribute("data-y")),
+				a2: root.querySelector('td[data-x="0"][data-y="1"]')?.textContent,
+				fillA2: e.getStyleAt("A2").bg,
+				sortedHeader: !!root.querySelector('thead td[data-x="0"].leovale-sheet-sorted'),
+			};
+		});
+		console.log("  reopened:", reopenedData);
+		check("the frozen row came back", JSON.stringify(reopenedData.freeze) === '{"rows":1}',
+			JSON.stringify(reopenedData.freeze));
+		check("and is sticky again without a click", reopenedData.sticky === "sticky", reopenedData.sticky);
+		check("the filter came back and still hides its row",
+			JSON.stringify(reopenedData.hidden) === '["2"]', JSON.stringify(reopenedData.hidden));
+		check("the sort marker came back", reopenedData.sortedHeader);
+		check("the sorted values and their styles are still together",
+			reopenedData.a2 === "apple" && reopenedData.fillA2 === "#e2f0d9",
+			JSON.stringify([reopenedData.a2, reopenedData.fillA2]));
+		check("opening the file did not change it", fs.readFileSync(dataDisk, "utf8") === dataFiltered);
+
+		await shot(page, "15-data-light");
+
+		step("1.3.0: the frozen row stays put while the grid scrolls under it");
+		await page.evaluate(() => {
+			document.querySelector(".leovale-sheet-content .leovale-sheet-wrapper").scrollTop = 260;
+		});
+		await page.waitForTimeout(500);
+		const scrolled = await page.evaluate(() => {
+			const root = document.querySelector(".leovale-sheet-content .leovale-sheet-root");
+			const wrapper = document.querySelector(".leovale-sheet-content .leovale-sheet-wrapper");
+			const box = (sel) => root.querySelector(sel)?.getBoundingClientRect();
+			const head = box('thead > tr > td[data-x="0"]');
+			const frozen = box('tbody > tr[data-y="0"] > td[data-x="0"]');
+			const under = box('tbody > tr[data-y="1"] > td[data-x="0"]');
+			const frozenCell = root.querySelector('tbody > tr[data-y="0"] > td[data-x="0"]');
+			return {
+				scrollTop: Math.round(wrapper.scrollTop),
+				text: frozenCell.textContent,
+				gap: Math.round(frozen.top - head.bottom),
+				underTop: Math.round(under.top),
+				frozenTop: Math.round(frozen.top),
+				// A styled-but-unfilled header cell used to be `background-color:
+				// transparent` inline, which no rule could override - the rows sliding
+				// underneath showed straight through it.
+				bg: getComputedStyle(frozenCell).backgroundColor,
+				stickyTop: getComputedStyle(frozenCell).top,
+				headTop: Math.round(head.top),
+				headPosition: getComputedStyle(root.querySelector('thead > tr > td[data-x="0"]')).position,
+				wrapperTop: Math.round(wrapper.getBoundingClientRect().top),
+			};
+		});
+		console.log("  scrolled:", scrolled);
+		check("the grid really scrolled", scrolled.scrollTop > 200, String(scrolled.scrollTop));
+		check("the frozen row is still on screen", scrolled.text === "Fruit", String(scrolled.text));
+		check(
+			"parked right under the column letters",
+			Math.abs(scrolled.gap) <= 2,
+			String(scrolled.gap),
+		);
+		check(
+			"the row below it slid underneath",
+			scrolled.underTop < scrolled.frozenTop,
+			JSON.stringify([scrolled.underTop, scrolled.frozenTop]),
+		);
+		check(
+			"a frozen bold-but-unfilled cell is opaque, not see-through",
+			scrolled.bg !== "rgba(0, 0, 0, 0)" && scrolled.bg !== "transparent",
+			scrolled.bg,
+		);
+		// The filter marker is a background image rather than a positioned ::before
+		// for exactly this reason: `position: relative` on the header cell would
+		// beat the vendor's `position: sticky` and the letter would scroll away.
+		check(
+			"the FILTERED column's letter is still pinned too",
+			scrolled.headPosition === "sticky" && Math.abs(scrolled.headTop - scrolled.wrapperTop) <= 2,
+			JSON.stringify([scrolled.headPosition, scrolled.headTop, scrolled.wrapperTop]),
+		);
+		await shot(page, "18-freeze-scrolled-light");
+		await page.evaluate(() => {
+			document.querySelector(".leovale-sheet-content .leovale-sheet-wrapper").scrollTop = 0;
+		});
+		await page.waitForTimeout(300);
+
+		step("1.3.0: clearing the filters puts every row back");
+		await clickCell(0, 1);
+		await page.click(".leovale-sheet-toolbar .leovale-sheet-tb-filter");
+		await page.waitForTimeout(300);
+		await page.click('.menu .menu-item:has(.menu-item-title:text-is("Clear all filters"))');
+		await page.waitForTimeout(500);
+		const unfiltered = await page.evaluate(() => {
+			const rows = [...document.querySelectorAll(".leovale-sheet-content .leovale-sheet-root tbody tr")];
+			return {
+				view: window.sheetView().sheetEngine.getView(),
+				hidden: rows.filter((r) => getComputedStyle(r).display === "none").length,
+			};
+		});
+		check("no filters left", unfiltered.view.filters === undefined, JSON.stringify(unfiltered.view));
+		check("no rows hidden", unfiltered.hidden === 0, String(unfiltered.hidden));
+
+		step("1.3.0: in-sheet search (Ctrl+F on the grid)");
+		await clickCell(0, 1);
+		await page.keyboard.press("Control+f");
+		await page.waitForTimeout(300);
+		check("the find strip opened", await page.locator(".leovale-sheet-find.is-open").isVisible());
+		await page.keyboard.type("an", { delay: 30 });
+		await page.waitForTimeout(400);
+		const found = await page.evaluate(() => ({
+			count: document.querySelector(".leovale-sheet-find-count")?.textContent,
+			hits: [...document.querySelectorAll(".leovale-sheet-content .leovale-sheet-root td.leovale-sheet-found")]
+				.map((td) => td.textContent),
+			current: document.querySelector(
+				".leovale-sheet-content .leovale-sheet-root td.leovale-sheet-found-current",
+			)?.textContent,
+		}));
+		console.log("  found:", found);
+		check("banana was found", found.hits.includes("banana"), JSON.stringify(found.hits));
+		check("the counter shows the position", /1 of \d+/.test(found.count ?? ""), String(found.count));
+		check("the first hit is the current one", found.current === found.hits[0], String(found.current));
+		await shot(page, "16-find-light");
+		await page.keyboard.press("Escape");
+		await page.waitForTimeout(300);
+		const findClosed = await page.evaluate(() => ({
+			open: !!document.querySelector(".leovale-sheet-find.is-open"),
+			hits: document.querySelectorAll(".leovale-sheet-content .leovale-sheet-root td.leovale-sheet-found").length,
+		}));
+		check("Escape closes the strip", !findClosed.open);
+		check("and drops every highlight", findClosed.hits === 0, String(findClosed.hits));
+
+		step("1.3.0: the keyboard fixes");
+		await clickCell(0, 1);
+		await page.keyboard.press("Control+End");
+		await page.waitForTimeout(250);
+		check("Ctrl+End goes to the corner of the used range",
+			JSON.stringify(await selectedCell(page)) === "[2,5]", JSON.stringify(await selectedCell(page)));
+		await page.keyboard.press("Control+Home");
+		await page.waitForTimeout(250);
+		check("Ctrl+Home goes to A1", JSON.stringify(await selectedCell(page)) === "[0,0]",
+			JSON.stringify(await selectedCell(page)));
+		await clickCell(0, 1);
+		await page.keyboard.press("End");
+		await page.waitForTimeout(250);
+		check("End goes to the last filled cell of the row, not to column Z",
+			JSON.stringify(await selectedCell(page)) === "[1,1]", JSON.stringify(await selectedCell(page)));
+		await page.keyboard.press("Home");
+		await page.waitForTimeout(250);
+		check("Home goes back to the start of the row",
+			JSON.stringify(await selectedCell(page)) === "[0,1]", JSON.stringify(await selectedCell(page)));
+		await clickCell(0, 0);
+		await page.keyboard.press("Control+ArrowDown");
+		await page.waitForTimeout(250);
+		check("Ctrl+ArrowDown runs to the end of the data block",
+			JSON.stringify(await selectedCell(page)) === "[0,3]", JSON.stringify(await selectedCell(page)));
+
+		// F2 opens the editor on the active cell
+		await clickCell(1, 1);
+		await page.keyboard.press("F2");
+		await page.waitForTimeout(300);
+		const editing = await page.evaluate(() => ({
+			editor: !!document.querySelector(".leovale-sheet-content .leovale-sheet-root td.editor"),
+			value: document.querySelector(".leovale-sheet-content .leovale-sheet-root td.editor input")?.value,
+		}));
+		console.log("  F2:", editing);
+		check("F2 opened the in-cell editor", editing.editor, JSON.stringify(editing));
+		check("with the cell's own value in it", editing.value === "10", String(editing.value));
+		await page.keyboard.press("Escape");
+		await page.waitForTimeout(200);
+
+		// Ctrl+D fills the row above down into the selection
+		await clickCell(0, 4); // A5, empty, under the fruit block
+		await page.keyboard.press("Control+d");
+		await page.waitForTimeout(400);
+		const filledDown = await page.evaluate(() => ({
+			a5: document.querySelector('.leovale-sheet-content .leovale-sheet-root td[data-x="0"][data-y="4"]')?.textContent,
+			style: window.sheetView().sheetEngine.getStyleAt("A5"),
+		}));
+		console.log("  Ctrl+D:", filledDown);
+		check("Ctrl+D copied the cell above", filledDown.a5 === "cherry", String(filledDown.a5));
+		check("with its formatting", filledDown.style.bg === "#ffe0e0", JSON.stringify(filledDown.style));
+
+		// Delete clears the selection without asking anything
+		await page.keyboard.press("Delete");
+		await page.waitForTimeout(400);
+		check("Delete cleared it again",
+			(await dataCell(0, 4)) === "", JSON.stringify(await dataCell(0, 4)));
+		check("no dialog was left open", (await page.locator(".modal").count()) === 0);
+
+		step("1.3.0: Markdown table round-trip through the clipboard");
+		// select A1:B2 with a drag, then copy through the command palette command
+		const mdA1 = await page.locator('.leovale-sheet-content .leovale-sheet-root td[data-x="0"][data-y="0"]').boundingBox();
+		const mdB2 = await page.locator('.leovale-sheet-content .leovale-sheet-root td[data-x="1"][data-y="1"]').boundingBox();
+		await page.mouse.move(mdA1.x + mdA1.width / 2, mdA1.y + mdA1.height / 2);
+		await page.mouse.down();
+		await page.mouse.move(mdB2.x + mdB2.width / 2, mdB2.y + mdB2.height / 2, { steps: 8 });
+		await page.mouse.up();
+		await page.waitForTimeout(250);
+		const copied = await page.evaluate(async (id) => {
+			window.app.commands.executeCommandById(`${id}:copy-markdown-table`);
+			await new Promise((r) => setTimeout(r, 600));
+			try {
+				return require("electron").clipboard.readText();
+			} catch {
+				return await navigator.clipboard.readText();
+			}
+		}, PLUGIN_ID);
+		console.log("  copied markdown:\n" + copied.split("\n").map((l) => "  | " + l).join("\n"));
+		check("the copy is a Markdown table with a separator row",
+			copied.split("\n").length === 3 && /^\|\s*---/.test(copied.split("\n")[1]), JSON.stringify(copied));
+		check("it holds the values, not the addresses",
+			copied.includes("| Fruit | Qty |") && copied.includes("| apple | 10 |"), JSON.stringify(copied));
+
+		// paste a table of our own into an empty corner of the grid
+		const PASTED = ["| a | b |", "| ---: | :---: |", "| 1 | x\\|y |"].join("\n");
+		await clickCell(0, 4); // A5
+		await page.evaluate(async (text) => {
+			try {
+				require("electron").clipboard.writeText(text);
+			} catch {
+				await navigator.clipboard.writeText(text);
+			}
+		}, PASTED);
+		await page.evaluate((id) => window.app.commands.executeCommandById(`${id}:paste-markdown-table`), PLUGIN_ID);
+		await page.waitForTimeout(900);
+		const pasted = await page.evaluate(() => {
+			const e = window.sheetView().sheetEngine;
+			const q = (x, y) =>
+				document.querySelector(
+					`.leovale-sheet-content .leovale-sheet-root td[data-x="${x}"][data-y="${y}"]`,
+				)?.textContent;
+			return { a5: q(0, 4), b5: q(1, 4), a6: q(0, 5), b6: q(1, 5), haA5: e.getStyleAt("A5").ha, haB5: e.getStyleAt("B5").ha };
+		});
+		console.log("  pasted:", pasted);
+		check("the header row of the pasted table landed on the anchor",
+			pasted.a5 === "a" && pasted.b5 === "b", JSON.stringify(pasted));
+		check("the body row landed under it", pasted.a6 === "1", JSON.stringify(pasted));
+		check("an escaped pipe came back as a pipe", pasted.b6 === "x|y", JSON.stringify(pasted.b6));
+		check("the alignment row was applied to the columns",
+			pasted.haA5 === "r" && pasted.haB5 === "c", JSON.stringify([pasted.haA5, pasted.haB5]));
+
+		step("1.3.0: column width dialog and double-click autofit");
+		await clickCell(0, 1);
+		await page.evaluate((id) => window.app.commands.executeCommandById(`${id}:column-width`), PLUGIN_ID);
+		await page.waitForTimeout(500);
+		check("the width dialog opened", (await page.locator(".modal.mod-dim, .modal").count()) >= 1);
+		check("it names the column it will resize",
+			(await page.locator(".leovale-sheet-width-columns").innerText()).includes("A"),
+			await page.locator(".leovale-sheet-width-columns").innerText());
+		const widthInput = page.locator(".modal input[type='number']");
+		await widthInput.fill("220");
+		await page.click('.modal button:text-is("Apply")');
+		await page.waitForTimeout(600);
+		const widthApplied = await page.evaluate(() => ({
+			modal: document.querySelectorAll(".modal").length,
+			width: Math.round(
+				document
+					.querySelector('.leovale-sheet-content .leovale-sheet-root thead td[data-x="0"]')
+					.getBoundingClientRect().width,
+			),
+		}));
+		console.log("  width:", widthApplied);
+		check("the dialog closed", widthApplied.modal === 0, String(widthApplied.modal));
+		check("the column is exactly as wide as asked", widthApplied.width === 220, String(widthApplied.width));
+
+		// double click on the right edge of the A header: fit to content
+		const header = await page.locator('.leovale-sheet-content .leovale-sheet-root thead td[data-x="0"]').boundingBox();
+		await page.mouse.dblclick(header.x + header.width - 3, header.y + header.height / 2);
+		await page.waitForTimeout(600);
+		const autofit = await page.evaluate(() =>
+			Math.round(
+				document
+					.querySelector('.leovale-sheet-content .leovale-sheet-root thead td[data-x="0"]')
+					.getBoundingClientRect().width,
+			),
+		);
+		console.log("  autofit width:", autofit);
+		check("double-clicking the header edge shrinks the column to its content",
+			autofit < 220 && autofit > 30, String(autofit));
+
+		await page.waitForTimeout(5000);
+		const dataFinal = fs.readFileSync(dataDisk, "utf8");
+		check("the autofitted width was persisted",
+			new RegExp(`"colWidths": \\{\\n\\s+"0": ${autofit}`).test(dataFinal),
+			dataFinal.split("\n").slice(0, 14).join("\n"));
+
+		step("1.3.0: the data sheet in the dark theme");
+		await setBaseTheme(page, "obsidian");
+		await page.waitForTimeout(700);
+		await shot(page, "17-data-dark");
+		await setBaseTheme(page, "moonstone");
+		await page.waitForTimeout(500);
+
 		step("embedded sheets in a markdown note");
 		const NOTE_PATH = "Embeds.md";
 		const NOTE = [
@@ -1825,7 +2384,7 @@ async function main() {
 		const lsheetDisk = fs.readFileSync(path.join(VAULT, "Untitled.lsheet"), "utf8");
 		check(
 			".lsheet on disk is our deterministic JSON",
-			lsheetDisk.startsWith('{\n  "format": "leovale-sheet",\n  "version": 2,'),
+			lsheetDisk.startsWith('{\n  "format": "leovale-sheet",\n  "version": 3,'),
 			lsheetDisk.slice(0, 40),
 		);
 

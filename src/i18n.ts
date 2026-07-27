@@ -113,6 +113,52 @@ const EN = {
 	ownerUnknown: "another plugin",
 	ownerNamed: 'the "{name}" plugin (view "{type}")',
 	ownerViewOnly: 'the plugin whose view is "{type}"',
+
+	/* 1.3.0: sort, filters, frozen panes, find, column width */
+	tbSort: "Sort",
+	tbFilter: "Filter",
+	tbFreeze: "Freeze panes",
+	tbFind: "Find",
+	tbColWidth: "Column width",
+	sortAsc: "Sort A → Z",
+	sortDesc: "Sort Z → A",
+	sortClear: "Clear sort",
+	sortMerged: "Spreadsheet Notes: a sheet with merged cells cannot be sorted.",
+	sortFormulasMoved: "Rows holding formulas were moved. Formula references were not adjusted.",
+	sortNeedsCell: "Select a cell in the column you want to sort.",
+	filterShowAll: "Show all",
+	filterClearAll: "Clear all filters",
+	filterTruncated: "Showing the first {count} values",
+	filterNoValues: "This column is empty, there is nothing to filter.",
+	filterHiddenRows: "{count} rows hidden by filters",
+	freezeRows: "Freeze rows above the selection",
+	freezeCols: "Freeze columns left of the selection",
+	freezeBoth: "Freeze rows and columns",
+	freezeNone: "Unfreeze",
+
+	/* in-sheet search */
+	findPlaceholder: "Find in sheet",
+	findPrev: "Previous match",
+	findNext: "Next match",
+	findClose: "Close",
+	findCount: "{index} of {total}",
+	findNone: "No matches",
+
+	/* column width dialog */
+	colWidthTitle: "Column width",
+	colWidthLabel: "Width in pixels",
+	colWidthColumns: "Applies to: {list}",
+	colWidthApply: "Apply",
+	colWidthAutofit: "Fit to content",
+	colWidthCancel: "Cancel",
+
+	/* markdown interop + notices */
+	mdCopied: "Copied {rows}×{cols} cells as a Markdown table",
+	mdNoSelection: "Select the cells to copy first.",
+	mdPasted: "Pasted a Markdown table, {rows}×{cols}",
+	mdNoTable: "The clipboard does not hold a Markdown table.",
+	clipboardFailed: "Could not reach the clipboard ({message})",
+	sheetReadOnly: "This spreadsheet is open read-only.",
 } as const;
 
 export type StringKey = keyof typeof EN;
@@ -185,6 +231,52 @@ const RU: Record<StringKey, string> = {
 	ownerUnknown: "другим плагином",
 	ownerNamed: 'плагином «{name}» (view "{type}")',
 	ownerViewOnly: 'плагином, чей view называется "{type}"',
+
+	/* 1.3.0: sort, filters, frozen panes, find, column width */
+	tbSort: "Сортировка",
+	tbFilter: "Фильтр",
+	tbFreeze: "Закрепить области",
+	tbFind: "Поиск",
+	tbColWidth: "Ширина столбца",
+	sortAsc: "Сортировать А → Я",
+	sortDesc: "Сортировать Я → А",
+	sortClear: "Сбросить сортировку",
+	sortMerged: "Spreadsheet Notes: лист с объединёнными ячейками отсортировать нельзя.",
+	sortFormulasMoved: "Строки с формулами были перемещены. Ссылки в формулах не пересчитаны.",
+	sortNeedsCell: "Выберите ячейку в столбце, который надо отсортировать.",
+	filterShowAll: "Показать все",
+	filterClearAll: "Сбросить все фильтры",
+	filterTruncated: "Показаны первые {count} значений",
+	filterNoValues: "Столбец пуст, фильтровать нечего.",
+	filterHiddenRows: "Фильтры скрывают строк: {count}",
+	freezeRows: "Закрепить строки над выделением",
+	freezeCols: "Закрепить столбцы слева от выделения",
+	freezeBoth: "Закрепить строки и столбцы",
+	freezeNone: "Снять закрепление",
+
+	/* in-sheet search */
+	findPlaceholder: "Поиск по таблице",
+	findPrev: "Предыдущее совпадение",
+	findNext: "Следующее совпадение",
+	findClose: "Закрыть",
+	findCount: "{index} из {total}",
+	findNone: "Совпадений нет",
+
+	/* column width dialog */
+	colWidthTitle: "Ширина столбца",
+	colWidthLabel: "Ширина в пикселях",
+	colWidthColumns: "Применить к: {list}",
+	colWidthApply: "Применить",
+	colWidthAutofit: "По содержимому",
+	colWidthCancel: "Отмена",
+
+	/* markdown interop + notices */
+	mdCopied: "Скопировано ячеек {rows}×{cols} как таблица Markdown",
+	mdNoSelection: "Сначала выделите ячейки.",
+	mdPasted: "Вставлена таблица Markdown, {rows}×{cols}",
+	mdNoTable: "В буфере обмена нет таблицы Markdown.",
+	clipboardFailed: "Не удалось обратиться к буферу обмена ({message})",
+	sheetReadOnly: "Таблица открыта только для чтения.",
 };
 
 const ZH: Record<StringKey, string> = {
@@ -254,6 +346,52 @@ const ZH: Record<StringKey, string> = {
 	ownerUnknown: "其他插件",
 	ownerNamed: "插件「{name}」（view {type}）",
 	ownerViewOnly: "view 名为 {type} 的插件",
+
+	/* 1.3.0: sort, filters, frozen panes, find, column width */
+	tbSort: "排序",
+	tbFilter: "筛选",
+	tbFreeze: "冻结窗格",
+	tbFind: "查找",
+	tbColWidth: "列宽",
+	sortAsc: "升序排序 A → Z",
+	sortDesc: "降序排序 Z → A",
+	sortClear: "清除排序",
+	sortMerged: "Spreadsheet Notes：含合并单元格的工作表无法排序。",
+	sortFormulasMoved: "含公式的行已移动，公式引用未随之调整。",
+	sortNeedsCell: "请先选择要排序的列中的单元格。",
+	filterShowAll: "全部显示",
+	filterClearAll: "清除所有筛选",
+	filterTruncated: "仅显示前 {count} 个值",
+	filterNoValues: "此列为空，没有可筛选的值。",
+	filterHiddenRows: "筛选隐藏了 {count} 行",
+	freezeRows: "冻结所选上方的行",
+	freezeCols: "冻结所选左侧的列",
+	freezeBoth: "冻结行和列",
+	freezeNone: "取消冻结",
+
+	/* in-sheet search */
+	findPlaceholder: "在表格中查找",
+	findPrev: "上一个匹配",
+	findNext: "下一个匹配",
+	findClose: "关闭",
+	findCount: "第 {index} / {total} 个",
+	findNone: "无匹配项",
+
+	/* column width dialog */
+	colWidthTitle: "列宽",
+	colWidthLabel: "宽度（像素）",
+	colWidthColumns: "应用于：{list}",
+	colWidthApply: "应用",
+	colWidthAutofit: "适应内容",
+	colWidthCancel: "取消",
+
+	/* markdown interop + notices */
+	mdCopied: "已复制 {rows}×{cols} 个单元格为 Markdown 表格",
+	mdNoSelection: "请先选择要复制的单元格。",
+	mdPasted: "已粘贴 Markdown 表格，{rows}×{cols}",
+	mdNoTable: "剪贴板中没有 Markdown 表格。",
+	clipboardFailed: "无法访问剪贴板（{message}）",
+	sheetReadOnly: "此表格以只读方式打开。",
 };
 
 const ZH_TW: Record<StringKey, string> = {
@@ -323,6 +461,52 @@ const ZH_TW: Record<StringKey, string> = {
 	ownerUnknown: "其他外掛",
 	ownerNamed: "外掛「{name}」（view {type}）",
 	ownerViewOnly: "view 名稱為 {type} 的外掛",
+
+	/* 1.3.0: sort, filters, frozen panes, find, column width */
+	tbSort: "排序",
+	tbFilter: "篩選",
+	tbFreeze: "凍結窗格",
+	tbFind: "尋找",
+	tbColWidth: "欄寬",
+	sortAsc: "遞增排序 A → Z",
+	sortDesc: "遞減排序 Z → A",
+	sortClear: "清除排序",
+	sortMerged: "Spreadsheet Notes：含合併儲存格的工作表無法排序。",
+	sortFormulasMoved: "含公式的列已移動，公式參照未隨之調整。",
+	sortNeedsCell: "請先選取要排序的欄中的儲存格。",
+	filterShowAll: "全部顯示",
+	filterClearAll: "清除所有篩選",
+	filterTruncated: "僅顯示前 {count} 個值",
+	filterNoValues: "此欄為空，沒有可篩選的值。",
+	filterHiddenRows: "篩選隱藏了 {count} 列",
+	freezeRows: "凍結所選上方的列",
+	freezeCols: "凍結所選左側的欄",
+	freezeBoth: "凍結列與欄",
+	freezeNone: "取消凍結",
+
+	/* in-sheet search */
+	findPlaceholder: "在表格中尋找",
+	findPrev: "上一個相符項",
+	findNext: "下一個相符項",
+	findClose: "關閉",
+	findCount: "第 {index} / {total} 個",
+	findNone: "沒有相符項",
+
+	/* column width dialog */
+	colWidthTitle: "欄寬",
+	colWidthLabel: "寬度（像素）",
+	colWidthColumns: "套用於：{list}",
+	colWidthApply: "套用",
+	colWidthAutofit: "符合內容",
+	colWidthCancel: "取消",
+
+	/* markdown interop + notices */
+	mdCopied: "已複製 {rows}×{cols} 個儲存格為 Markdown 表格",
+	mdNoSelection: "請先選取要複製的儲存格。",
+	mdPasted: "已貼上 Markdown 表格，{rows}×{cols}",
+	mdNoTable: "剪貼簿中沒有 Markdown 表格。",
+	clipboardFailed: "無法存取剪貼簿（{message}）",
+	sheetReadOnly: "此表格以唯讀方式開啟。",
 };
 
 const DE: Record<StringKey, string> = {
@@ -394,6 +578,52 @@ const DE: Record<StringKey, string> = {
 	ownerUnknown: "einem anderen Plugin",
 	ownerNamed: "dem Plugin „{name}“ (view „{type}“)",
 	ownerViewOnly: "dem Plugin, dessen view „{type}“ heißt",
+
+	/* 1.3.0: sort, filters, frozen panes, find, column width */
+	tbSort: "Sortieren",
+	tbFilter: "Filter",
+	tbFreeze: "Bereiche fixieren",
+	tbFind: "Suchen",
+	tbColWidth: "Spaltenbreite",
+	sortAsc: "Sortieren A → Z",
+	sortDesc: "Sortieren Z → A",
+	sortClear: "Sortierung aufheben",
+	sortMerged: "Spreadsheet Notes: Ein Blatt mit verbundenen Zellen lässt sich nicht sortieren.",
+	sortFormulasMoved: "Zeilen mit Formeln wurden verschoben. Die Bezüge wurden nicht angepasst.",
+	sortNeedsCell: "Wähle eine Zelle in der Spalte, die sortiert werden soll.",
+	filterShowAll: "Alle anzeigen",
+	filterClearAll: "Alle Filter entfernen",
+	filterTruncated: "Nur die ersten {count} Werte",
+	filterNoValues: "Diese Spalte ist leer, es gibt nichts zu filtern.",
+	filterHiddenRows: "{count} Zeilen durch Filter ausgeblendet",
+	freezeRows: "Zeilen oberhalb der Auswahl fixieren",
+	freezeCols: "Spalten links der Auswahl fixieren",
+	freezeBoth: "Zeilen und Spalten fixieren",
+	freezeNone: "Fixierung aufheben",
+
+	/* in-sheet search */
+	findPlaceholder: "Im Blatt suchen",
+	findPrev: "Vorheriger Treffer",
+	findNext: "Nächster Treffer",
+	findClose: "Schließen",
+	findCount: "{index} von {total}",
+	findNone: "Keine Treffer",
+
+	/* column width dialog */
+	colWidthTitle: "Spaltenbreite",
+	colWidthLabel: "Breite in Pixeln",
+	colWidthColumns: "Gilt für: {list}",
+	colWidthApply: "Übernehmen",
+	colWidthAutofit: "An Inhalt anpassen",
+	colWidthCancel: "Abbrechen",
+
+	/* markdown interop + notices */
+	mdCopied: "{rows}×{cols} Zellen als Markdown-Tabelle kopiert",
+	mdNoSelection: "Zuerst die Zellen auswählen.",
+	mdPasted: "Markdown-Tabelle eingefügt, {rows}×{cols}",
+	mdNoTable: "In der Zwischenablage ist keine Markdown-Tabelle.",
+	clipboardFailed: "Kein Zugriff auf die Zwischenablage ({message})",
+	sheetReadOnly: "Diese Tabelle ist schreibgeschützt geöffnet.",
 };
 
 const FR: Record<StringKey, string> = {
@@ -465,6 +695,52 @@ const FR: Record<StringKey, string> = {
 	ownerUnknown: "un autre plugin",
 	ownerNamed: "le plugin « {name} » (view « {type} »)",
 	ownerViewOnly: "le plugin dont la view s'appelle « {type} »",
+
+	/* 1.3.0: sort, filters, frozen panes, find, column width */
+	tbSort: "Trier",
+	tbFilter: "Filtrer",
+	tbFreeze: "Figer les volets",
+	tbFind: "Rechercher",
+	tbColWidth: "Largeur de colonne",
+	sortAsc: "Trier A → Z",
+	sortDesc: "Trier Z → A",
+	sortClear: "Annuler le tri",
+	sortMerged: "Spreadsheet Notes : une feuille avec des cellules fusionnées ne peut pas être triée.",
+	sortFormulasMoved: "Des lignes contenant des formules ont été déplacées. Les références n'ont pas été ajustées.",
+	sortNeedsCell: "Sélectionnez une cellule dans la colonne à trier.",
+	filterShowAll: "Tout afficher",
+	filterClearAll: "Effacer tous les filtres",
+	filterTruncated: "Seules les {count} premières valeurs",
+	filterNoValues: "Cette colonne est vide, il n'y a rien à filtrer.",
+	filterHiddenRows: "{count} lignes masquées par les filtres",
+	freezeRows: "Figer les lignes au-dessus de la sélection",
+	freezeCols: "Figer les colonnes à gauche de la sélection",
+	freezeBoth: "Figer les lignes et les colonnes",
+	freezeNone: "Libérer les volets",
+
+	/* in-sheet search */
+	findPlaceholder: "Rechercher dans la feuille",
+	findPrev: "Résultat précédent",
+	findNext: "Résultat suivant",
+	findClose: "Fermer",
+	findCount: "{index} sur {total}",
+	findNone: "Aucun résultat",
+
+	/* column width dialog */
+	colWidthTitle: "Largeur de colonne",
+	colWidthLabel: "Largeur en pixels",
+	colWidthColumns: "S'applique à : {list}",
+	colWidthApply: "Appliquer",
+	colWidthAutofit: "Ajuster au contenu",
+	colWidthCancel: "Annuler",
+
+	/* markdown interop + notices */
+	mdCopied: "{rows}×{cols} cellules copiées en tableau Markdown",
+	mdNoSelection: "Sélectionnez d'abord les cellules à copier.",
+	mdPasted: "Tableau Markdown collé, {rows}×{cols}",
+	mdNoTable: "Le presse-papiers ne contient pas de tableau Markdown.",
+	clipboardFailed: "Accès au presse-papiers impossible ({message})",
+	sheetReadOnly: "Cette feuille est ouverte en lecture seule.",
 };
 
 const ES: Record<StringKey, string> = {
@@ -536,6 +812,52 @@ const ES: Record<StringKey, string> = {
 	ownerUnknown: "otro plugin",
 	ownerNamed: "el plugin «{name}» (view «{type}»)",
 	ownerViewOnly: "el plugin cuya view se llama «{type}»",
+
+	/* 1.3.0: sort, filters, frozen panes, find, column width */
+	tbSort: "Ordenar",
+	tbFilter: "Filtrar",
+	tbFreeze: "Inmovilizar paneles",
+	tbFind: "Buscar",
+	tbColWidth: "Ancho de columna",
+	sortAsc: "Ordenar A → Z",
+	sortDesc: "Ordenar Z → A",
+	sortClear: "Quitar el orden",
+	sortMerged: "Spreadsheet Notes: una hoja con celdas combinadas no se puede ordenar.",
+	sortFormulasMoved: "Se han movido filas con fórmulas. Las referencias no se han ajustado.",
+	sortNeedsCell: "Selecciona una celda de la columna que quieras ordenar.",
+	filterShowAll: "Mostrar todo",
+	filterClearAll: "Quitar todos los filtros",
+	filterTruncated: "Solo los primeros {count} valores",
+	filterNoValues: "Esta columna está vacía, no hay nada que filtrar.",
+	filterHiddenRows: "{count} filas ocultas por los filtros",
+	freezeRows: "Inmovilizar las filas por encima de la selección",
+	freezeCols: "Inmovilizar las columnas a la izquierda de la selección",
+	freezeBoth: "Inmovilizar filas y columnas",
+	freezeNone: "Movilizar paneles",
+
+	/* in-sheet search */
+	findPlaceholder: "Buscar en la hoja",
+	findPrev: "Coincidencia anterior",
+	findNext: "Coincidencia siguiente",
+	findClose: "Cerrar",
+	findCount: "{index} de {total}",
+	findNone: "Sin coincidencias",
+
+	/* column width dialog */
+	colWidthTitle: "Ancho de columna",
+	colWidthLabel: "Ancho en píxeles",
+	colWidthColumns: "Se aplica a: {list}",
+	colWidthApply: "Aplicar",
+	colWidthAutofit: "Ajustar al contenido",
+	colWidthCancel: "Cancelar",
+
+	/* markdown interop + notices */
+	mdCopied: "{rows}×{cols} celdas copiadas como tabla Markdown",
+	mdNoSelection: "Selecciona primero las celdas que quieras copiar.",
+	mdPasted: "Tabla Markdown pegada, {rows}×{cols}",
+	mdNoTable: "El portapapeles no contiene una tabla Markdown.",
+	clipboardFailed: "No se pudo acceder al portapapeles ({message})",
+	sheetReadOnly: "Esta hoja está abierta en modo de solo lectura.",
 };
 
 const JA: Record<StringKey, string> = {
@@ -607,6 +929,52 @@ const JA: Record<StringKey, string> = {
 	ownerUnknown: "他のプラグイン",
 	ownerNamed: "プラグイン「{name}」（view「{type}」）",
 	ownerViewOnly: "view が「{type}」のプラグイン",
+
+	/* 1.3.0: sort, filters, frozen panes, find, column width */
+	tbSort: "並べ替え",
+	tbFilter: "フィルタ",
+	tbFreeze: "ウィンドウ枠の固定",
+	tbFind: "検索",
+	tbColWidth: "列の幅",
+	sortAsc: "昇順に並べ替え A → Z",
+	sortDesc: "降順に並べ替え Z → A",
+	sortClear: "並べ替えを解除",
+	sortMerged: "Spreadsheet Notes: 結合セルのあるシートは並べ替えできません。",
+	sortFormulasMoved: "数式のある行を移動しました。数式の参照は調整されていません。",
+	sortNeedsCell: "並べ替える列のセルを選択してください。",
+	filterShowAll: "すべて表示",
+	filterClearAll: "すべてのフィルタを解除",
+	filterTruncated: "先頭の {count} 件のみ表示",
+	filterNoValues: "この列は空で、フィルタする値がありません。",
+	filterHiddenRows: "フィルタで {count} 行を非表示",
+	freezeRows: "選択範囲より上の行を固定",
+	freezeCols: "選択範囲より左の列を固定",
+	freezeBoth: "行と列を固定",
+	freezeNone: "固定を解除",
+
+	/* in-sheet search */
+	findPlaceholder: "シート内を検索",
+	findPrev: "前の一致",
+	findNext: "次の一致",
+	findClose: "閉じる",
+	findCount: "{index} / {total}",
+	findNone: "一致なし",
+
+	/* column width dialog */
+	colWidthTitle: "列の幅",
+	colWidthLabel: "幅（ピクセル）",
+	colWidthColumns: "適用先: {list}",
+	colWidthApply: "適用",
+	colWidthAutofit: "内容に合わせる",
+	colWidthCancel: "キャンセル",
+
+	/* markdown interop + notices */
+	mdCopied: "{rows}×{cols} セルを Markdown の表としてコピーしました",
+	mdNoSelection: "先にコピーするセルを選択してください。",
+	mdPasted: "Markdown の表を貼り付けました（{rows}×{cols}）",
+	mdNoTable: "クリップボードに Markdown の表がありません。",
+	clipboardFailed: "クリップボードにアクセスできません（{message}）",
+	sheetReadOnly: "このシートは読み取り専用で開いています。",
 };
 
 const KO: Record<StringKey, string> = {
@@ -676,6 +1044,52 @@ const KO: Record<StringKey, string> = {
 	ownerUnknown: "다른 플러그인",
 	ownerNamed: "플러그인 '{name}'(view '{type}')",
 	ownerViewOnly: "view 이름이 '{type}'인 플러그인",
+
+	/* 1.3.0: sort, filters, frozen panes, find, column width */
+	tbSort: "정렬",
+	tbFilter: "필터",
+	tbFreeze: "틀 고정",
+	tbFind: "찾기",
+	tbColWidth: "열 너비",
+	sortAsc: "오름차순 정렬 A → Z",
+	sortDesc: "내림차순 정렬 Z → A",
+	sortClear: "정렬 해제",
+	sortMerged: "Spreadsheet Notes: 병합된 셀이 있는 시트는 정렬할 수 없습니다.",
+	sortFormulasMoved: "수식이 있는 행이 이동했습니다. 수식 참조는 조정되지 않았습니다.",
+	sortNeedsCell: "정렬할 열의 셀을 선택하세요.",
+	filterShowAll: "모두 표시",
+	filterClearAll: "모든 필터 해제",
+	filterTruncated: "처음 {count}개 값만 표시",
+	filterNoValues: "이 열은 비어 있어 필터할 값이 없습니다.",
+	filterHiddenRows: "필터로 {count}개 행 숨김",
+	freezeRows: "선택 위쪽 행 고정",
+	freezeCols: "선택 왼쪽 열 고정",
+	freezeBoth: "행과 열 고정",
+	freezeNone: "고정 해제",
+
+	/* in-sheet search */
+	findPlaceholder: "시트에서 찾기",
+	findPrev: "이전 일치",
+	findNext: "다음 일치",
+	findClose: "닫기",
+	findCount: "{index} / {total}",
+	findNone: "일치 항목 없음",
+
+	/* column width dialog */
+	colWidthTitle: "열 너비",
+	colWidthLabel: "너비(픽셀)",
+	colWidthColumns: "적용 대상: {list}",
+	colWidthApply: "적용",
+	colWidthAutofit: "내용에 맞추기",
+	colWidthCancel: "취소",
+
+	/* markdown interop + notices */
+	mdCopied: "{rows}×{cols} 셀을 Markdown 표로 복사했습니다",
+	mdNoSelection: "복사할 셀을 먼저 선택하세요.",
+	mdPasted: "Markdown 표를 붙여넣었습니다({rows}×{cols})",
+	mdNoTable: "클립보드에 Markdown 표가 없습니다.",
+	clipboardFailed: "클립보드에 접근할 수 없습니다({message})",
+	sheetReadOnly: "이 시트는 읽기 전용으로 열렸습니다.",
 };
 
 const PT_BR: Record<StringKey, string> = {
@@ -747,6 +1161,52 @@ const PT_BR: Record<StringKey, string> = {
 	ownerUnknown: "outro plugin",
 	ownerNamed: "o plugin «{name}» (view «{type}»)",
 	ownerViewOnly: "o plugin cuja view se chama «{type}»",
+
+	/* 1.3.0: sort, filters, frozen panes, find, column width */
+	tbSort: "Classificar",
+	tbFilter: "Filtrar",
+	tbFreeze: "Congelar painéis",
+	tbFind: "Localizar",
+	tbColWidth: "Largura da coluna",
+	sortAsc: "Classificar A → Z",
+	sortDesc: "Classificar Z → A",
+	sortClear: "Remover a classificação",
+	sortMerged: "Spreadsheet Notes: uma planilha com células mescladas não pode ser classificada.",
+	sortFormulasMoved: "Linhas com fórmulas foram movidas. As referências não foram ajustadas.",
+	sortNeedsCell: "Selecione uma célula da coluna que deseja classificar.",
+	filterShowAll: "Mostrar tudo",
+	filterClearAll: "Limpar todos os filtros",
+	filterTruncated: "Apenas os primeiros {count} valores",
+	filterNoValues: "Esta coluna está vazia, não há o que filtrar.",
+	filterHiddenRows: "{count} linhas ocultas pelos filtros",
+	freezeRows: "Congelar as linhas acima da seleção",
+	freezeCols: "Congelar as colunas à esquerda da seleção",
+	freezeBoth: "Congelar linhas e colunas",
+	freezeNone: "Descongelar",
+
+	/* in-sheet search */
+	findPlaceholder: "Localizar na planilha",
+	findPrev: "Ocorrência anterior",
+	findNext: "Próxima ocorrência",
+	findClose: "Fechar",
+	findCount: "{index} de {total}",
+	findNone: "Nenhuma ocorrência",
+
+	/* column width dialog */
+	colWidthTitle: "Largura da coluna",
+	colWidthLabel: "Largura em pixels",
+	colWidthColumns: "Aplica-se a: {list}",
+	colWidthApply: "Aplicar",
+	colWidthAutofit: "Ajustar ao conteúdo",
+	colWidthCancel: "Cancelar",
+
+	/* markdown interop + notices */
+	mdCopied: "{rows}×{cols} células copiadas como tabela Markdown",
+	mdNoSelection: "Selecione primeiro as células a copiar.",
+	mdPasted: "Tabela Markdown colada, {rows}×{cols}",
+	mdNoTable: "A área de transferência não contém uma tabela Markdown.",
+	clipboardFailed: "Não foi possível acessar a área de transferência ({message})",
+	sheetReadOnly: "Esta planilha está aberta somente para leitura.",
 };
 
 const IT: Record<StringKey, string> = {
@@ -818,6 +1278,52 @@ const IT: Record<StringKey, string> = {
 	ownerUnknown: "un altro plugin",
 	ownerNamed: "il plugin «{name}» (view «{type}»)",
 	ownerViewOnly: "il plugin la cui view si chiama «{type}»",
+
+	/* 1.3.0: sort, filters, frozen panes, find, column width */
+	tbSort: "Ordina",
+	tbFilter: "Filtra",
+	tbFreeze: "Blocca riquadri",
+	tbFind: "Trova",
+	tbColWidth: "Larghezza colonna",
+	sortAsc: "Ordina A → Z",
+	sortDesc: "Ordina Z → A",
+	sortClear: "Rimuovi l'ordinamento",
+	sortMerged: "Spreadsheet Notes: un foglio con celle unite non può essere ordinato.",
+	sortFormulasMoved: "Sono state spostate righe con formule. I riferimenti non sono stati adattati.",
+	sortNeedsCell: "Seleziona una cella nella colonna da ordinare.",
+	filterShowAll: "Mostra tutto",
+	filterClearAll: "Rimuovi tutti i filtri",
+	filterTruncated: "Solo i primi {count} valori",
+	filterNoValues: "Questa colonna è vuota, non c'è nulla da filtrare.",
+	filterHiddenRows: "{count} righe nascoste dai filtri",
+	freezeRows: "Blocca le righe sopra la selezione",
+	freezeCols: "Blocca le colonne a sinistra della selezione",
+	freezeBoth: "Blocca righe e colonne",
+	freezeNone: "Sblocca i riquadri",
+
+	/* in-sheet search */
+	findPlaceholder: "Cerca nel foglio",
+	findPrev: "Risultato precedente",
+	findNext: "Risultato successivo",
+	findClose: "Chiudi",
+	findCount: "{index} di {total}",
+	findNone: "Nessun risultato",
+
+	/* column width dialog */
+	colWidthTitle: "Larghezza colonna",
+	colWidthLabel: "Larghezza in pixel",
+	colWidthColumns: "Si applica a: {list}",
+	colWidthApply: "Applica",
+	colWidthAutofit: "Adatta al contenuto",
+	colWidthCancel: "Annulla",
+
+	/* markdown interop + notices */
+	mdCopied: "{rows}×{cols} celle copiate come tabella Markdown",
+	mdNoSelection: "Seleziona prima le celle da copiare.",
+	mdPasted: "Tabella Markdown incollata, {rows}×{cols}",
+	mdNoTable: "Negli appunti non c'è una tabella Markdown.",
+	clipboardFailed: "Impossibile accedere agli appunti ({message})",
+	sheetReadOnly: "Questo foglio è aperto in sola lettura.",
 };
 
 const PL: Record<StringKey, string> = {
@@ -889,6 +1395,52 @@ const PL: Record<StringKey, string> = {
 	ownerUnknown: "inną wtyczkę",
 	ownerNamed: "wtyczkę „{name}” (view „{type}”)",
 	ownerViewOnly: "wtyczkę, której view nazywa się „{type}”",
+
+	/* 1.3.0: sort, filters, frozen panes, find, column width */
+	tbSort: "Sortuj",
+	tbFilter: "Filtruj",
+	tbFreeze: "Zablokuj okienka",
+	tbFind: "Znajdź",
+	tbColWidth: "Szerokość kolumny",
+	sortAsc: "Sortuj A → Z",
+	sortDesc: "Sortuj Z → A",
+	sortClear: "Usuń sortowanie",
+	sortMerged: "Spreadsheet Notes: arkusza ze scalonymi komórkami nie można posortować.",
+	sortFormulasMoved: "Przeniesiono wiersze z formułami. Odwołania w formułach nie zostały dostosowane.",
+	sortNeedsCell: "Zaznacz komórkę w kolumnie, którą chcesz posortować.",
+	filterShowAll: "Pokaż wszystko",
+	filterClearAll: "Wyczyść wszystkie filtry",
+	filterTruncated: "Tylko pierwsze {count} wartości",
+	filterNoValues: "Ta kolumna jest pusta, nie ma czego filtrować.",
+	filterHiddenRows: "Filtry ukrywają wiersze: {count}",
+	freezeRows: "Zablokuj wiersze powyżej zaznaczenia",
+	freezeCols: "Zablokuj kolumny na lewo od zaznaczenia",
+	freezeBoth: "Zablokuj wiersze i kolumny",
+	freezeNone: "Odblokuj okienka",
+
+	/* in-sheet search */
+	findPlaceholder: "Znajdź w arkuszu",
+	findPrev: "Poprzednie dopasowanie",
+	findNext: "Następne dopasowanie",
+	findClose: "Zamknij",
+	findCount: "{index} z {total}",
+	findNone: "Brak dopasowań",
+
+	/* column width dialog */
+	colWidthTitle: "Szerokość kolumny",
+	colWidthLabel: "Szerokość w pikselach",
+	colWidthColumns: "Dotyczy: {list}",
+	colWidthApply: "Zastosuj",
+	colWidthAutofit: "Dopasuj do zawartości",
+	colWidthCancel: "Anuluj",
+
+	/* markdown interop + notices */
+	mdCopied: "Skopiowano komórki {rows}×{cols} jako tabelę Markdown",
+	mdNoSelection: "Najpierw zaznacz komórki do skopiowania.",
+	mdPasted: "Wklejono tabelę Markdown, {rows}×{cols}",
+	mdNoTable: "W schowku nie ma tabeli Markdown.",
+	clipboardFailed: "Brak dostępu do schowka ({message})",
+	sheetReadOnly: "Ten arkusz jest otwarty tylko do odczytu.",
 };
 
 export const TABLES: Record<Lang, Record<StringKey, string>> = {
