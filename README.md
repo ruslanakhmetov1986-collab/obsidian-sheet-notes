@@ -59,6 +59,8 @@ use it. The differences below are the reasons this plugin exists.
 
 ![Tablet layout: 44 px controls, frozen row numbers](tests/shots/08-mobile-light.png)
 
+![The context menu on a tablet: translated, 44 px rows, no keyboard hints](tests/shots/23-context-menu-mobile.png)
+
 ## Requirements
 
 Obsidian 1.7.2 or newer (the plugin relies on deferred views).
@@ -68,8 +70,10 @@ by hand on an Android tablet and held up, including formulas and the fill
 palette. The row-number gutter stays frozen while you scroll sideways, toolbar
 buttons and palette swatches are 44 px on touch devices, the last row is not
 covered by the Android navigation bar, and the formula bar makes long formulas
-editable. Some touch interactions are still rough, see Limitations. Phones are
-untested.
+editable. Scrolling with a finger no longer moves the selection, the sheet stays
+where you scrolled it, the context menu is translated with 44 px rows, and
+Obsidian's drawer still opens from the left edge of the screen - see
+"Touch: what a finger does". Phones are untested.
 
 The interface follows Obsidian's own interface language (Settings, About,
 Language) and ships twelve of them: English, Russian, Simplified Chinese,
@@ -154,6 +158,17 @@ shows `7`. Type into it and press `Enter` to commit; `Escape` reverts. It is the
 primary way to edit formulas on a tablet, where the in-cell editor is only as
 wide as the cell.
 
+`Enter` also **moves down one cell**, exactly like `Enter` typed into a cell, so
+a column of values can be entered from the bar without touching the grid between
+them. Who keeps the focus afterwards depends on the device, and deliberately so:
+
+- **Desktop**: the focus goes back to the grid, so the arrow keys work again
+  immediately. The bar is a convenience there; the grid is where you type.
+- **Touch**: the field keeps the focus and the on-screen keyboard stays up. On a
+  tablet this bar IS the editor, and dismissing the keyboard after every value
+  would mean tap the next cell, tap the bar, type, for every single number.
+  `Escape`, or a tap on the grid, puts the keyboard away.
+
 ### Working with the grid
 
 | Action | How |
@@ -163,7 +178,8 @@ wide as the cell.
 | Enter a formula | Start with `=`, e.g. `=SUM(B2:B3)`, `=B2*2`, `=IF(B4>5;"yes";"no")` |
 | Resize a column | Drag the right edge of the `A`, `B`, … header |
 | Resize a row | Drag the bottom edge of the row number |
-| Insert / delete rows and columns | Right-click a header |
+| Insert / delete rows and columns | Right-click anywhere in the grid (long press on touch) |
+| Context menu | Right click, or a long press on a tablet: edit, copy, paste, insert and delete rows and columns, merge |
 | Copy, paste, undo, redo | `Ctrl+C` / `Ctrl+V`, `Ctrl+Z` / `Ctrl+Y` |
 | Edit the active cell | `F2` |
 | Fill down | `Ctrl+D` (the top row of the selection over the rest, or the cell above into a single cell) |
@@ -193,6 +209,50 @@ Formulas are evaluated by the bundled Jspreadsheet CE engine: `SUM`, `AVERAGE`,
 `IF`, `VLOOKUP`, `SUMIF`, `IFERROR`, `SUMPRODUCT`, `TEXTJOIN` and a few hundred
 more. Computed results are never written to the file. Only the formula source
 is stored, and everything is recalculated on open.
+
+### Touch: what a finger does
+
+A tablet has no right button, no hover and no keyboard, and the grid engine's
+own idea of a touch was "select whatever the finger landed on, immediately".
+That is wrong the moment the finger was going to scroll. The rules here:
+
+| Gesture | What happens |
+|---|---|
+| Tap | Selects the cell. The decision is taken when the finger LIFTS |
+| Drag | Scrolls the sheet. The selection and the formula bar do not change |
+| Long press (0.5 s) | Opens the context menu on that cell |
+| Swipe from the left edge | Opens Obsidian's sidebar, under the conditions below |
+
+**A scroll never takes the selection.** Nothing is selected while the finger is
+down. On lift, the touch counts as a tap only if it stayed inside 10 px and
+lasted under 300 ms; anything longer or further was a scroll, and a scroll
+changes nothing. So the cell you were working on, and the formula it put in the
+formula bar, survive a pan across the sheet.
+
+**A scroll stays where you left it.** For 0.7 s after your gesture the plugin
+will not scroll the grid on its own. Without that rule a pan to column M ended
+with the sheet back at column A, because something asked, a moment later, for
+the selected cell to be scrolled into view.
+
+**The sidebar keeps the left edge.** Obsidian mobile reads a horizontal pan as
+"open the drawer", and it listens for it above the grid - which is why the grid
+stops that gesture from bubbling, or scrolling a sheet sideways would open the
+file explorer instead. Since 1.4.x the rule is narrower: a touch that starts
+within **24 px of the left screen edge** while the sheet is **scrolled fully
+left** is Obsidian's, and the drawer opens as it does everywhere else. Anywhere
+else on the grid, or with the sheet panned right (where a leftward swipe is
+plainly meant to scroll it back), the gesture is the grid's. The header button
+still opens the drawer too.
+
+**The context menu is the plugin's own**, not the engine's: translated into all
+twelve languages, 44 px rows on touch, and no `Ctrl+C` hints on a device with
+no `Ctrl`. It carries: edit the cell, copy, paste, insert a row above or below,
+insert a column left or right, delete the selected rows or columns, and merge or
+split. On a desktop it is the same menu, on the right mouse button.
+
+There is deliberately no long-press-to-edit any more (it used to fire in the
+middle of a scroll). A press opens the menu, and the menu's first item is
+"Edit cell".
 
 ### Formatting
 
@@ -648,7 +708,7 @@ Notes on the build configuration:
 - The engine's hard-coded colours (`#fff`, `#ccc`, `#f3f3f3`) are remapped to
   Obsidian CSS variables. No `filter: invert(1)` anywhere.
 
-The e2e suite (406 assertions) launches a separate Obsidian instance with its
+The e2e suite (445 assertions) launches a separate Obsidian instance with its
 own `--user-data-dir` on CDP port 9333, so your running Obsidian is left alone.
 It installs and enables the plugin, creates a sheet, types values and formulas
 with real keyboard events, drags column and row edges, formats a selection with
@@ -659,9 +719,15 @@ locales (twelve of them), applies a currency format to a range including a
 formula, aligns and wraps cells and checks the bytes that come out, reloads the
 plugin twice to prove the engine's global handlers are not doubled, embeds the
 sheet in a note in both markdown modes and edits the source while the embed is on
-screen, emulates the tablet (800x1340, `mobile: true`, `body.is-mobile`) to
-measure touch targets, round-trips a semicolon-delimited CSV through the real
-view, sorts a styled sheet from the toolbar and reads the file back to prove the
+screen, emulates the tablet (800x1340, `mobile: true`, `body.is-mobile`, touch
+emulation on) to measure touch targets and then to drive real `TouchEvent`
+gestures through it - a pan that must not move the selection, a pan that must
+not be undone by a scroll-into-view, a tap that must select, a press too slow to
+be a tap, the left-edge swipe rule in all three of its cases, `Enter` in the
+formula bar, and a long press that has to open the plugin's own menu with 44 px
+rows - right-clicks a cell in English and in Russian to read the context menu
+back and insert a row through it, round-trips a semicolon-delimited CSV through
+the real view, sorts a styled sheet from the toolbar and reads the file back to prove the
 fills landed on the lines of the values they belong to, filters a column and
 checks which rows the DOM hides, scrolls a frozen row and measures where it
 parked, drives the find strip, F2, Ctrl+D, Home/End and Ctrl+arrows as real
@@ -746,11 +812,16 @@ without releasing. See `.github/workflows/release.yml` and
   be worse than one that does not.
 - The formula bar edits the anchor cell of the selection, one cell at a time.
   There is no range editing and no autocomplete for function names.
-- On touch devices the remaining rough edges are: no gesture for selecting a
-  range (drag scrolls, as it should), and a swipe that starts on Obsidian's own
-  edge zone still opens the sidebar. The gutter now stays frozen, the bottom row
-  clears the navigation bar, controls are 44 px, and long formulas are edited in
-  the formula bar. Fixed on an Android tablet at 800x1340; phones untested.
+- On touch devices there is no gesture for selecting a RANGE: a drag scrolls, as
+  it should, and the range is selected from the toolbar's point of view by what
+  the keyboard-less device can do - one cell at a time. Everything else on a
+  tablet now behaves: a scroll keeps the selection and the scroll position, a
+  tap selects, a long press opens a translated 44 px menu, the gutter stays
+  frozen, the bottom row clears the navigation bar, controls are 44 px, and long
+  formulas are edited in the formula bar. Obsidian's drawer is reachable by a
+  swipe from the left 24 px of the screen while the sheet is scrolled fully left
+  (and always from the header button). Verified on an Android tablet at
+  800x1340; phones untested.
 
 ## Gotchas worth knowing
 
@@ -887,8 +958,49 @@ pan as "open the left drawer", so the grid stops `touchmove` from bubbling. But
 the engine's `touchstart` (registered on `document`) arms a 500 ms timer that
 opens the in-cell editor, and it cancels that timer from its own `touchmove`
 listener, which is exactly the event we now eat. Without cancelling it
-explicitly, a half-second scroll pops the editor open. `touchstart` itself must
-keep bubbling, or tapping a cell stops selecting it.
+explicitly, a half-second scroll pops the editor open. Since 1.4.x `touchstart`
+is stopped as well (see the next paragraph), which disarms that timer for good -
+the explicit cancel stays as the belt to its braces, for a touch that starts
+outside the grid root.
+
+The engine selects on `touchstart`, and that is the bug. Its document-level
+`touchstart` handler calls the selection code with the coordinates of whatever
+`<td>` the finger landed on - before anyone can know whether the gesture is a
+tap or a scroll. On a tablet a finger lands on a cell every time the user means
+to scroll, so the sheet kept losing the active cell (and with it the formula bar's
+context) to a gesture nobody meant as a selection. The fix is to take the event
+away from the engine: `touchstart` is stopped in the capture phase on the grid
+root, and the decision is made on `touchend` from the distance (10 px) and the
+duration (300 ms). The compatibility mouse events a browser synthesises for a
+tap are NOT prevented, so nothing else about the engine changes; a scroll
+suppresses them on its own, which is precisely the case we care about.
+
+A scroll-into-view can undo the user's own scroll. `selectCell()` ends with
+`scrollIntoView({ inline: "nearest" })`, which is right for a keyboard move and
+fatal a moment after a pan: measured on the tablet, a sheet panned to
+`scrollLeft: 484` snapped back to 0 because the selection (column A, off screen
+now) was scrolled into view. Every programmatic scroll therefore goes through
+one method that refuses to run for 0.7 s after a touch pan, and a tap passes
+`scroll: false` outright - the cell it selected is under the finger, so there is
+nothing to scroll to.
+
+The engine's context menu can be replaced, not just restyled. `contextMenu` in
+the worksheet options is called with the default items and may return them
+changed - or `false`, which makes the vendor return BEFORE it opens anything
+(it also skips its own `preventDefault()`, so ours has to call it). That is how
+the jsuites menu is exchanged for an Obsidian `Menu` with our translations,
+44 px rows and no keyboard hints, instead of translating text nodes and
+re-measuring rows after every open of a menu the vendor rebuilds from scratch
+each time. A read-only embed inside a note passes no menu handler at all and
+therefore gets no context menu, which is what read-only should mean.
+
+The drawer needs the whole gesture, `touchstart` included. Obsidian's edge swipe
+arms on `touchstart` and completes on `touchmove`, so the edge-swipe compromise
+cannot be implemented by letting `touchmove` through alone: for a gesture that
+starts in the left 24 px with the sheet scrolled fully left, the grid ignores
+the touch completely - no stopping, no deferred selection, nothing. Which is
+also why the engine takes a `touchPassThrough` callback rather than the view
+simply not calling `stopPropagation()`.
 
 Do not pass a second argument to `getNewFileParent()`. Calling
 `getNewFileParent(path, "Untitled.sheet")` makes Obsidian look for a file

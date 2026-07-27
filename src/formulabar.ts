@@ -12,6 +12,7 @@
  */
 
 import type { SheetEngine } from "./engine";
+import { isTouchUi } from "./platform";
 import { t } from "./i18n";
 
 /** Text to show for a raw cell value. */
@@ -114,6 +115,7 @@ export class SheetFormulaBar {
 			e.preventDefault();
 			e.stopPropagation();
 			this.commit(true);
+			this.advance();
 			return;
 		}
 		if (e.key === "Escape") {
@@ -144,6 +146,44 @@ export class SheetFormulaBar {
 		// show whatever actually landed in the cell.
 		this.sync(true);
 		if (explicit) this.input.setSelectionRange(this.input.value.length, this.input.value.length);
+	}
+
+	/**
+	 * What Enter does after the value has landed: move to the cell BELOW, which
+	 * is what Enter means in every spreadsheet and what it already meant in this
+	 * one when typed into a cell. Until 1.4.x the bar committed and sat still, so
+	 * on a tablet - where this bar is the only comfortable editor - entering a
+	 * column of numbers meant tapping the next cell between every value.
+	 *
+	 * WHO KEEPS THE FOCUS, and why the two platforms differ. On the desktop the
+	 * grid is the input surface: the bar is a convenience, Enter hands the focus
+	 * back and the arrow keys work again immediately, exactly like committing an
+	 * in-cell edit. On touch the bar IS the input surface (the in-cell editor is
+	 * as wide as its cell), and blurring it would dismiss the keyboard after
+	 * every single value: type, keyboard down, tap the bar, keyboard up, type.
+	 * So the focus stays and the keyboard with it, the selection still moves, and
+	 * the next value goes into the next cell with nothing tapped in between.
+	 * Escape, or a tap on the grid, is what puts the keyboard away.
+	 */
+	private advance(): void {
+		const engine = this.getEngine();
+		if (!engine) return;
+		if (this.editingEngine && this.editingEngine !== engine) return;
+		const cur = engine.activeCell();
+		if (!cur) return;
+		const rows = engine.dimensions().rows;
+		if (cur.row + 1 < rows) engine.selectCell(cur.row + 1, cur.col);
+		// The field MUST be refreshed before anything else: the blur below runs
+		// commit() again, and a field still holding the text of the previous cell
+		// would write it into the new one. Forced, because the field has focus and
+		// the ordinary sync leaves a focused field alone.
+		this.sync(true);
+		this.editingRef = this.activeRef;
+		if (isTouchUi()) {
+			this.input.setSelectionRange(this.input.value.length, this.input.value.length);
+			return;
+		}
+		this.input.blur();
 	}
 
 	/**

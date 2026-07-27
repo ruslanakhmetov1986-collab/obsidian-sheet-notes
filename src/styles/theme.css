@@ -803,6 +803,37 @@ body.is-mobile .leovale-sheet-fb-ref,
 	font-size: var(--font-ui-small);
 }
 
+/* ---- the grid's context menu -------------------------------------------
+ * An ordinary Obsidian menu (see gridmenu.ts), so it needs nothing at all on
+ * the desktop. On touch its rows have to be hittable: Obsidian's own are around
+ * 30px, which is the same coin toss the 28px toolbar buttons were. `min-height`
+ * rather than `height`, so a wrapped label still fits.
+ *
+ * `.is-touch` is set for a menu a FINGER opened, and `body.is-mobile` for a
+ * mobile app, because both are true on a tablet and only the first one is true
+ * for a long press in a desktop sandbox - which is where this is measured.
+ * ---------------------------------------------------------------------- */
+
+body.is-mobile .menu.leovale-sheet-menu .menu-item,
+.menu.leovale-sheet-menu.is-touch .menu-item {
+	min-height: 44px;
+	padding-top: 8px;
+	padding-bottom: 8px;
+	line-height: 1.3;
+}
+
+body.is-mobile .menu.leovale-sheet-menu .menu-item-icon,
+.menu.leovale-sheet-menu.is-touch .menu-item-icon {
+	width: 20px;
+	height: 20px;
+}
+
+body.is-mobile .menu.leovale-sheet-menu .menu-item-icon .svg-icon,
+.menu.leovale-sheet-menu.is-touch .menu-item-icon .svg-icon {
+	width: 20px;
+	height: 20px;
+}
+
 /* ---- embedded sheets in notes ------------------------------------------
  * `![[Budget.sheet]]` in a Markdown note. Obsidian's own element is a <span>
  * inside a <p> (reading view) or a <div> (live preview), so the block layout is

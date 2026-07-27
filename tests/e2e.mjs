@@ -212,6 +212,99 @@ function pdfText(buf) {
 	return parts.join("");
 }
 
+/**
+ * Install a touch driver in the page.
+ *
+ * Playwright's own `touchscreen` goes through Chromium's gesture recogniser,
+ * which is right for a tap and useless for the questions this suite asks: what
+ * the PLUGIN's listeners do with a gesture, in the order they see it. So the
+ * events are built here and dispatched directly - the same `TouchEvent`s a
+ * finger produces, with the same bubbling, at coordinates we choose to the
+ * pixel. A synthetic pan does not move a scroll container by itself (only the
+ * compositor does that), so `scrollWith` moves it the way the finger would,
+ * which is what makes the snap-back question answerable at all.
+ */
+async function installTouchDriver(page) {
+	await page.evaluate(() => {
+		window.__touch = async (opts) => {
+			const {
+				selector,
+				at = null,
+				dx = 0,
+				dy = 0,
+				steps = 5,
+				holdMs = 0,
+				scrollWith = false,
+				endAfterMs = 0,
+			} = opts;
+			const el = selector ? document.querySelector(selector) : null;
+			const rect = el ? el.getBoundingClientRect() : null;
+			const x0 = at ? at.x : rect.left + rect.width / 2;
+			const y0 = at ? at.y : rect.top + rect.height / 2;
+			// With both a selector and coordinates the selector names the TARGET and
+			// the coordinates are where the finger is: that is the only way to ask
+			// "what happens for a touch at screen x=6" in a desktop sandbox, where
+			// the sheet does not start at the screen edge and a real tablet's does.
+			const target = el ?? document.elementFromPoint(x0, y0) ?? document.body;
+			const wrapper = document.querySelector(".leovale-sheet-wrapper");
+			const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+			const make = (type, x, y) => {
+				const point = new Touch({
+					identifier: 1,
+					target,
+					clientX: x,
+					clientY: y,
+					pageX: x,
+					pageY: y,
+				});
+				const live = type === "touchend" || type === "touchcancel" ? [] : [point];
+				return new TouchEvent(type, {
+					touches: live,
+					targetTouches: live,
+					changedTouches: [point],
+					bubbles: true,
+					cancelable: true,
+					composed: true,
+				});
+			};
+			target.dispatchEvent(make("touchstart", x0, y0));
+			if (holdMs > 0) await wait(holdMs);
+			for (let i = 1; i <= steps && (dx !== 0 || dy !== 0); i++) {
+				const x = x0 + (dx * i) / steps;
+				const y = y0 + (dy * i) / steps;
+				target.dispatchEvent(make("touchmove", x, y));
+				if (scrollWith && wrapper) {
+					wrapper.scrollLeft -= dx / steps;
+					wrapper.scrollTop -= dy / steps;
+				}
+				await wait(10);
+			}
+			if (endAfterMs > 0) await wait(endAfterMs);
+			target.dispatchEvent(make("touchend", x0 + dx, y0 + dy));
+			await wait(60);
+			return {
+				scrollLeft: wrapper ? Math.round(wrapper.scrollLeft) : null,
+				scrollTop: wrapper ? Math.round(wrapper.scrollTop) : null,
+			};
+		};
+		/** "x,y" of the cell the grid calls selected, for terse assertions. */
+		window.selectedCellRef = () => {
+			const td = document.querySelector(
+				".leovale-sheet-content .leovale-sheet-root td.highlight-selected",
+			);
+			return td ? `${td.dataset.x},${td.dataset.y}` : null;
+		};
+	});
+}
+
+/** The titles of the menu the plugin has open right now, in order. */
+function menuTitles(page, cls = ".leovale-sheet-menu") {
+	return page.evaluate(
+		(c) => [...document.querySelectorAll(`.menu${c} .menu-item-title`)].map((i) => i.textContent),
+		cls,
+	);
+}
+
 function selectedCell(page) {
 	return page.evaluate(() => {
 		const td = document.querySelector(".leovale-sheet-content .leovale-sheet-root td.highlight-selected");
@@ -496,6 +589,25 @@ async function main() {
 			(await page.evaluate(() => window.sheetView().sheetEngine.getRawValue("D6"))) ===
 				"=SUM(B2:B3)*10",
 		);
+
+		// Enter means the same thing here as in a cell: commit and step down. On a
+		// desktop the focus goes back to the grid with it (the touch half of this
+		// rule is checked under the tablet emulation further down). Nothing is
+		// typed, so the document is not touched at all.
+		await page.click('.leovale-sheet-content .leovale-sheet-root td[data-x="3"][data-y="5"]');
+		await page.waitForTimeout(150);
+		await page.click(`${fb} .leovale-sheet-fb-input`);
+		await page.keyboard.press("Enter");
+		await page.waitForTimeout(300);
+		const barEnter = await page.evaluate(() => ({
+			ref: document.querySelector(".leovale-sheet-fb-ref").textContent,
+			focused: document.activeElement === document.querySelector(".leovale-sheet-fb-input"),
+			cell: window.sheetView().sheetEngine.getRawValue("D6"),
+		}));
+		console.log("  Enter in the bar:", barEnter);
+		check("Enter in the bar moves down a cell", barEnter.ref === "D7", String(barEnter.ref));
+		check("on a desktop it hands the focus back to the grid", barEnter.focused === false);
+		check("and an empty Enter changes nothing", barEnter.cell === "=SUM(B2:B3)*10", String(barEnter.cell));
 
 		step("frozen row-number gutter (sticky during horizontal scroll)");
 		const sticky = await page.evaluate(() => {
@@ -1442,10 +1554,354 @@ async function main() {
 		await page.waitForTimeout(900);
 		await shot(page, "09-mobile-dark");
 		await setBaseTheme(page, "moonstone");
+		await page.waitForTimeout(500);
+
+		/* ---------------------------------------------------------- 1.4.x touch */
+
+		step("touch: a scroll must not steal the selection");
+		await installTouchDriver(page);
+		// Somewhere to come back to, and a formula bar context to protect.
+		await page.click('.leovale-sheet-content .leovale-sheet-root td[data-x="1"][data-y="1"]');
+		await page.waitForTimeout(200);
+		const beforeGesture = await page.evaluate(() => ({
+			cell: selectedCellRef(),
+			ref: document.querySelector(".leovale-sheet-fb-ref").textContent,
+		}));
+		// A pan that starts on a completely different cell: this is the gesture
+		// that used to make the touched cell active before the finger had moved.
+		const panned = await page.evaluate(() =>
+			window.__touch({
+				selector: '.leovale-sheet-content .leovale-sheet-root td[data-x="3"][data-y="6"]',
+				dx: -160,
+				steps: 8,
+				scrollWith: true,
+			}),
+		);
+		await page.waitForTimeout(200);
+		const afterGesture = await page.evaluate(() => ({
+			cell: selectedCellRef(),
+			ref: document.querySelector(".leovale-sheet-fb-ref").textContent,
+		}));
+		console.log("  touch scroll:", beforeGesture, "->", afterGesture, panned);
+		check(
+			"a touch scroll leaves the selection where it was",
+			afterGesture.cell === beforeGesture.cell && beforeGesture.cell === "1,1",
+			`${beforeGesture.cell} -> ${afterGesture.cell}`,
+		);
+		check(
+			"and leaves the formula bar's cell with it",
+			afterGesture.ref === beforeGesture.ref && beforeGesture.ref === "B2",
+			`${beforeGesture.ref} -> ${afterGesture.ref}`,
+		);
+		check("the pan really moved the grid", panned.scrollLeft > 100, String(panned.scrollLeft));
+
+		step("touch: no snap-back after the user's own scroll");
+		// The bug: something asked for the selection to be scrolled into view right
+		// after the pan, and the sheet jumped back to column A (484 -> 0 on the
+		// tablet). A1 is off screen to the left now, so a scroll-into-view of it is
+		// exactly the fatal move.
+		const snap = await page.evaluate(async () => {
+			const wrapper = document.querySelector(".leovale-sheet-wrapper");
+			const engine = window.sheetView().sheetEngine;
+			// A fresh pan inside the same page turn, so the grace window is provably
+			// open when the scroll-into-view is asked for (a round trip to the test
+			// runner and back can easily outlast it).
+			await window.__touch({
+				selector: '.leovale-sheet-content .leovale-sheet-root td[data-x="3"][data-y="6"]',
+				dx: -160,
+				steps: 8,
+				scrollWith: true,
+			});
+			const scrolled = Math.round(wrapper.scrollLeft);
+			engine.selectCell(0, 0);
+			await new Promise((r) => setTimeout(r, 150));
+			const during = Math.round(wrapper.scrollLeft);
+			// …and the guard is a grace period, not an off switch: once the gesture
+			// is over, a programmatic move scrolls again.
+			await new Promise((r) => setTimeout(r, 900));
+			engine.selectCell(0, 0);
+			await new Promise((r) => setTimeout(r, 200));
+			return { scrolled, during, after: Math.round(wrapper.scrollLeft) };
+		});
+		console.log("  snap-back:", snap);
+		check(
+			"scroll-into-view is suppressed while the user is touch-scrolling",
+			snap.during === snap.scrolled && snap.scrolled > 100,
+			JSON.stringify(snap),
+		);
+		check(
+			// Not 0: `inline: "nearest"` stops as soon as A1 is inside the box, and
+			// the sticky row-number gutter covers the first ~50 px of it.
+			"and comes back once the gesture is over",
+			snap.after < 100 && snap.after < snap.during,
+			JSON.stringify(snap),
+		);
+
+		step("touch: a tap still selects, a slow press does not");
+		const tapped = await page.evaluate(async () => {
+			await window.__touch({
+				selector: '.leovale-sheet-content .leovale-sheet-root td[data-x="2"][data-y="4"]',
+			});
+			await new Promise((r) => setTimeout(r, 150));
+			const afterTap = selectedCellRef();
+			// 400 ms is past the tap window and short of the long press: nothing.
+			await window.__touch({
+				selector: '.leovale-sheet-content .leovale-sheet-root td[data-x="0"][data-y="7"]',
+				endAfterMs: 400,
+			});
+			await new Promise((r) => setTimeout(r, 150));
+			return { afterTap, afterSlow: selectedCellRef() };
+		});
+		console.log("  tap:", tapped);
+		check("a tap selects the cell under it", tapped.afterTap === "2,4", String(tapped.afterTap));
+		check(
+			"a press longer than the tap window selects nothing",
+			tapped.afterSlow === "2,4",
+			String(tapped.afterSlow),
+		);
+
+		step("touch: the drawer keeps the left edge, and only there");
+		const edge = await page.evaluate(async () => {
+			const seen = { start: 0, move: 0 };
+			const onStart = () => seen.start++;
+			const onMove = () => seen.move++;
+			document.addEventListener("touchstart", onStart);
+			document.addEventListener("touchmove", onMove);
+			const wrapper = document.querySelector(".leovale-sheet-wrapper");
+			const box = wrapper.getBoundingClientRect();
+			const run = async (x, scrollLeft) => {
+				wrapper.scrollLeft = scrollLeft;
+				await new Promise((r) => setTimeout(r, 60));
+				seen.start = 0;
+				seen.move = 0;
+				await window.__touch({
+					selector: '.leovale-sheet-content .leovale-sheet-root td[data-x="0"][data-y="6"]',
+					at: { x, y: box.top + 200 },
+					dx: 120,
+					steps: 4,
+				});
+				return { ...seen };
+			};
+			const atEdge = await run(6, 0);
+			const inside = await run(300, 0);
+			const edgeScrolled = await run(6, 220);
+			wrapper.scrollLeft = 0;
+			document.removeEventListener("touchstart", onStart);
+			document.removeEventListener("touchmove", onMove);
+			return { atEdge, inside, edgeScrolled };
+		});
+		console.log("  edge swipe:", edge);
+		check(
+			"a swipe from the left edge of a sheet scrolled fully left reaches Obsidian",
+			edge.atEdge.start > 0 && edge.atEdge.move > 0,
+			JSON.stringify(edge.atEdge),
+		);
+		check(
+			"a swipe that starts anywhere else is the grid's",
+			edge.inside.move === 0 && edge.inside.start === 0,
+			JSON.stringify(edge.inside),
+		);
+		check(
+			"so is one from the edge while the sheet is panned right",
+			edge.edgeScrolled.move === 0,
+			JSON.stringify(edge.edgeScrolled),
+		);
+
+		step("touch: the formula bar advances and keeps the keyboard up");
+		const barTouch = await page.evaluate(async () => {
+			const view = window.sheetView();
+			view.sheetEngine.selectCell(5, 5);
+			await new Promise((r) => setTimeout(r, 150));
+			const input = document.querySelector(".leovale-sheet-fb-input");
+			input.focus();
+			input.value = "111";
+			input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+			await new Promise((r) => setTimeout(r, 300));
+			const out = {
+				cell: selectedCellRef(),
+				ref: document.querySelector(".leovale-sheet-fb-ref").textContent,
+				focused: document.activeElement === input,
+				value: input.value,
+				wrote: view.sheetEngine.getRawValue("F6"),
+			};
+			// Leave the sheet as it was: a value in a fresh column would widen the
+			// used range, and the embed tests further down measure exactly that.
+			input.blur();
+			view.sheetEngine.setRawValue("F6", "");
+			await new Promise((r) => setTimeout(r, 150));
+			return out;
+		});
+		console.log("  formula bar on touch:", barTouch);
+		check("Enter in the bar commits the value", String(barTouch.wrote) === "111", String(barTouch.wrote));
+		check("and moves the selection one row down", barTouch.cell === "5,6", String(barTouch.cell));
+		check("the bar follows it", barTouch.ref === "F7", String(barTouch.ref));
+		check("on touch the keyboard stays up (the field keeps the focus)", barTouch.focused === true);
+		check("and the field shows the NEW cell, not the old text", barTouch.value === "", `"${barTouch.value}"`);
+
+		step("touch: long press opens OUR context menu, 44 px rows");
+		const longPress = await page.evaluate(async () => {
+			await window.__touch({
+				selector: '.leovale-sheet-content .leovale-sheet-root td[data-x="1"][data-y="1"]',
+				holdMs: 700,
+			});
+			await new Promise((r) => setTimeout(r, 250));
+			const menu = document.querySelector(".menu.leovale-sheet-menu");
+			const items = [...(menu?.querySelectorAll(".menu-item") ?? [])];
+			return {
+				open: !!menu,
+				touchClass: !!menu?.classList.contains("is-touch"),
+				vendor: document.querySelectorAll(".jss_contextmenu.jss_contextmenu-focus").length,
+				rows: items.map((i) => Math.round(i.getBoundingClientRect().height)),
+				titles: items.map((i) => i.querySelector(".menu-item-title")?.textContent),
+				icons: items.every((i) => !!i.querySelector(".menu-item-icon svg")),
+				selected: selectedCellRef(),
+			};
+		});
+		console.log("  long press menu:", longPress);
+		check("a long press opens the plugin's own menu", longPress.open === true);
+		check("marked as a touch menu", longPress.touchClass === true);
+		check("the engine's own menu stays shut", longPress.vendor === 0, String(longPress.vendor));
+		check(
+			"every row is at least 44 px",
+			longPress.rows.length > 0 && longPress.rows.every((h) => h >= 44),
+			JSON.stringify(longPress.rows),
+		);
+		check("every item drew its icon", longPress.icons === true);
+		check(
+			"no keyboard hints on a device with no keyboard",
+			longPress.titles.every((t) => !/ctrl|cmd|⌘|alt/i.test(t ?? "")),
+			JSON.stringify(longPress.titles),
+		);
+		check("the pressed cell is the selected one", longPress.selected === "1,1", String(longPress.selected));
+		await shot(page, "23-context-menu-mobile");
+		await page.keyboard.press("Escape");
+		await page.waitForTimeout(200);
+
 		await page.evaluate(() => document.body.classList.remove("is-mobile"));
 		await cdp.send("Emulation.setTouchEmulationEnabled", { enabled: false });
 		await cdp.send("Emulation.clearDeviceMetricsOverride");
 		await page.waitForTimeout(800);
+
+		step("1.4.x: the context menu is ours, translated, and does the work");
+		// A real right click: the engine's own document-level handler runs, and
+		// its `contextMenu` hook answers "open nothing" so ours is what appears.
+		await page.click('.leovale-sheet-content .leovale-sheet-root td[data-x="1"][data-y="8"]', {
+			button: "right",
+		});
+		await page.waitForTimeout(350);
+		const cmEn = await page.evaluate(() => {
+			const menu = document.querySelector(".menu.leovale-sheet-menu");
+			const items = [...(menu?.querySelectorAll(".menu-item") ?? [])];
+			return {
+				open: !!menu,
+				titles: items.map((i) => i.querySelector(".menu-item-title")?.textContent),
+				icons: items.every((i) => !!i.querySelector(".menu-item-icon svg")),
+				vendor: document.querySelectorAll(".jss_contextmenu").length,
+				vendorOpen: [...document.querySelectorAll(".jss_contextmenu")].filter(
+					(m) => getComputedStyle(m).display !== "none",
+				).length,
+				selected: selectedCellRef(),
+			};
+		});
+		console.log("  context menu (en):", cmEn.titles);
+		check("a right click opens the plugin's menu", cmEn.open === true);
+		check(
+			"it is in English by default",
+			cmEn.titles[0] === "Edit cell" && cmEn.titles.includes("Insert row above"),
+			JSON.stringify(cmEn.titles),
+		);
+		check(
+			"it keeps the useful items: insert, delete, copy, paste, merge",
+			["Copy", "Paste", "Insert column left", "Delete row", "Delete column", "Merge cells"].every(
+				(t) => cmEn.titles.includes(t),
+			),
+			JSON.stringify(cmEn.titles),
+		);
+		check("no shortcut hints anywhere in it",
+			cmEn.titles.every((t) => !/ctrl|cmd|⌘/i.test(t ?? "")), JSON.stringify(cmEn.titles));
+		check("every item drew its icon", cmEn.icons === true, JSON.stringify(cmEn.titles));
+		check("the engine's own menu never opens", cmEn.vendorOpen === 0, String(cmEn.vendorOpen));
+		check("the right click moved the selection to the cell under it",
+			cmEn.selected === "1,8", String(cmEn.selected));
+		await shot(page, "24-context-menu-light");
+		await page.keyboard.press("Escape");
+		await page.waitForTimeout(200);
+
+		// The same menu in Russian, which is the interface the tablet reported it in.
+		await page.evaluate(() => {
+			window.localStorage.setItem("language", "ru");
+			const view = window.sheetView();
+			view.setViewData(view.getViewData(), false);
+		});
+		await page.waitForTimeout(500);
+		await page.click('.leovale-sheet-content .leovale-sheet-root td[data-x="1"][data-y="8"]', {
+			button: "right",
+		});
+		await page.waitForTimeout(350);
+		const cmRu = await menuTitles(page);
+		console.log("  context menu (ru):", cmRu);
+		check("Russian interface, Russian menu",
+			cmRu[0] === "Редактировать ячейку" && cmRu.includes("Вставить строку выше"),
+			JSON.stringify(cmRu));
+		check("its copy/paste are translated too",
+			cmRu.includes("Копировать") && cmRu.includes("Вставить"), JSON.stringify(cmRu));
+		check("and its merge item", cmRu.includes("Объединить ячейки"), JSON.stringify(cmRu));
+		await shot(page, "25-context-menu-ru");
+		await page.keyboard.press("Escape");
+		await page.waitForTimeout(200);
+		await page.evaluate(async () => {
+			window.localStorage.setItem("language", "en");
+			const view = window.sheetView();
+			view.setViewData(view.getViewData(), false);
+			await new Promise((r) => setTimeout(r, 400));
+		});
+		await page.waitForTimeout(400);
+
+		// It is a working menu, not a picture of one: insert a row through it.
+		const inserted = await page.evaluate(async () => {
+			const view = window.sheetView();
+			const engine = view.sheetEngine;
+			engine.setRawValue("A10", "moved");
+			await new Promise((r) => setTimeout(r, 150));
+			return { before: engine.getRawValue("A10"), rows: engine.dimensions().rows };
+		});
+		await page.click('.leovale-sheet-content .leovale-sheet-root td[data-x="0"][data-y="9"]', {
+			button: "right",
+		});
+		await page.waitForTimeout(300);
+		await page.evaluate(() => {
+			const items = [...document.querySelectorAll(".menu.leovale-sheet-menu .menu-item")];
+			const item = items.find((i) => i.querySelector(".menu-item-title")?.textContent === "Insert row above");
+			item.click();
+		});
+		await page.waitForTimeout(400);
+		const afterInsert = await page.evaluate(() => {
+			const engine = window.sheetView().sheetEngine;
+			return {
+				a10: engine.getRawValue("A10"),
+				a11: engine.getRawValue("A11"),
+				rows: engine.dimensions().rows,
+				dirty: window.sheetView().sheetDirty,
+			};
+		});
+		console.log("  insert row above:", inserted, "->", afterInsert);
+		check("the menu really inserted a row", afterInsert.rows === inserted.rows + 1,
+			`${inserted.rows} -> ${afterInsert.rows}`);
+		check("and the value moved down with it", afterInsert.a11 === "moved" && !afterInsert.a10,
+			JSON.stringify(afterInsert));
+		check("an edit through the menu marks the document dirty", afterInsert.dirty === true);
+		// Put the sheet back exactly as the rest of the suite expects it.
+		const rowRestored = await page.evaluate(async () => {
+			const engine = window.sheetView().sheetEngine;
+			engine.deleteRows(9, 1);
+			await new Promise((r) => setTimeout(r, 200));
+			engine.setRawValue("A10", "");
+			await new Promise((r) => setTimeout(r, 200));
+			return { rows: engine.dimensions().rows, a10: engine.getRawValue("A10") };
+		});
+		check("and the row can be deleted through the same code path",
+			rowRestored.rows === inserted.rows && !rowRestored.a10, JSON.stringify(rowRestored));
+		await page.waitForTimeout(400);
 
 		step("csv: open, edit, autosave, delimiter and quoting preserved");
 		const CSV_PATH = "data.csv";

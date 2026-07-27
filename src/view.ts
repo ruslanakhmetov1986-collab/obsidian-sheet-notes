@@ -12,6 +12,7 @@ import { SheetEngine } from "./engine";
 import { SheetToolbar } from "./toolbar";
 import { SheetFormulaBar } from "./formulabar";
 import { SheetFind } from "./find";
+import { openGridMenu } from "./gridmenu";
 import { ColumnWidthModal, ConfirmModal } from "./dialogs";
 import { exportDocAsXlsx } from "./xlsxio";
 import {
@@ -62,6 +63,25 @@ const SAVE_DEBOUNCE_MS = 1500;
 const LOAD_QUIET_MS = 250;
 
 /**
+ * How close to the LEFT EDGE of the screen a finger has to land for the gesture
+ * to be Obsidian's rather than the grid's.
+ *
+ * The history of this number is the whole reason it exists. 1.1.0 stopped every
+ * `touchmove` inside the grid from bubbling, because Obsidian mobile reads a
+ * horizontal pan as "open the left drawer" and a spreadsheet that opens the
+ * file explorer whenever you scroll sideways is not usable. That worked, and it
+ * took the drawer gesture away everywhere over the grid - which is most of the
+ * screen, and the drawer was then reachable only through the header button.
+ *
+ * The compromise: the drawer keeps the strip of screen its own gesture starts
+ * in (24 px, Android's own edge-swipe zone is 20-24 dp), and only while the
+ * grid is scrolled fully left, i.e. when there is nothing to the left for the
+ * grid itself to show. Anywhere else, or with the sheet panned right, the
+ * gesture is the grid's and the pan scrolls the sheet.
+ */
+const EDGE_SWIPE_PX = 24;
+
+/**
  * Spreadsheet view for `.sheet` files.
  *
  * NOTE ON MEMBER NAMES: every field below is prefixed with `sheet`. `TextFileView`
@@ -94,6 +114,11 @@ export class SheetView extends TextFileView {
 	private sheetLoadTimer: number | null = null;
 	/** `.sheet`/`.lsheet` keep JSON; `.csv` keeps CSV. Decided per opened file. */
 	private sheetMode: SheetMode = "sheet";
+	/**
+	 * True while a touch that started in the left edge zone is running, i.e.
+	 * while the drawer is allowed to have this gesture. See {@link EDGE_SWIPE_PX}.
+	 */
+	private sheetEdgeGesture = false;
 	/** Delimiter sniffed from the CSV we loaded; preserved on every write. */
 	private sheetDelimiter: CsvDelimiter = DEFAULT_DELIMITER;
 
@@ -369,6 +394,12 @@ export class SheetView extends TextFileView {
 				onSelection: () => this.syncChrome(),
 				readOnly: this.sheetReadOnly,
 				links: this.linkHandlers(),
+				touchPassThrough: () => this.sheetEdgeGesture,
+				menu: (ctx) => {
+					const engine = this.sheetEngine;
+					if (!engine) return;
+					openGridMenu(engine, ctx, { merge: () => this.mergeSelection() });
+				},
 			});
 		} catch (e) {
 			console.error("leovale-sheets: engine init failed", e);
@@ -385,15 +416,36 @@ export class SheetView extends TextFileView {
 		this.registerDomEvent(this.sheetWrapper, "keyup", () => this.syncChrome());
 		// Obsidian mobile treats a horizontal pan as "open the left drawer" and
 		// listens for it on an ancestor. Inside the grid the pan belongs to the
-		// grid, so the gesture stops here. Never preventDefault(): the scroll
-		// itself is exactly what we want to keep.
+		// grid, so the gesture stops here - EXCEPT in the left edge strip with the
+		// sheet already scrolled fully left, which is the drawer's own zone (see
+		// {@link EDGE_SWIPE_PX}). Never preventDefault(): the scroll itself is
+		// exactly what we want to keep.
 		//
-		// `touchstart` deliberately still bubbles: the engine selects the tapped
-		// cell from a listener on `document`. Its long-press timer normally dies
-		// on the engine's own `touchmove`, which we are now swallowing, so cancel
-		// it explicitly.
+		// The capture phase for `touchstart`: the engine's own gesture handling
+		// stops that event on the grid root (it defers selection to `touchend`,
+		// see SheetEngine.installTouchGestures), and this decision has to be made
+		// before it does.
+		this.registerDomEvent(
+			this.sheetWrapper,
+			"touchstart",
+			(e: TouchEvent) => {
+				const point = e.touches[0];
+				const left = this.sheetWrapper?.scrollLeft ?? 0;
+				this.sheetEdgeGesture =
+					!!point && e.touches.length === 1 && point.clientX <= EDGE_SWIPE_PX && left <= 0;
+			},
+			{ capture: true },
+		);
+		this.registerDomEvent(this.sheetWrapper, "touchend", () => {
+			this.sheetEdgeGesture = false;
+		});
 		this.registerDomEvent(this.sheetWrapper, "touchmove", (e: TouchEvent) => {
+			// The engine's long-press timer normally dies on its own `touchmove`
+			// listener, which never sees this one; and a moving finger means the
+			// user owns the scroll position for the next moment.
 			this.sheetEngine?.cancelTouchHold();
+			this.sheetEngine?.noteTouchScroll();
+			if (this.sheetEdgeGesture) return;
 			e.stopPropagation();
 		});
 

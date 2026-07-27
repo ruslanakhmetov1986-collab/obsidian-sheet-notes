@@ -175,6 +175,21 @@ const EN = {
 	xlsxExportFailed: "Spreadsheet Notes: could not export this sheet ({message})",
 	xlsxImported: "Imported {path}: worksheets {sheets}, filled cells {cells}",
 	xlsxImportFailed: "Spreadsheet Notes: could not read this .xlsx file ({message})",
+
+	/* 1.4.x: the grid's own context menu (right click, long press on touch) */
+	cmEdit: "Edit cell",
+	cmInsertRowAbove: "Insert row above",
+	cmInsertRowBelow: "Insert row below",
+	cmInsertColLeft: "Insert column left",
+	cmInsertColRight: "Insert column right",
+	cmDeleteRow: "Delete row",
+	cmDeleteRows: "Delete rows",
+	cmDeleteCol: "Delete column",
+	cmDeleteCols: "Delete columns",
+	cmCopy: "Copy",
+	cmPaste: "Paste",
+	cmCopied: "Copied {rows}×{cols} cells",
+	cmPasteEmpty: "The clipboard is empty.",
 } as const;
 
 export type StringKey = keyof typeof EN;
@@ -309,6 +324,21 @@ const RU: Record<StringKey, string> = {
 	xlsxExportFailed: "Spreadsheet Notes: не удалось выгрузить этот лист ({message})",
 	xlsxImported: "Импортировано {path}: листов {sheets}, заполненных ячеек {cells}",
 	xlsxImportFailed: "Spreadsheet Notes: не удалось прочитать этот файл .xlsx ({message})",
+
+	/* 1.4.x: the grid's own context menu (right click, long press on touch) */
+	cmEdit: "Редактировать ячейку",
+	cmInsertRowAbove: "Вставить строку выше",
+	cmInsertRowBelow: "Вставить строку ниже",
+	cmInsertColLeft: "Вставить столбец слева",
+	cmInsertColRight: "Вставить столбец справа",
+	cmDeleteRow: "Удалить строку",
+	cmDeleteRows: "Удалить строки",
+	cmDeleteCol: "Удалить столбец",
+	cmDeleteCols: "Удалить столбцы",
+	cmCopy: "Копировать",
+	cmPaste: "Вставить",
+	cmCopied: "Скопировано ячеек: {rows}×{cols}",
+	cmPasteEmpty: "Буфер обмена пуст.",
 };
 
 const ZH: Record<StringKey, string> = {
@@ -440,6 +470,21 @@ const ZH: Record<StringKey, string> = {
 	xlsxExportFailed: "Spreadsheet Notes：导出失败（{message}）",
 	xlsxImported: "已导入 {path}：工作表 {sheets} 个，已填写单元格 {cells} 个",
 	xlsxImportFailed: "Spreadsheet Notes：无法读取该 .xlsx 文件（{message}）",
+
+	/* 1.4.x: the grid's own context menu (right click, long press on touch) */
+	cmEdit: "编辑单元格",
+	cmInsertRowAbove: "在上方插入行",
+	cmInsertRowBelow: "在下方插入行",
+	cmInsertColLeft: "在左侧插入列",
+	cmInsertColRight: "在右侧插入列",
+	cmDeleteRow: "删除行",
+	cmDeleteRows: "删除多行",
+	cmDeleteCol: "删除列",
+	cmDeleteCols: "删除多列",
+	cmCopy: "复制",
+	cmPaste: "粘贴",
+	cmCopied: "已复制 {rows}×{cols} 个单元格",
+	cmPasteEmpty: "剪贴板是空的。",
 };
 
 const ZH_TW: Record<StringKey, string> = {
@@ -571,6 +616,21 @@ const ZH_TW: Record<StringKey, string> = {
 	xlsxExportFailed: "Spreadsheet Notes：匯出失敗（{message}）",
 	xlsxImported: "已匯入 {path}：工作表 {sheets} 個，已填寫儲存格 {cells} 個",
 	xlsxImportFailed: "Spreadsheet Notes：無法讀取此 .xlsx 檔案（{message}）",
+
+	/* 1.4.x: the grid's own context menu (right click, long press on touch) */
+	cmEdit: "編輯儲存格",
+	cmInsertRowAbove: "在上方插入列",
+	cmInsertRowBelow: "在下方插入列",
+	cmInsertColLeft: "在左側插入欄",
+	cmInsertColRight: "在右側插入欄",
+	cmDeleteRow: "刪除列",
+	cmDeleteRows: "刪除多列",
+	cmDeleteCol: "刪除欄",
+	cmDeleteCols: "刪除多欄",
+	cmCopy: "複製",
+	cmPaste: "貼上",
+	cmCopied: "已複製 {rows}×{cols} 個儲存格",
+	cmPasteEmpty: "剪貼簿是空的。",
 };
 
 const DE: Record<StringKey, string> = {
@@ -704,6 +764,21 @@ const DE: Record<StringKey, string> = {
 	xlsxExportFailed: "Spreadsheet Notes: Export fehlgeschlagen ({message})",
 	xlsxImported: "{path} importiert: Arbeitsblätter {sheets}, gefüllte Zellen {cells}",
 	xlsxImportFailed: "Spreadsheet Notes: Diese .xlsx-Datei ist nicht lesbar ({message})",
+
+	/* 1.4.x: the grid's own context menu (right click, long press on touch) */
+	cmEdit: "Zelle bearbeiten",
+	cmInsertRowAbove: "Zeile oberhalb einfügen",
+	cmInsertRowBelow: "Zeile unterhalb einfügen",
+	cmInsertColLeft: "Spalte links einfügen",
+	cmInsertColRight: "Spalte rechts einfügen",
+	cmDeleteRow: "Zeile löschen",
+	cmDeleteRows: "Zeilen löschen",
+	cmDeleteCol: "Spalte löschen",
+	cmDeleteCols: "Spalten löschen",
+	cmCopy: "Kopieren",
+	cmPaste: "Einfügen",
+	cmCopied: "{rows}×{cols} Zellen kopiert",
+	cmPasteEmpty: "Die Zwischenablage ist leer.",
 };
 
 const FR: Record<StringKey, string> = {
@@ -837,6 +912,21 @@ const FR: Record<StringKey, string> = {
 	xlsxExportFailed: "Spreadsheet Notes : export impossible ({message})",
 	xlsxImported: "{path} importé : feuilles {sheets}, cellules remplies {cells}",
 	xlsxImportFailed: "Spreadsheet Notes : fichier .xlsx illisible ({message})",
+
+	/* 1.4.x: the grid's own context menu (right click, long press on touch) */
+	cmEdit: "Modifier la cellule",
+	cmInsertRowAbove: "Insérer une ligne au-dessus",
+	cmInsertRowBelow: "Insérer une ligne en dessous",
+	cmInsertColLeft: "Insérer une colonne à gauche",
+	cmInsertColRight: "Insérer une colonne à droite",
+	cmDeleteRow: "Supprimer la ligne",
+	cmDeleteRows: "Supprimer les lignes",
+	cmDeleteCol: "Supprimer la colonne",
+	cmDeleteCols: "Supprimer les colonnes",
+	cmCopy: "Copier",
+	cmPaste: "Coller",
+	cmCopied: "{rows}×{cols} cellules copiées",
+	cmPasteEmpty: "Le presse-papiers est vide.",
 };
 
 const ES: Record<StringKey, string> = {
@@ -970,6 +1060,21 @@ const ES: Record<StringKey, string> = {
 	xlsxExportFailed: "Spreadsheet Notes: no se pudo exportar esta hoja ({message})",
 	xlsxImported: "{path} importado: hojas {sheets}, celdas con contenido {cells}",
 	xlsxImportFailed: "Spreadsheet Notes: no se pudo leer este archivo .xlsx ({message})",
+
+	/* 1.4.x: the grid's own context menu (right click, long press on touch) */
+	cmEdit: "Editar celda",
+	cmInsertRowAbove: "Insertar fila encima",
+	cmInsertRowBelow: "Insertar fila debajo",
+	cmInsertColLeft: "Insertar columna a la izquierda",
+	cmInsertColRight: "Insertar columna a la derecha",
+	cmDeleteRow: "Eliminar fila",
+	cmDeleteRows: "Eliminar filas",
+	cmDeleteCol: "Eliminar columna",
+	cmDeleteCols: "Eliminar columnas",
+	cmCopy: "Copiar",
+	cmPaste: "Pegar",
+	cmCopied: "{rows}×{cols} celdas copiadas",
+	cmPasteEmpty: "El portapapeles está vacío.",
 };
 
 const JA: Record<StringKey, string> = {
@@ -1103,6 +1208,21 @@ const JA: Record<StringKey, string> = {
 	xlsxExportFailed: "Spreadsheet Notes: 書き出しに失敗しました（{message}）",
 	xlsxImported: "{path} を読み込みました: シート {sheets}、入力済みセル {cells}",
 	xlsxImportFailed: "Spreadsheet Notes: この .xlsx を読み取れません（{message}）",
+
+	/* 1.4.x: the grid's own context menu (right click, long press on touch) */
+	cmEdit: "セルを編集",
+	cmInsertRowAbove: "上に行を挿入",
+	cmInsertRowBelow: "下に行を挿入",
+	cmInsertColLeft: "左に列を挿入",
+	cmInsertColRight: "右に列を挿入",
+	cmDeleteRow: "行を削除",
+	cmDeleteRows: "複数の行を削除",
+	cmDeleteCol: "列を削除",
+	cmDeleteCols: "複数の列を削除",
+	cmCopy: "コピー",
+	cmPaste: "貼り付け",
+	cmCopied: "{rows}×{cols} セルをコピーしました",
+	cmPasteEmpty: "クリップボードは空です。",
 };
 
 const KO: Record<StringKey, string> = {
@@ -1234,6 +1354,21 @@ const KO: Record<StringKey, string> = {
 	xlsxExportFailed: "Spreadsheet Notes: 내보내지 못했습니다 ({message})",
 	xlsxImported: "{path} 가져왔습니다: 시트 {sheets}개, 내용이 있는 셀 {cells}개",
 	xlsxImportFailed: "Spreadsheet Notes: 이 .xlsx 파일을 읽지 못했습니다 ({message})",
+
+	/* 1.4.x: the grid's own context menu (right click, long press on touch) */
+	cmEdit: "셀 편집",
+	cmInsertRowAbove: "위에 행 삽입",
+	cmInsertRowBelow: "아래에 행 삽입",
+	cmInsertColLeft: "왼쪽에 열 삽입",
+	cmInsertColRight: "오른쪽에 열 삽입",
+	cmDeleteRow: "행 삭제",
+	cmDeleteRows: "여러 행 삭제",
+	cmDeleteCol: "열 삭제",
+	cmDeleteCols: "여러 열 삭제",
+	cmCopy: "복사",
+	cmPaste: "붙여넣기",
+	cmCopied: "{rows}×{cols} 셀을 복사했습니다",
+	cmPasteEmpty: "클립보드가 비어 있습니다.",
 };
 
 const PT_BR: Record<StringKey, string> = {
@@ -1367,6 +1502,21 @@ const PT_BR: Record<StringKey, string> = {
 	xlsxExportFailed: "Spreadsheet Notes: não foi possível exportar esta planilha ({message})",
 	xlsxImported: "{path} importado: planilhas {sheets}, células preenchidas {cells}",
 	xlsxImportFailed: "Spreadsheet Notes: não foi possível ler este arquivo .xlsx ({message})",
+
+	/* 1.4.x: the grid's own context menu (right click, long press on touch) */
+	cmEdit: "Editar célula",
+	cmInsertRowAbove: "Inserir linha acima",
+	cmInsertRowBelow: "Inserir linha abaixo",
+	cmInsertColLeft: "Inserir coluna à esquerda",
+	cmInsertColRight: "Inserir coluna à direita",
+	cmDeleteRow: "Excluir linha",
+	cmDeleteRows: "Excluir linhas",
+	cmDeleteCol: "Excluir coluna",
+	cmDeleteCols: "Excluir colunas",
+	cmCopy: "Copiar",
+	cmPaste: "Colar",
+	cmCopied: "{rows}×{cols} células copiadas",
+	cmPasteEmpty: "A área de transferência está vazia.",
 };
 
 const IT: Record<StringKey, string> = {
@@ -1500,6 +1650,21 @@ const IT: Record<StringKey, string> = {
 	xlsxExportFailed: "Spreadsheet Notes: esportazione non riuscita ({message})",
 	xlsxImported: "{path} importato: fogli {sheets}, celle piene {cells}",
 	xlsxImportFailed: "Spreadsheet Notes: impossibile leggere questo file .xlsx ({message})",
+
+	/* 1.4.x: the grid's own context menu (right click, long press on touch) */
+	cmEdit: "Modifica cella",
+	cmInsertRowAbove: "Inserisci riga sopra",
+	cmInsertRowBelow: "Inserisci riga sotto",
+	cmInsertColLeft: "Inserisci colonna a sinistra",
+	cmInsertColRight: "Inserisci colonna a destra",
+	cmDeleteRow: "Elimina riga",
+	cmDeleteRows: "Elimina righe",
+	cmDeleteCol: "Elimina colonna",
+	cmDeleteCols: "Elimina colonne",
+	cmCopy: "Copia",
+	cmPaste: "Incolla",
+	cmCopied: "{rows}×{cols} celle copiate",
+	cmPasteEmpty: "Gli appunti sono vuoti.",
 };
 
 const PL: Record<StringKey, string> = {
@@ -1633,6 +1798,21 @@ const PL: Record<StringKey, string> = {
 	xlsxExportFailed: "Spreadsheet Notes: nie udało się wyeksportować tego arkusza ({message})",
 	xlsxImported: "Zaimportowano {path}: arkusze {sheets}, wypełnione komórki {cells}",
 	xlsxImportFailed: "Spreadsheet Notes: nie można odczytać tego pliku .xlsx ({message})",
+
+	/* 1.4.x: the grid's own context menu (right click, long press on touch) */
+	cmEdit: "Edytuj komórkę",
+	cmInsertRowAbove: "Wstaw wiersz powyżej",
+	cmInsertRowBelow: "Wstaw wiersz poniżej",
+	cmInsertColLeft: "Wstaw kolumnę po lewej",
+	cmInsertColRight: "Wstaw kolumnę po prawej",
+	cmDeleteRow: "Usuń wiersz",
+	cmDeleteRows: "Usuń wiersze",
+	cmDeleteCol: "Usuń kolumnę",
+	cmDeleteCols: "Usuń kolumny",
+	cmCopy: "Kopiuj",
+	cmPaste: "Wklej",
+	cmCopied: "Skopiowano komórki {rows}×{cols}",
+	cmPasteEmpty: "Schowek jest pusty.",
 };
 
 export const TABLES: Record<Lang, Record<StringKey, string>> = {

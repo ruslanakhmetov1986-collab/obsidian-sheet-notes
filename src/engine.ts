@@ -96,6 +96,45 @@ export const SORTED_CLASS = "leovale-sheet-sorted";
 export const MIN_COL_WIDTH = 24;
 export const MAX_COL_WIDTH = 1200;
 
+/* ------------------------------------------------------------- touch */
+
+/**
+ * How far a finger may drift and still count as a TAP rather than a scroll,
+ * in CSS pixels. Ten is the number Android's own `ViewConfiguration` uses for
+ * its touch slop at this density; below it a fingertip cannot hold still.
+ */
+export const TAP_SLOP_PX = 10;
+/** How long a finger may stay down and still count as a tap. */
+export const TAP_MAX_MS = 300;
+/** A press this long opens the context menu, exactly like a right click. */
+export const LONG_PRESS_MS = 500;
+/**
+ * How long after the user's own touch scroll a programmatic "scroll the
+ * selection into view" stays switched off.
+ *
+ * Measured on the tablet: a horizontal pan left the sheet at scrollLeft 484 and
+ * a deferred scroll-into-view then yanked it back to 0, which reads as the sheet
+ * refusing to be scrolled at all. A scroll the user performed with their finger
+ * outranks any scroll the plugin would like, and momentum keeps the container
+ * moving after the finger is up, hence a grace period rather than a flag.
+ */
+export const SCROLL_GRACE_MS = 700;
+
+/** Where the grid's context menu was asked for, and by what. */
+export interface GridMenuContext {
+	/** Row under the pointer, or null (a column header, the corner). */
+	row: number | null;
+	/** Column under the pointer, or null (a row number). */
+	col: number | null;
+	/** Which part of the grid was hit: `cell`, `row`, `header`, … */
+	role: string;
+	/** Viewport coordinates to open the menu at. */
+	x: number;
+	y: number;
+	/** True when a finger asked for it: no keyboard hints, bigger rows. */
+	touch: boolean;
+}
+
 /** Distinct root class per live grid, so the freeze rules of one cannot hit another. */
 let instanceCounter = 0;
 
@@ -204,6 +243,25 @@ export interface EngineOptions {
 	readOnly?: boolean;
 	/** Makes `[[wiki links]]` in cells clickable. Omitted: they stay plain text. */
 	links?: LinkHandlers;
+	/**
+	 * Opens the context menu for a right click or a long press. Supplied by the
+	 * host (the view builds an Obsidian menu), because a menu is chrome and the
+	 * engine has no `obsidian` import.
+	 *
+	 * The engine's OWN menu is suppressed either way: without a handler there is
+	 * no menu at all, which is what a read-only embed inside a note wants.
+	 */
+	menu?: (ctx: GridMenuContext) => void;
+	/**
+	 * Asked on every `touchstart`: does this gesture belong to somebody else?
+	 *
+	 * The one caller is the view's edge-swipe rule (Obsidian's drawer owns the
+	 * left edge strip while the sheet is scrolled fully left). A gesture that
+	 * belongs to the host is not touched at all - not stopped, not deferred, not
+	 * turned into a selection - because the host's own handler has to see the
+	 * whole sequence, `touchstart` included, to recognise it.
+	 */
+	touchPassThrough?: (e: TouchEvent) => boolean;
 }
 
 /**
@@ -285,6 +343,26 @@ export class SheetEngine {
 	private selectionListener?: () => void;
 	/** What a `[[link]]` in a cell does; absent means "leave it as text". */
 	private links?: LinkHandlers;
+	/** Builds the context menu; see {@link EngineOptions.menu}. */
+	private menuBuilder?: (ctx: GridMenuContext) => void;
+	/** Gesture veto; see {@link EngineOptions.touchPassThrough}. */
+	private passTouch?: (e: TouchEvent) => boolean;
+	/** When the user's finger last moved the grid; see {@link SCROLL_GRACE_MS}. */
+	private touchScrollAt = 0;
+	/** When we last opened a context menu, so one press cannot open two. */
+	private menuOpenedAt = 0;
+	/** The live touch gesture, from `touchstart` to `touchend`. */
+	private touch: {
+		x: number;
+		y: number;
+		at: number;
+		/** The `<td>` the finger came down on, or null. */
+		cell: HTMLElement | null;
+		/** Set once the finger has travelled further than the slop radius. */
+		moved: boolean;
+		timer: number | null;
+	} | null = null;
+	private touchHandlers: [string, EventListener, boolean][] = [];
 
 	constructor(parent: HTMLElement, doc: SheetDoc, opts: EngineOptions) {
 		this.readOnly = !!opts.readOnly;
@@ -296,6 +374,8 @@ export class SheetEngine {
 
 		this.selectionListener = opts.onSelection;
 		this.links = opts.links;
+		this.menuBuilder = opts.menu;
+		this.passTouch = opts.touchPassThrough;
 		this.root = parent.createDiv({ cls: ROOT_CLASS });
 		this.root.addClass(this.uid);
 		this.host = this.root.createDiv({ cls: "leovale-sheet-host" });
@@ -341,6 +421,35 @@ export class SheetEngine {
 			onredo: notify,
 			onpaste: notify,
 			onsort: notify,
+			// The engine's own menu is never shown: `false` is the documented "do
+			// not open anything" answer of this hook (the vendor returns before it
+			// builds the jsuites menu). Ours is opened from here instead - see
+			// {@link openMenu} for why replacing beats restyling.
+			contextMenu: (
+				_ws: unknown,
+				colIndex: unknown,
+				rowIndex: unknown,
+				event: MouseEvent,
+				_items: unknown,
+				role: unknown,
+			) => {
+				const num = (v: unknown) => {
+					const n = Number(v);
+					return Number.isInteger(n) && n >= 0 ? n : null;
+				};
+				this.openMenu(
+					{
+						row: num(rowIndex),
+						col: num(colIndex),
+						role: typeof role === "string" ? role : "cell",
+						x: event?.clientX ?? 0,
+						y: event?.clientY ?? 0,
+						touch: false,
+					},
+					event,
+				);
+				return false;
+			},
 		} as never);
 
 		this.applyStoredRowHeights(doc);
@@ -359,6 +468,170 @@ export class SheetEngine {
 		this.scheduleFreezeSync();
 		this.syncDecor();
 		this.observeResize();
+		this.installTouchGestures();
+	}
+
+	/* --------------------------------------------------------- touch gestures */
+
+	/**
+	 * Touch handling, taken off the engine and done here.
+	 *
+	 * The vendor selects the cell from its own `touchstart` listener on
+	 * `document`, i.e. the moment a finger lands - and a finger lands on a cell
+	 * whenever the user means to SCROLL. The tapped cell became the active one,
+	 * the previous selection and the formula bar's context were gone, and the
+	 * user had not asked for any of it. So `touchstart` is stopped here (capture
+	 * phase, before it reaches `document`) and the decision is deferred:
+	 *
+	 *   - a tap (within {@link TAP_SLOP_PX}, shorter than {@link TAP_MAX_MS})
+	 *     selects the cell, on `touchend`;
+	 *   - anything longer or further is a scroll and changes nothing;
+	 *   - a stationary press of {@link LONG_PRESS_MS} opens the context menu,
+	 *     which is what a long press means on a touch screen.
+	 *
+	 * Swallowing `touchstart` also disarms the vendor's own 500 ms
+	 * long-press-to-edit timer for good, which is the trap documented in
+	 * {@link cancelTouchHold}: it opened the in-cell editor in the middle of a
+	 * scroll. Editing from a press now goes through the context menu instead.
+	 *
+	 * Nothing here calls `preventDefault()`: the scroll itself is exactly what we
+	 * are protecting, and the browser's own compatibility mouse events (which a
+	 * scroll gesture correctly suppresses) still reach the engine on a tap.
+	 */
+	private installTouchGestures(): void {
+		const on = (type: string, fn: EventListener, capture: boolean) => {
+			this.root.addEventListener(type, fn, capture ? { capture: true } : { passive: true });
+			this.touchHandlers.push([type, fn, capture]);
+		};
+		on("touchstart", ((e: TouchEvent) => this.onTouchStart(e)) as EventListener, true);
+		on("touchmove", ((e: TouchEvent) => this.onTouchMove(e)) as EventListener, false);
+		on("touchend", ((e: TouchEvent) => this.onTouchEnd(e)) as EventListener, false);
+		on("touchcancel", (() => this.endTouch()) as EventListener, false);
+	}
+
+	private onTouchStart(e: TouchEvent): void {
+		this.endTouch();
+		// A gesture the host claims (the drawer's edge strip) is left completely
+		// alone: stopping it here is exactly what took the drawer away in 1.1.0.
+		if (this.passTouch?.(e)) return;
+		// One finger is a tap or a pan; two are a pinch, which belongs to nobody
+		// here. Either way the engine must not see it.
+		e.stopPropagation();
+		this.cancelTouchHold();
+		const point = e.touches[0] ?? e.changedTouches[0];
+		if (!point || e.touches.length > 1) return;
+		const target = point.target as HTMLElement | null;
+		const cell = target?.closest?.("tbody td[data-x][data-y]") as HTMLElement | null;
+		const state = {
+			x: point.clientX,
+			y: point.clientY,
+			at: Date.now(),
+			cell: cell ?? null,
+			moved: false,
+			timer: null as number | null,
+		};
+		this.touch = state;
+		if (!cell) return;
+		state.timer = window.setTimeout(() => {
+			state.timer = null;
+			if (this.touch !== state || state.moved) return;
+			this.selectFromTouch(cell);
+			this.openMenu({
+				row: Number(cell.getAttribute("data-y")),
+				col: Number(cell.getAttribute("data-x")),
+				role: "cell",
+				x: state.x,
+				y: state.y,
+				touch: true,
+			});
+		}, LONG_PRESS_MS);
+	}
+
+	private onTouchMove(e: TouchEvent): void {
+		const state = this.touch;
+		if (!state) return;
+		const point = e.touches[0] ?? e.changedTouches[0];
+		if (!point) return;
+		if (
+			Math.abs(point.clientX - state.x) > TAP_SLOP_PX ||
+			Math.abs(point.clientY - state.y) > TAP_SLOP_PX
+		) {
+			state.moved = true;
+			this.clearTouchTimer(state);
+			// This is a scroll the USER is performing; nothing may scroll the grid
+			// out from under them for the next moment.
+			this.noteTouchScroll();
+		}
+	}
+
+	private onTouchEnd(e: TouchEvent): void {
+		const state = this.touch;
+		this.touch = null;
+		if (!state) return;
+		this.clearTouchTimer(state);
+		if (state.moved) {
+			// Momentum keeps the container moving after the finger is up.
+			this.noteTouchScroll();
+			return;
+		}
+		if (e.touches.length > 0) return;
+		if (Date.now() - state.at > TAP_MAX_MS) return;
+		if (state.cell) this.selectFromTouch(state.cell);
+	}
+
+	private clearTouchTimer(state: { timer: number | null }): void {
+		if (state.timer !== null) {
+			window.clearTimeout(state.timer);
+			state.timer = null;
+		}
+	}
+
+	private endTouch(): void {
+		if (this.touch) this.clearTouchTimer(this.touch);
+		this.touch = null;
+	}
+
+	/** Select the tapped cell WITHOUT scrolling: it is under the finger already. */
+	private selectFromTouch(cell: HTMLElement): void {
+		const row = Number(cell.getAttribute("data-y"));
+		const col = Number(cell.getAttribute("data-x"));
+		if (!Number.isInteger(row) || !Number.isInteger(col)) return;
+		this.selectCell(row, col, false, false);
+	}
+
+	/** The user is scrolling with a finger; hold off any scrolling of our own. */
+	noteTouchScroll(): void {
+		this.touchScrollAt = Date.now();
+	}
+
+	/** True while a user-initiated touch scroll owns the scroll position. */
+	isTouchScrolling(): boolean {
+		return Date.now() - this.touchScrollAt < SCROLL_GRACE_MS;
+	}
+
+	/**
+	 * Open the context menu, ours or none.
+	 *
+	 * Both entry points land here (the vendor's `contextMenu` hook for a right
+	 * click and Android's long press, and our own long-press timer for platforms
+	 * whose WebView does not fire `contextmenu`), so the same press must not open
+	 * two menus: one within a second of another is dropped.
+	 */
+	private openMenu(ctx: GridMenuContext, event?: MouseEvent): void {
+		event?.preventDefault();
+		event?.stopPropagation();
+		const now = Date.now();
+		if (now - this.menuOpenedAt < 1000) return;
+		this.menuOpenedAt = now;
+		if (!this.menuBuilder) return;
+		// A right click on a cell outside the selection has already moved the
+		// selection (the vendor does that before asking us), so the menu acts on
+		// what the user is looking at.
+		try {
+			this.menuBuilder(ctx);
+		} catch (e) {
+			console.error("leovale-sheets: building the context menu failed", e);
+		}
 	}
 
 	/**
@@ -1193,8 +1466,12 @@ export class SheetEngine {
 	 * engine's own `selectedCell`, which is what its arrow keys read - so both
 	 * are set here, or the next ArrowDown would jump back to where the mouse
 	 * last was.
+	 *
+	 * `scroll` is what a caller says when the cell may be off screen (a keyboard
+	 * move, a search hit). A tap passes `false`: the cell is under the finger,
+	 * and scrolling to it is how a horizontal pan used to snap back to column A.
 	 */
-	selectCell(row: number, col: number, extend = false): void {
+	selectCell(row: number, col: number, extend = false, scroll = true): void {
 		const ws = this.first();
 		if (!ws) return;
 		const anchor = extend ? this.lastSelection : null;
@@ -1208,8 +1485,22 @@ export class SheetEngine {
 			return;
 		}
 		this.lastSelection = [x1, y1, col, row];
-		this.cellElement(cellRef(row, col))?.scrollIntoView({ block: "nearest", inline: "nearest" });
+		if (scroll) this.scrollRefIntoView(cellRef(row, col));
 		this.notifySelection();
+	}
+
+	/**
+	 * Bring a cell into view, unless the user is scrolling.
+	 *
+	 * Every programmatic scroll in the plugin goes through here, and it is the
+	 * single place that knows the rule: a scroll the user performed with their
+	 * finger wins, for {@link SCROLL_GRACE_MS} after the gesture. Without it a
+	 * pan to column M ended with the sheet back at column A, which reads as a
+	 * grid that cannot be scrolled sideways at all.
+	 */
+	scrollRefIntoView(ref: string): void {
+		if (this.isTouchScrolling()) return;
+		this.cellElement(ref)?.scrollIntoView({ block: "nearest", inline: "nearest" });
 	}
 
 	private notifySelection(): void {
@@ -1330,6 +1621,93 @@ export class SheetEngine {
 	moveToGridEnd(extend = false): void {
 		const end = usedEnd(this.filled(), this.dimensions());
 		this.selectCell(end.row, end.col, extend);
+	}
+
+	/* ------------------------------------------------- rows and columns */
+
+	/**
+	 * Insert rows above or below a row. The engine shifts styles, masks and
+	 * merges itself, which is exactly why this goes through it rather than
+	 * through the document.
+	 */
+	insertRows(row: number, count = 1, before = true): void {
+		const ws = this.first();
+		if (!ws || this.readOnly) return;
+		try {
+			ws.insertRow(count, row, (before ? 1 : 0) as unknown as number);
+		} catch (e) {
+			console.error("leovale-sheets: inserting a row failed", e);
+			return;
+		}
+		this.notify();
+	}
+
+	deleteRows(row: number, count = 1): void {
+		const ws = this.first();
+		if (!ws || this.readOnly) return;
+		try {
+			ws.deleteRow(row, count);
+		} catch (e) {
+			console.error("leovale-sheets: deleting a row failed", e);
+			return;
+		}
+		this.notify();
+	}
+
+	insertColumns(col: number, count = 1, before = true): void {
+		const ws = this.first();
+		if (!ws || this.readOnly) return;
+		try {
+			ws.insertColumn(count, col, before);
+		} catch (e) {
+			console.error("leovale-sheets: inserting a column failed", e);
+			return;
+		}
+		this.notify();
+	}
+
+	deleteColumns(col: number, count = 1): void {
+		const ws = this.first();
+		if (!ws || this.readOnly) return;
+		try {
+			ws.deleteColumn(col, count);
+		} catch (e) {
+			console.error("leovale-sheets: deleting a column failed", e);
+			return;
+		}
+		this.notify();
+	}
+
+	/* -------------------------------------------------------- clipboard */
+
+	/**
+	 * The selection as tab-separated text, which is what every spreadsheet reads
+	 * from the clipboard. The DISPLAYED text travels, so a formula arrives as its
+	 * result and a currency cell as `$7.00` - the same rule the Markdown copy
+	 * follows, and the one a paste into another app expects.
+	 */
+	selectionTsv(): string {
+		const rect = this.selectionRect();
+		if (!rect) return "";
+		const lines: string[] = [];
+		for (let r = rect.r1; r <= rect.r2; r++) {
+			const row: string[] = [];
+			for (let c = rect.c1; c <= rect.c2; c++) row.push(this.displayText(cellRef(r, c)));
+			lines.push(row.join("\t"));
+		}
+		return lines.join("\n");
+	}
+
+	/** Write tab-separated text into the grid, anchored at the selection. */
+	pasteTsv(text: string): { rows: number; cols: number } {
+		const anchor = this.activeCell();
+		if (!anchor || text === "") return { rows: 0, cols: 0 };
+		const values = text
+			.replace(/\r\n?/g, "\n")
+			.replace(/\n$/, "")
+			.split("\n")
+			.map((line) => line.split("\t"));
+		return this.writeRange(anchor.row, anchor.col, values);
 	}
 
 	/* ---------------------------------------------------------- column width */
@@ -1659,6 +2037,12 @@ export class SheetEngine {
 	 * horizontal pan as "open the left drawer"), which also hides the event from
 	 * that listener, so the timer has to be cancelled here instead. Without this
 	 * a half-second scroll would pop the cell editor open.
+	 *
+	 * Since {@link installTouchGestures} the engine no longer sees `touchstart`
+	 * inside the grid at all, so the timer is normally never armed. This stays as
+	 * the belt to those braces: a touch that begins outside the grid root (the
+	 * toolbar, an edge gesture we deliberately let through) still reaches the
+	 * engine's own listener.
 	 */
 	cancelTouchHold(): void {
 		const base = jspreadsheet as unknown as {
@@ -1820,6 +2204,11 @@ export class SheetEngine {
 
 	destroy(): void {
 		this.discardOpenEditor();
+		this.endTouch();
+		for (const [type, fn, capture] of this.touchHandlers) {
+			this.root.removeEventListener(type, fn, capture);
+		}
+		this.touchHandlers = [];
 		if (this.freezeTimer !== null) {
 			window.clearTimeout(this.freezeTimer);
 			this.freezeTimer = null;
