@@ -97,7 +97,10 @@ jobs:
 
       - name: End-to-end tests (headless Obsidian)
         env:
-          SHEETS_OBSIDIAN_BIN: ${{ github.workspace }}/.obsidian-app/squashfs-root/AppRun
+          # The inner Electron binary, not AppRun: AppRun resolves paths via
+          # $APPDIR, which only the AppImage runtime sets (without it, line 45
+          # execs "/obsidian" and dies - seen in run 30253836396).
+          SHEETS_OBSIDIAN_BIN: ${{ github.workspace }}/.obsidian-app/squashfs-root/obsidian
           SHEETS_PLAYWRIGHT: playwright-core
           # Never 9222: that is a developer's own Obsidian on the machine where
           # this suite is also run by hand.
