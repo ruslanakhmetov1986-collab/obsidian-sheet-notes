@@ -1,11 +1,16 @@
 name: Auto-release
 
-# Every push to master: build, unit tests and the full e2e suite against a real
-# (headless) Obsidian, then automatically bump the version
+# Every push to master: build, unit tests, the coverage gate and the full e2e
+# suite against a real (headless) Obsidian, then automatically bump the version
 # (patch by default; put [minor] or [major] in the commit message to bump more;
 # put [skip release] to only build and test), tag it and publish a GitHub
 # release with main.js / manifest.json / styles.css - the assets BRAT and the
 # Obsidian catalog consume.
+#
+# Master takes no direct pushes any more: work arrives through pull requests,
+# which ci.yml gates. With a SQUASH merge the head commit message is the PULL
+# REQUEST TITLE, so the marker this workflow reads ([minor], [major],
+# [skip release]) has to be in the title of the pull request.
 #
 # Loop safety: the bot's own "release:" commit is filtered by the job `if`, and
 # pushes made with GITHUB_TOKEN do not retrigger workflows anyway.
@@ -48,6 +53,13 @@ jobs:
 
       - name: Unit tests
         run: npm test
+
+      # Defence in depth: ci.yml runs this on every pull request, and a commit
+      # can still reach master without one (the version bot pushes its own). The
+      # thresholds live in .c8rc.json; the per-file table goes to the log so a
+      # module losing coverage is visible here too.
+      - name: Coverage
+        run: npm run test:coverage
 
       # ---------------------------------------------------------------- e2e
       # The gate. The fill palette shipped invisible for three releases because

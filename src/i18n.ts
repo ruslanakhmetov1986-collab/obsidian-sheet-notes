@@ -173,6 +173,9 @@ const EN = {
 	commonCancel: "Cancel",
 	xlsxExported: "Saved {path}",
 	xlsxExportFailed: "Spreadsheet Notes: could not export this sheet ({message})",
+	xlsxSaveTitle: "Export as .xlsx",
+	xlsxSaveFilter: "Excel workbook",
+	xlsxExportedNextTo: "Saved {path}, next to the spreadsheet",
 	xlsxImported: "Imported {path}: worksheets {sheets}, filled cells {cells}",
 	xlsxImportFailed: "Spreadsheet Notes: could not read this .xlsx file ({message})",
 
@@ -322,6 +325,9 @@ const RU: Record<StringKey, string> = {
 	commonCancel: "Отмена",
 	xlsxExported: "Сохранено: {path}",
 	xlsxExportFailed: "Spreadsheet Notes: не удалось выгрузить этот лист ({message})",
+	xlsxSaveTitle: "Выгрузить в .xlsx",
+	xlsxSaveFilter: "Книга Excel",
+	xlsxExportedNextTo: "Сохранено: {path} (рядом с таблицей)",
 	xlsxImported: "Импортировано {path}: листов {sheets}, заполненных ячеек {cells}",
 	xlsxImportFailed: "Spreadsheet Notes: не удалось прочитать этот файл .xlsx ({message})",
 
@@ -468,6 +474,9 @@ const ZH: Record<StringKey, string> = {
 	commonCancel: "取消",
 	xlsxExported: "已保存：{path}",
 	xlsxExportFailed: "Spreadsheet Notes：导出失败（{message}）",
+	xlsxSaveTitle: "导出为 .xlsx",
+	xlsxSaveFilter: "Excel 工作簿",
+	xlsxExportedNextTo: "已保存：{path}（在表格旁边）",
 	xlsxImported: "已导入 {path}：工作表 {sheets} 个，已填写单元格 {cells} 个",
 	xlsxImportFailed: "Spreadsheet Notes：无法读取该 .xlsx 文件（{message}）",
 
@@ -614,6 +623,9 @@ const ZH_TW: Record<StringKey, string> = {
 	commonCancel: "取消",
 	xlsxExported: "已儲存：{path}",
 	xlsxExportFailed: "Spreadsheet Notes：匯出失敗（{message}）",
+	xlsxSaveTitle: "匯出為 .xlsx",
+	xlsxSaveFilter: "Excel 活頁簿",
+	xlsxExportedNextTo: "已儲存：{path}（在試算表旁）",
 	xlsxImported: "已匯入 {path}：工作表 {sheets} 個，已填寫儲存格 {cells} 個",
 	xlsxImportFailed: "Spreadsheet Notes：無法讀取此 .xlsx 檔案（{message}）",
 
@@ -762,6 +774,9 @@ const DE: Record<StringKey, string> = {
 	commonCancel: "Abbrechen",
 	xlsxExported: "Gespeichert: {path}",
 	xlsxExportFailed: "Spreadsheet Notes: Export fehlgeschlagen ({message})",
+	xlsxSaveTitle: "Als .xlsx exportieren",
+	xlsxSaveFilter: "Excel-Arbeitsmappe",
+	xlsxExportedNextTo: "Gespeichert: {path} (neben der Tabelle)",
 	xlsxImported: "{path} importiert: Arbeitsblätter {sheets}, gefüllte Zellen {cells}",
 	xlsxImportFailed: "Spreadsheet Notes: Diese .xlsx-Datei ist nicht lesbar ({message})",
 
@@ -910,6 +925,9 @@ const FR: Record<StringKey, string> = {
 	commonCancel: "Annuler",
 	xlsxExported: "Enregistré : {path}",
 	xlsxExportFailed: "Spreadsheet Notes : export impossible ({message})",
+	xlsxSaveTitle: "Exporter en .xlsx",
+	xlsxSaveFilter: "Classeur Excel",
+	xlsxExportedNextTo: "Enregistré : {path} (à côté de la feuille)",
 	xlsxImported: "{path} importé : feuilles {sheets}, cellules remplies {cells}",
 	xlsxImportFailed: "Spreadsheet Notes : fichier .xlsx illisible ({message})",
 
@@ -1058,6 +1076,9 @@ const ES: Record<StringKey, string> = {
 	commonCancel: "Cancelar",
 	xlsxExported: "Guardado: {path}",
 	xlsxExportFailed: "Spreadsheet Notes: no se pudo exportar esta hoja ({message})",
+	xlsxSaveTitle: "Exportar como .xlsx",
+	xlsxSaveFilter: "Libro de Excel",
+	xlsxExportedNextTo: "Guardado: {path} (junto a la hoja)",
 	xlsxImported: "{path} importado: hojas {sheets}, celdas con contenido {cells}",
 	xlsxImportFailed: "Spreadsheet Notes: no se pudo leer este archivo .xlsx ({message})",
 
@@ -1206,6 +1227,9 @@ const JA: Record<StringKey, string> = {
 	commonCancel: "キャンセル",
 	xlsxExported: "保存しました: {path}",
 	xlsxExportFailed: "Spreadsheet Notes: 書き出しに失敗しました（{message}）",
+	xlsxSaveTitle: ".xlsx として書き出す",
+	xlsxSaveFilter: "Excel ブック",
+	xlsxExportedNextTo: "保存しました: {path}（シートの隣）",
 	xlsxImported: "{path} を読み込みました: シート {sheets}、入力済みセル {cells}",
 	xlsxImportFailed: "Spreadsheet Notes: この .xlsx を読み取れません（{message}）",
 
@@ -1352,6 +1376,9 @@ const KO: Record<StringKey, string> = {
 	commonCancel: "취소",
 	xlsxExported: "저장했습니다: {path}",
 	xlsxExportFailed: "Spreadsheet Notes: 내보내지 못했습니다 ({message})",
+	xlsxSaveTitle: ".xlsx로 내보내기",
+	xlsxSaveFilter: "Excel 통합 문서",
+	xlsxExportedNextTo: "저장했습니다: {path} (시트 옆)",
 	xlsxImported: "{path} 가져왔습니다: 시트 {sheets}개, 내용이 있는 셀 {cells}개",
 	xlsxImportFailed: "Spreadsheet Notes: 이 .xlsx 파일을 읽지 못했습니다 ({message})",
 
@@ -1500,6 +1527,9 @@ const PT_BR: Record<StringKey, string> = {
 	commonCancel: "Cancelar",
 	xlsxExported: "Salvo: {path}",
 	xlsxExportFailed: "Spreadsheet Notes: não foi possível exportar esta planilha ({message})",
+	xlsxSaveTitle: "Exportar como .xlsx",
+	xlsxSaveFilter: "Pasta de trabalho do Excel",
+	xlsxExportedNextTo: "Salvo: {path} (ao lado da planilha)",
 	xlsxImported: "{path} importado: planilhas {sheets}, células preenchidas {cells}",
 	xlsxImportFailed: "Spreadsheet Notes: não foi possível ler este arquivo .xlsx ({message})",
 
@@ -1648,6 +1678,9 @@ const IT: Record<StringKey, string> = {
 	commonCancel: "Annulla",
 	xlsxExported: "Salvato: {path}",
 	xlsxExportFailed: "Spreadsheet Notes: esportazione non riuscita ({message})",
+	xlsxSaveTitle: "Esporta come .xlsx",
+	xlsxSaveFilter: "Cartella di lavoro di Excel",
+	xlsxExportedNextTo: "Salvato: {path} (accanto al foglio)",
 	xlsxImported: "{path} importato: fogli {sheets}, celle piene {cells}",
 	xlsxImportFailed: "Spreadsheet Notes: impossibile leggere questo file .xlsx ({message})",
 
@@ -1796,6 +1829,9 @@ const PL: Record<StringKey, string> = {
 	commonCancel: "Anuluj",
 	xlsxExported: "Zapisano: {path}",
 	xlsxExportFailed: "Spreadsheet Notes: nie udało się wyeksportować tego arkusza ({message})",
+	xlsxSaveTitle: "Eksportuj do .xlsx",
+	xlsxSaveFilter: "Skoroszyt programu Excel",
+	xlsxExportedNextTo: "Zapisano: {path} (obok arkusza)",
 	xlsxImported: "Zaimportowano {path}: arkusze {sheets}, wypełnione komórki {cells}",
 	xlsxImportFailed: "Spreadsheet Notes: nie można odczytać tego pliku .xlsx ({message})",
 

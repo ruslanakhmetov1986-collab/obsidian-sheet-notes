@@ -513,6 +513,18 @@ body.is-mobile .leovale-sheet-find-input,
 	line-height: 1.4em;
 }
 
+/* A column letter sits in the middle of its header, as it does in Excel and in
+   Google Sheets. `!important` because the engine writes `text-align: left`
+   INLINE on every header cell it builds (it mirrors the column's `align`
+   option, which we set to `left` for the DATA), and no stylesheet rule beats an
+   inline one. The row numbers are centred by the vendor already; the corner
+   cell is empty either way. Measured before the fix: computed `text-align` of a
+   column header was `left`, letters hugging the left edge while the row numbers
+   were centred - the two gutters did not match. */
+.leovale-sheet-root .jss_worksheet > thead > tr > td {
+	text-align: center !important;
+}
+
 .leovale-sheet-root .jss_worksheet > thead > tr > td.selected,
 .leovale-sheet-root .jss_worksheet > tbody > tr.selected > td:first-child {
 	background-color: var(--background-modifier-hover);
@@ -564,6 +576,31 @@ body.is-mobile .leovale-sheet-find-input,
 
 .leovale-sheet-root .jss_worksheet > tbody > tr > td.readonly {
 	color: var(--text-faint);
+}
+
+/* An empty cell is still a cell, and a row of them is still a row.
+ *
+ * A `<td>` with no content generates no LINE BOX, so its height is the padding
+ * and nothing else: 10px against the 32px of a row with text in it. In the main
+ * grid this never shows, because the row-number gutter always has a number in
+ * it and holds the row open. An embed can hide that gutter (`|plain` does), and
+ * then an empty row inside the used range renders as a 10px sliver between two
+ * normal rows - reported as "the row disappeared". Verified: rows 1/2/4 at
+ * 32.4px, row 3 (empty) at 10px.
+ *
+ * The fix is one zero-width strut in the cells that have no content. It creates
+ * the line box the text would have created, so an empty row is exactly as tall
+ * as a full one and no taller. It is a MINIMUM, not a height: `rowHeights` from
+ * the file is written on the `<tr>` inline and still wins, and a taller cell
+ * still grows the row, both of which is what table layout does anyway.
+ *
+ * `:empty` is the whole selector - a cell with a value, a checkbox or a link
+ * has children and is never matched, so nothing that renders today moves. */
+.leovale-sheet-root .jss_worksheet > tbody > tr > td:empty::before {
+	content: "";
+	display: inline-block;
+	width: 0;
+	height: 0;
 }
 
 /* Wrapped cells (`wrap` in the file). The flag itself is stored as
@@ -623,8 +660,8 @@ body.is-mobile .leovale-sheet-find-input,
  * A) scroll away while B and C stayed pinned. A background image needs no
  * positioning at all. */
 .leovale-sheet-root .jss_worksheet > thead > tr > td.leovale-sheet-filtered {
-	/* Top-RIGHT corner: the vendor left-aligns the column letter and the sort
-	   arrow follows it, so the left corner is where the letter actually is. */
+	/* Top-RIGHT corner: the letter is centred and the sort arrow sits just after
+	   it, so the right corner is the one piece of the header nothing else uses. */
 	background-image: radial-gradient(
 		circle at calc(100% - 5px) 6px,
 		var(--text-accent) 2.5px,
@@ -1049,13 +1086,38 @@ body.is-mobile .menu.leovale-sheet-menu .menu-item-icon .svg-icon,
  * The box replaces the cell's text rather than sitting next to it: the value is
  * the tick.
  *
- * It is DRAWN HERE rather than left to the platform, and that was measured, not
- * assumed. A plain `<input type="checkbox">` inside the grid came out as an
+ * The BOX is drawn here rather than left to the platform, and that was measured,
+ * not assumed. A plain `<input type="checkbox">` inside the grid came out as an
  * invisible white rectangle: Obsidian sets `appearance: none` on every checkbox
  * in the app and paints its own with a rule the vendor's scoped stylesheet then
  * overrode (`background: #fff; border: none`), leaving a box with no edges and
  * no tick. Both themes showed an empty column. So: our own border, our own
- * background, our own tick, in Obsidian's variables. */
+ * background - in Obsidian's variables.
+ *
+ * The TICK is Obsidian's, and deliberately so. Its rule is
+ *
+ *     input[type=checkbox]:checked:after {
+ *         content: ""; top: -1px; inset-inline-start: -1px;
+ *         width: var(--checkbox-size); height: var(--checkbox-size);
+ *         background-color: var(--checkbox-marker-color);
+ *         -webkit-mask-image: url("...check.svg"); -webkit-mask-size: 65%;
+ *     }
+ *
+ * i.e. a check-shaped MASK over a coloured block. We used to override that
+ * pseudo-element with a rotated two-sided border (the classic CSS tick) and win
+ * on specificity - but a longer selector only replaces the properties it
+ * mentions, and `-webkit-mask-image` was not one of them. Obsidian's mask stayed
+ * on and clipped our 4x7 px rotated corner down to a few pixels: on screen a
+ * ticked box was an accent square with an unreadable dash in it (measured: 4% of
+ * the box's interior differed from the fill, against ~20% for a real tick), and
+ * only the ticked state was wrong. Reported as a bug, twice.
+ *
+ * So the tick is left to Obsidian entirely. It is the mark the user sees in
+ * every other checkbox in the app, it follows any theme's `--checkbox-*`
+ * variables for free, and there is no second implementation to keep in step.
+ * The one thing needed from us is GEOMETRY: that rule sizes the mark from
+ * `--checkbox-size`, so the box is sized from the same variable (below) instead
+ * of a bare width/height, and the two cannot drift apart at any size. */
 
 /* A tick box sits in the middle of its cell, as it does in every spreadsheet.
    `!important` because the engine writes `text-align: left` INLINE on every cell
@@ -1067,18 +1129,22 @@ body.is-mobile .menu.leovale-sheet-menu .menu-item-icon .svg-icon,
 }
 
 .leovale-sheet-root input.leovale-sheet-cb {
+	/* A grid row is tighter than a note, so the box is a fixed 15 px rather than
+	   the theme's own size - but it is set THROUGH the variable, because
+	   Obsidian's tick is sized and centred off the same one. */
+	--checkbox-size: 15px;
 	-webkit-appearance: none !important;
 	appearance: none !important;
 	position: relative;
 	display: inline-block;
 	box-sizing: border-box;
-	width: 15px !important;
-	height: 15px !important;
+	width: var(--checkbox-size) !important;
+	height: var(--checkbox-size) !important;
 	margin: 0 !important;
 	padding: 0 !important;
 	vertical-align: middle;
 	border: 1px solid var(--checkbox-border-color, var(--background-modifier-border-hover)) !important;
-	border-radius: 3px !important;
+	border-radius: var(--checkbox-radius, 3px) !important;
 	background-color: var(--background-primary) !important;
 	box-shadow: none !important;
 	cursor: pointer;
@@ -1088,23 +1154,19 @@ body.is-mobile .menu.leovale-sheet-menu .menu-item-icon .svg-icon,
 	border-color: var(--interactive-accent) !important;
 }
 
+/* The fill is `--checkbox-color`, not `--interactive-accent`, even though the
+   default theme defines the first as the second: a theme is free to move them
+   apart, and `--checkbox-marker-color` - the colour of the tick we are NOT
+   drawing - is chosen to read against `--checkbox-color`. Taking the pair from
+   the same place is what keeps the mark visible on the fill. */
 .leovale-sheet-root input.leovale-sheet-cb:checked {
-	background-color: var(--interactive-accent) !important;
-	border-color: var(--interactive-accent) !important;
+	background-color: var(--checkbox-color, var(--interactive-accent)) !important;
+	border-color: var(--checkbox-color, var(--interactive-accent)) !important;
 }
 
-/* The tick, in percentages so it stays centred at both sizes. */
-.leovale-sheet-root input.leovale-sheet-cb:checked::after {
-	content: "";
-	position: absolute;
-	left: 50%;
-	top: 50%;
-	width: 28%;
-	height: 55%;
-	transform: translate(-50%, -60%) rotate(45deg);
-	border: solid var(--text-on-accent, #fff);
-	border-width: 0 2px 2px 0;
-}
+/* NO `::after` rule here on purpose - see the note above. The tick is
+   Obsidian's own masked pseudo-element; anything we add to it fights the mask
+   rather than replacing it. */
 
 .leovale-sheet-root input.leovale-sheet-cb:focus-visible {
 	outline: 2px solid var(--interactive-accent);
@@ -1116,11 +1178,11 @@ body.is-mobile .menu.leovale-sheet-menu .menu-item-icon .svg-icon,
 	opacity: 0.6;
 }
 
-/* Bigger target on a tablet, like every other control here. */
+/* Bigger target on a tablet, like every other control here. One variable, and
+   the tick grows with the box because Obsidian's rule reads the same one. */
 .leovale-sheet-content.is-mobile .leovale-sheet-root input.leovale-sheet-cb,
 body.is-mobile .leovale-sheet-root input.leovale-sheet-cb {
-	width: 20px !important;
-	height: 20px !important;
+	--checkbox-size: 20px;
 }
 
 /* ---- [[wiki links]] inside a cell --------------------------------------

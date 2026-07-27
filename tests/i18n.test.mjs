@@ -31,6 +31,9 @@ const ALLOWED = [
 	/\bMarkdown\b/g,
 	// ...and so is ".xlsx", which is a file extension in every language.
 	/\bxlsx\b/gi,
+	// "Excel" is a product name, and it is the one Microsoft itself keeps in the
+	// Russian, Chinese, Japanese and Korean interfaces ("Книга Excel").
+	/\bExcel\b/g,
 	/yyyy|mm|dd|hh/g,
 	/\{\w+\}/g,
 ];
