@@ -5,6 +5,7 @@ import path from "node:path";
 import { builtinModules } from "node:module";
 import postcss from "postcss";
 import prefixer from "postcss-prefix-selector";
+import { patchFormulaScopeGuard } from "./scripts/patch-vendor.mjs";
 
 const prod = process.argv[2] === "production";
 const ROOT_CLASS = ".leovale-sheet-root";
@@ -53,6 +54,32 @@ const stubCodepagePlugin = {
 			contents: "module.exports = undefined;",
 			loader: "js",
 		}));
+	},
+};
+
+/**
+ * Repair the vendor's formula scope guard on the way into the bundle.
+ *
+ * The whole story is in scripts/patch-vendor.mjs; the short version is that
+ * jspreadsheet asks a DIRECT `eval` whether a cell reference is already a
+ * defined name, the minifier's own module-scope variables are called things like
+ * `A1` and `C1`, and every formula naming one of those cells answered `#ERROR`.
+ * A build-time replacement is the smallest fix that ships: no fork, no runtime
+ * monkey-patch, and the vendor's own `dist` stays the thing we depend on.
+ *
+ * It is deliberately loud. `patchFormulaScopeGuard` throws when the line is not
+ * found, so bumping jspreadsheet-ce breaks the BUILD rather than quietly
+ * reintroducing the bug.
+ */
+const patchFormulaEvalPlugin = {
+	name: "patch-formula-scope-guard",
+	setup(build) {
+		build.onLoad({ filter: /jspreadsheet-ce[\\/]dist[\\/]index\.js$/ }, async (args) => {
+			const source = await fs.promises.readFile(args.path, "utf8");
+			const { code, count } = patchFormulaScopeGuard(source);
+			console.log(`[formula] scope guard patched (${count} site${count === 1 ? "" : "s"})`);
+			return { contents: code, loader: "js" };
+		});
 	},
 };
 
@@ -150,7 +177,7 @@ const context = await esbuild.context({
 	legalComments: "eof",
 	// Vendor CSS references SVG/PNG assets; inline them, no runtime fetches.
 	loader: { ".svg": "dataurl", ".png": "dataurl", ".gif": "dataurl" },
-	plugins: [cssScopePlugin, stubCodepagePlugin],
+	plugins: [cssScopePlugin, stubCodepagePlugin, patchFormulaEvalPlugin],
 });
 
 if (prod) {

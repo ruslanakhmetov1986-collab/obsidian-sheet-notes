@@ -13,7 +13,7 @@
 		"defaults in place every file came out at 0%.",
 		"",
 		"The thresholds are the level the suite actually reached when they were set",
-		"(95.9 lines, 90.77 functions, 86.45 branches), rounded down. They are a",
+		"(96.18 lines, 92.06 functions, 87.95 branches), rounded down. They are a",
 		"REGRESSION gate, not a target: raise them when the real number rises."
 	],
 	"all": true,
@@ -21,8 +21,8 @@
 	"exclude": [],
 	"reporter": ["text", "lcov"],
 	"check-coverage": true,
-	"lines": 95,
-	"statements": 95,
-	"functions": 90,
-	"branches": 85
+	"lines": 96,
+	"statements": 96,
+	"functions": 92,
+	"branches": 87
 }

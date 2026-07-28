@@ -183,6 +183,7 @@ them. Who keeps the focus afterwards depends on the device, and deliberately so:
 | Copy, cut, paste, undo, redo | `Ctrl+C` / `Ctrl+X` / `Ctrl+V`, `Ctrl+Z` / `Ctrl+Y` |
 | Edit the active cell | `F2` |
 | Fill down | `Ctrl+D` (the top row of the selection over the rest, or the cell above into a single cell) |
+| Continue a series | Drag the small square at the bottom-right corner of the selection (the fill handle) |
 | Start / end of the row | `Home` / `End` (`End` stops at the last filled cell, not at column Z) |
 | A1 / the last used cell | `Ctrl+Home` / `Ctrl+End` |
 | Jump to the edge of the data | `Ctrl+←↑→↓` |
@@ -217,10 +218,34 @@ move, so nothing is lost if you change your mind - `Esc` calls the cut off.
 Formulas are pasted as written (`=B2+1` stays `=B2+1`, it is not rewritten for
 its new address), the same rule fill-down follows.
 
+**The fill handle continues a series.** Select `1, 2, 3`, drag the little square
+at the bottom-right corner of the selection, and the cells you drag across
+become `4, 5, 6`. What it recognises, in this order:
+
+| Selected | Dragged |
+|---|---|
+| one cell | copied, unchanged - one cell carries no step |
+| `1, 2, 3` / `10, 8` / `0.5, 1.0` | the arithmetic progression continues, in either direction |
+| `2026-01-01, 2026-01-02` | the next days; `2026-01-15, 2026-02-15` steps by whole MONTHS and keeps the day of the month |
+| `Товар 1, Товар 2` | `Товар 3` - the text stays, the trailing number moves, zero padding included |
+| a formula | its relative references move, `$A$1` does not |
+| anything else | the samples repeat |
+
+It works down, up, left and right; while you drag, a dashed box previews where
+the series will land. The fills, bold, borders, number masks and checkbox cells
+of the selected cells repeat over the filled ones, and the whole drag is a
+single `Ctrl+Z`. On a tablet the handle answers to a 24 px touch target rather
+than to the 7 px square you can see.
+
 Formulas are evaluated by the bundled Jspreadsheet CE engine: `SUM`, `AVERAGE`,
 `IF`, `VLOOKUP`, `SUMIF`, `IFERROR`, `SUMPRODUCT`, `TEXTJOIN` and a few hundred
 more. Computed results are never written to the file. Only the formula source
 is stored, and everything is recalculated on open.
+
+**Numbers are right-aligned** and drawn with tabular figures, so the digits of a
+column line up whatever the interface font is. Text that merely contains a
+number (`Товар 1`, `12 штук`) stays on the left, and an alignment you set
+yourself always wins.
 
 ### Touch: what a finger does
 
@@ -713,7 +738,7 @@ npm run e2e          # e2e in a sandboxed Obsidian, screenshots into tests/shots
 `npm run test:coverage` runs the unit suite under [c8] and prints a per-file
 table. It is a **gate**: the thresholds in `.c8rc.json` are the level the suite
 actually reached when they were last set, rounded down (lines and statements
-95%, functions 90%, branches 85%, measured 95.9 / 90.77 / 86.45), so the command
+96%, functions 92%, branches 87%, measured 96.18 / 92.06 / 87.95), so the command
 fails when coverage DROPS and never asks for a number nobody has reached. Both CI
 workflows run it.
 
@@ -1292,6 +1317,71 @@ own `/ToUnicode` CMaps, which are in the file. Finding those needs one more
 piece of care: an embedded font is binary and the seven bytes `stream\n` turn up
 inside one, so a scanner that looks for `stream` alone reads nine of ten streams
 from the wrong offset. The dictionary end (`>>\s*stream`) is part of the pattern.
+
+The minifier can rename a variable after a cell, and one formula in ten stops
+working. Every formula that named a cell in ROW 1 - `=A1`, `=B1*2`,
+`=SUM(B1:B2)` - answered `#ERROR` in the released builds while the same formula
+one row lower was fine. Nothing was wrong with the parser or with the
+doc-to-worksheet mapping. Jspreadsheet decides whether to hand the evaluator a
+cell's value under `eval("typeof(" + token + ') == "undefined"')`, meaning "is
+this token already a defined NAME?" - the guard exists so `LOG10(A1)` and
+`ATAN2(B1,C1)`, which match the same letters-then-digits shape a reference does,
+are not shadowed by cell values. But that is a DIRECT eval, so it sees the whole
+enclosing lexical scope, and in the plugin bundle that scope is esbuild's
+minified module scope, whose generated names are a letter followed by a digit:
+`A1`, `C1`, `E1`, `J1`. Measured on a real build: twenty of the twenty-six
+column letters of row 1 collided. For each of them the value was never
+collected, and the generated `new Function("; return A1")` - which runs in
+GLOBAL scope and cannot see the bundle either - threw a `ReferenceError` the
+vendor swallowed into `#ERROR`. It was never a row-1 bug; it was a "your
+reference collided with a minified variable" bug, and the `...2` band was next
+as the bundle grew. The dev build, where identifiers are not minified, never
+showed it. The fix is a build-time replacement of that one expression with a
+lookup on `globalThis` (`scripts/patch-vendor.mjs`, wired in as an esbuild
+`onLoad` plugin), which asks about the scope the formula functions actually live
+in and cannot be captured by a minifier. It throws if the vendor line moves, so
+bumping jspreadsheet-ce breaks the BUILD rather than quietly reintroducing the
+bug.
+
+The grid engine writes `text-align: left` inline on every cell, so aligning
+numbers needs `!important`. The alignment comes from `columns[].align`, which
+the engine assigns to `element.style`, and an inline declaration beats any
+ordinary rule - the same reason the column letters are centred with
+`!important`. So numbers are right-aligned by a class the engine puts on cells
+whose RAW value is a number (`leovale-sheet-num`), with an `!important` rule
+behind it. The class is deliberately not put on a cell whose inline alignment is
+already `center` or `right`, which is what an alignment the user chose looks
+like. The one case it cannot honour is an explicit align-LEFT on a number: the
+file format has never stored `ha: "l"` (left is the default and carries no
+information), so there is nothing to tell "the user asked for left" apart from
+"nobody asked for anything".
+
+A dark theme cannot restyle an inline `background-color`, so it lays a layer
+over it. A user's fill is written into the cell's inline style, the stored value
+must not change when the theme does, and an inline declaration wins - so the
+pastel palette, picked on white paper, glared on a dark surface with nothing a
+rule could do about it. The dim is a `background-image` (one flat
+`linear-gradient`), which is a different layer and paints over the colour, keyed
+on a `leovale-sheet-filled` class rather than on a substring of the style
+attribute (Chromium rewrites `#fff2cc` into `rgb(255, 242, 204)` when it
+serialises, and matching on that would be a guess about serialisation). The
+alpha is 0.28 and it is not a matter of taste: the cell's TEXT colour is chosen
+from the UNDIMMED fill, so the dim can only eat into the contrast, and 0.28 is
+the strongest dim under which every palette colour still clears WCAG AA against
+its own ink. A unit test measures exactly that, so a "slightly darker" edit
+fails the suite instead of shipping. The selection wash is the same kind of
+layer, so a filled cell inside a selection needs a rule that stacks BOTH
+gradients - `background-image` is one property, and two rules would be a choice
+rather than a stack.
+
+`position: relative` on a header cell silently replaces the vendor's
+`position: sticky`. The sort marker is absolutely positioned against the header
+cell's own containing block, and it must not create one: sticky IS a positioned
+value, so an `::after` with `position: absolute` works as it stands, while
+adding `position: relative` "to be safe" would make the letter of a sorted
+column scroll away while its neighbours stayed pinned. That was measured once
+already, which is why the filter dot is drawn as a `background-image` radial
+gradient and needs no positioning at all.
 
 ## License
 

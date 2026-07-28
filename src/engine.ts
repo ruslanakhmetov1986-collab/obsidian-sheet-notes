@@ -14,7 +14,7 @@ import jspreadsheet from "jspreadsheet-ce";
 import "jsuites/dist/jsuites.css";
 import "jspreadsheet-ce/dist/jspreadsheet.css";
 import type { CellValue as JssCellValue, WorksheetInstance } from "jspreadsheet-ce";
-import { WRAP_CLASS, WRAP_ON, cssToStyle, styleToCss } from "./cellcss";
+import { WRAP_CLASS, WRAP_ON, cssToStyle, looksNumeric, styleToCss } from "./cellcss";
 import {
 	type ClipCell,
 	type ClipRect,
@@ -47,6 +47,8 @@ import {
 	normalizeView,
 	parseRef,
 } from "./format";
+import { type FillValue, isFormula, planFill, shiftFormula } from "./fillseries";
+import { t } from "./i18n";
 import { type CellLink, hasWikiLink, parseCellLinks } from "./links";
 import {
 	type Cursor,
@@ -103,9 +105,25 @@ export const SORTED_CLASS = "leovale-sheet-sorted";
 export const CUT_CLASS = "leovale-sheet-cut";
 /** The overlay that outlines the selected range; see {@link SheetEngine.syncSelectionBox}. */
 export const SELBOX_CLASS = "leovale-sheet-selbox";
+/** The dashed overlay that previews where a fill-handle drag will land. */
+export const FILLBOX_CLASS = "leovale-sheet-fillbox";
+/** Marks a cell as holding a NUMBER, so the theme can align digits by column. */
+export const NUM_CLASS = "leovale-sheet-num";
+/** Marks a cell that carries a user fill, so the dark theme can soften it. */
+export const FILLED_CLASS = "leovale-sheet-filled";
 
-/** Sane bounds for a column width, in px, whatever the user or autofit asks. */
-export const MIN_COL_WIDTH = 24;
+/**
+ * Sane bounds for a column width, in px, whatever the user or autofit asks.
+ *
+ * The floor was 24, which is narrower than a single Cyrillic word and is what
+ * the design audit's "catastrophic word break" screenshot was really showing: at
+ * that width there is no word boundary to break at, so every line breaks inside
+ * a word however the wrapping rule is written. 40 still allows a genuinely
+ * narrow column (a tick box, an index) and leaves the wrapping something to work
+ * with. A width already stored in a file is replayed untouched - only what the
+ * user or autofit asks for now is clamped.
+ */
+export const MIN_COL_WIDTH = 40;
 export const MAX_COL_WIDTH = 1200;
 
 /* ------------------------------------------------------------- touch */
@@ -175,6 +193,23 @@ function coerce(value: unknown): CellValue | undefined {
 		if (Number.isFinite(n) && String(n) === s) return n;
 	}
 	return s;
+}
+
+/**
+ * Client coordinates of whatever kind of pointer this event carries.
+ *
+ * The fill handle is driven by a mouse and by a finger through the SAME code
+ * path, because the gesture is the same gesture and two copies of it would drift
+ * apart. `touches` is empty on `touchend`, so `changedTouches` is the fallback.
+ */
+function pointerOf(e: Event): { x: number; y: number } | null {
+	const touch = e as TouchEvent;
+	if (touch.touches || touch.changedTouches) {
+		const p = touch.touches?.[0] ?? touch.changedTouches?.[0];
+		return p ? { x: p.clientX, y: p.clientY } : null;
+	}
+	const mouse = e as MouseEvent;
+	return typeof mouse.clientX === "number" ? { x: mouse.clientX, y: mouse.clientY } : null;
 }
 
 function docToWorksheets(doc: SheetDoc, readOnly: boolean): Record<string, unknown>[] {
@@ -417,6 +452,20 @@ export class SheetEngine {
 	private cutRefs: string[] = [];
 	/** The selection outline overlay; see {@link syncSelectionBox}. */
 	private selBox: HTMLElement | null = null;
+	/** The dashed preview of a fill-handle drag; see {@link drawFillBox}. */
+	private fillBox: HTMLElement | null = null;
+	/** Listeners the fill handle owns on the root, kept for teardown. */
+	private fillHandlers: [string, EventListener][] = [];
+	/** The fill drag currently in progress; see {@link installFillHandle}. */
+	private fill: {
+		src: ClipRect;
+		dst: ClipRect | null;
+		touch: boolean;
+		doc: Document;
+		move: EventListener;
+		up: EventListener;
+		cancel: EventListener;
+	} | null = null;
 
 	constructor(parent: HTMLElement, doc: SheetDoc, opts: EngineOptions) {
 		this.readOnly = !!opts.readOnly;
@@ -534,6 +583,7 @@ export class SheetEngine {
 		this.syncDecor();
 		this.observeResize();
 		this.installTouchGestures();
+		this.installFillHandle();
 		this.installKeyBridge();
 		this.installClipboardKeys();
 	}
@@ -1052,6 +1102,7 @@ export class SheetEngine {
 				.forEach((el) => el.classList.add(WRAP_CLASS));
 			this.syncCheckboxes();
 			this.syncLinks();
+			this.syncCellClasses();
 			// The outline is geometry, so it goes stale on anything that moves a
 			// cell: a resized column, a row that grew because its text wraps, an
 			// inserted row, a filter that hid one.
@@ -1207,6 +1258,60 @@ export class SheetEngine {
 				this.decorateLinks(el, raw);
 			}
 		}
+	}
+
+	/**
+	 * Two facts about a cell that CSS cannot work out on its own, marked as
+	 * classes so the theme layer can act on them.
+	 *
+	 * `leovale-sheet-num` - the cell holds a NUMBER, so its digits align right
+	 * and line up down the column, which is what every spreadsheet does and what
+	 * the design audit found missing on four screens out of six. Only the RAW
+	 * value is consulted, so a masked `1 234,00 ₽` counts and `Товар 1` does not.
+	 * A cell whose owner asked for an alignment keeps it: an explicit `ha` is
+	 * written into the cell's inline `text-align`, and finding `center` or
+	 * `right` there is what "the user decided this" looks like.
+	 *
+	 * `leovale-sheet-filled` - the cell carries a user fill, which the dark theme
+	 * softens (see DARK_FILL_DIM). A class rather than an attribute-substring
+	 * selector on the inline style, because the browser rewrites `#fff2cc` into
+	 * `rgb(255, 242, 204)` when it serialises the style attribute and a selector
+	 * matching on that would be a guess about serialisation.
+	 *
+	 * The pass is over the engine's own `records`, i.e. exactly the loop
+	 * {@link syncLinks} already runs, and it touches classes only - no layout is
+	 * read, so it costs nothing that could show up as a reflow.
+	 */
+	private syncCellClasses(): void {
+		const data = this.rawData();
+		const records =
+			(this.first() as unknown as { records?: { element?: HTMLElement }[][] })?.records ?? [];
+		for (let r = 0; r < data.length; r++) {
+			const row = data[r];
+			if (!Array.isArray(row)) continue;
+			for (let c = 0; c < row.length; c++) {
+				const el = records[r]?.[c]?.element;
+				if (!el) continue;
+				const bg = el.style.backgroundColor;
+				el.classList.toggle(FILLED_CLASS, bg !== "" && !bg.startsWith("var("));
+				el.classList.toggle(NUM_CLASS, this.rendersNumber(el, row[c]));
+			}
+		}
+	}
+
+	/** Is this cell showing a number? See {@link syncCellClasses}. */
+	private rendersNumber(el: HTMLElement, raw: unknown): boolean {
+		// A tick box is a control and a link is prose; neither is a number.
+		if (el.hasAttribute(TYPE_ATTR) || el.hasAttribute(LINK_SRC_ATTR)) return false;
+		const align = el.style.textAlign;
+		if (align === "center" || align === "right") return false;
+		// A formula's VALUE is what the reader sees, and the engine has already
+		// written it into the element; the mask, if any, is applied on top of it,
+		// so the pre-mask text is the honest source in both cases.
+		if (typeof raw === "string" && raw.startsWith("=")) {
+			return looksNumeric(el.getAttribute(NF_SRC_ATTR) ?? el.textContent ?? "");
+		}
+		return looksNumeric(raw);
 	}
 
 	private decorateLinks(el: HTMLElement, text: string): void {
@@ -2147,6 +2252,358 @@ export class SheetEngine {
 		}
 	}
 
+	/* ---------------------------------------------------------- fill handle */
+
+	/**
+	 * Excel's fill handle: drag the little square at the corner of the selection
+	 * and the selection CONTINUES over the cells you drag across.
+	 *
+	 * WHY THE GESTURE IS TAKEN OFF THE VENDOR RATHER THAN CONFIGURED. jspreadsheet
+	 * has a corner drag of its own (`autoIncrement`), and it can do two of the
+	 * five things this needs. It steps a number by exactly ±1, never by the step
+	 * the samples describe; and it only does even that when the selection is a
+	 * SINGLE ROW - so the `1, 2, 3` a user selects, which is three rows, was a
+	 * plain copy. It also strips every `$` out of a dragged formula. So the
+	 * `mousedown` on `.jss_corner` is swallowed in the capture phase (the vendor
+	 * listens on `document`, in the bubble phase, so stopping it there is enough)
+	 * and the whole gesture is ours: preview, series, styles and history.
+	 *
+	 * WHAT IS FILLED. One LANE at a time - a column for a vertical drag, a row
+	 * for a horizontal one - because that is what a series is: `1, 2, 3` beside
+	 * `10, 20, 30` dragged down continues both, independently, which is what a
+	 * spreadsheet does. {@link planFill} decides each lane on its own.
+	 *
+	 * DIRECTION is single-axis, as everywhere else: the drag that started at the
+	 * corner extends either vertically or horizontally, whichever the pointer has
+	 * travelled further out of the selection, and never both at once.
+	 */
+	private installFillHandle(): void {
+		const start = (e: Event) => {
+			const target = e.target as HTMLElement | null;
+			if (!target?.classList?.contains("jss_corner")) return;
+			if (this.readOnly) return;
+			const point = pointerOf(e);
+			if (!point) return;
+			// The vendor must not also start its own copy-drag on this press.
+			e.stopPropagation();
+			if (e.cancelable) e.preventDefault();
+			this.beginFill(point, e.type.startsWith("touch"));
+		};
+		this.root.addEventListener("mousedown", start, { capture: true });
+		this.fillHandlers.push(["mousedown", start]);
+		this.root.addEventListener("touchstart", start, { capture: true });
+		this.fillHandlers.push(["touchstart", start]);
+		// The handle is a 7px square with no affordance whatever. A tooltip is
+		// the cheapest one there is, and it is what a screen reader reads out.
+		const corner = this.host.querySelector<HTMLElement>(".jss_corner");
+		if (corner) {
+			corner.setAttribute("title", t("fillHandle"));
+			corner.setAttribute("aria-label", t("fillHandle"));
+		}
+	}
+
+	private beginFill(point: { x: number; y: number }, touch: boolean): void {
+		const src = this.selectionRect();
+		if (!src) return;
+		const doc = this.root.ownerDocument;
+		const move = (e: Event) => {
+			const p = pointerOf(e);
+			if (!p) return;
+			// A finger dragging the handle is not the page scrolling.
+			if (e.cancelable) e.preventDefault();
+			this.trackFill(p);
+		};
+		const up = () => this.endFill(true);
+		const cancel = () => this.endFill(false);
+		this.fill = { src, dst: null, touch, move, up, cancel, doc };
+		doc.addEventListener("mousemove", move, true);
+		doc.addEventListener("mouseup", up, true);
+		doc.addEventListener("touchmove", move, { capture: true, passive: false });
+		doc.addEventListener("touchend", up, true);
+		doc.addEventListener("touchcancel", cancel, true);
+		this.trackFill(point);
+	}
+
+	/** Where the pointer is now -> which cells the drag would fill. */
+	private trackFill(point: { x: number; y: number }): void {
+		const state = this.fill;
+		if (!state) return;
+		const el = this.root.ownerDocument.elementFromPoint(point.x, point.y) as HTMLElement | null;
+		const cell = el?.closest?.("tbody > tr > td[data-x][data-y]") as HTMLElement | null;
+		state.dst = cell ? this.fillTargetRect(state.src, cell) : null;
+		this.drawFillBox(state.dst);
+	}
+
+	/**
+	 * The rectangle a drag to `cell` fills, given the source rectangle.
+	 *
+	 * Single axis, and the axis is the one the pointer has left the selection on
+	 * by the greater number of cells. A pointer still inside the selection fills
+	 * nothing, which is how a drag is cancelled by dragging back.
+	 */
+	private fillTargetRect(src: ClipRect, cell: HTMLElement): ClipRect | null {
+		const row = Number(cell.getAttribute("data-y"));
+		const col = Number(cell.getAttribute("data-x"));
+		if (!Number.isInteger(row) || !Number.isInteger(col)) return null;
+		const down = row - src.r2;
+		const up = src.r1 - row;
+		const right = col - src.c2;
+		const left = src.c1 - col;
+		const vertical = Math.max(down, up);
+		const horizontal = Math.max(right, left);
+		if (vertical <= 0 && horizontal <= 0) return null;
+		if (vertical >= horizontal) {
+			return down > 0
+				? { r1: src.r2 + 1, c1: src.c1, r2: row, c2: src.c2 }
+				: { r1: row, c1: src.c1, r2: src.r1 - 1, c2: src.c2 };
+		}
+		return right > 0
+			? { r1: src.r1, c1: src.c2 + 1, r2: src.r2, c2: col }
+			: { r1: src.r1, c1: col, r2: src.r2, c2: src.c1 - 1 };
+	}
+
+	/**
+	 * The preview, drawn the same way the selection outline is: one absolutely
+	 * positioned box in the vendor's `.jss_content`, measured off the cells the
+	 * drag currently covers. A dashed border rather than a solid one, so it can
+	 * never be mistaken for the selection it is about to extend.
+	 */
+	private drawFillBox(rect: ClipRect | null): void {
+		const content = this.host.querySelector<HTMLElement>(".jss_content");
+		if (!content) return;
+		let box = this.fillBox;
+		if (!box || !box.isConnected || box.parentElement !== content) {
+			box?.remove();
+			box = content.createDiv({ cls: FILLBOX_CLASS });
+			this.fillBox = box;
+		}
+		if (!rect) {
+			box.style.display = "none";
+			return;
+		}
+		let left = Infinity;
+		let top = Infinity;
+		let right = -Infinity;
+		let bottom = -Infinity;
+		for (let r = rect.r1; r <= rect.r2; r++) {
+			for (let c = rect.c1; c <= rect.c2; c++) {
+				const box2 = this.cellElement(cellRef(r, c))?.getBoundingClientRect();
+				if (!box2 || box2.width < 1 || box2.height < 1) continue;
+				left = Math.min(left, box2.left);
+				top = Math.min(top, box2.top);
+				right = Math.max(right, box2.right);
+				bottom = Math.max(bottom, box2.bottom);
+			}
+		}
+		if (!Number.isFinite(left)) {
+			box.style.display = "none";
+			return;
+		}
+		const base = content.getBoundingClientRect();
+		box.style.display = "block";
+		box.style.left = `${Math.round(left - base.left)}px`;
+		box.style.top = `${Math.round(top - base.top)}px`;
+		box.style.width = `${Math.round(right - left)}px`;
+		box.style.height = `${Math.round(bottom - top)}px`;
+	}
+
+	/** Finish the gesture: `commit` false means it was cancelled. */
+	private endFill(commit: boolean): void {
+		const state = this.fill;
+		this.fill = null;
+		if (!state) return;
+		const { doc, move, up, cancel } = state;
+		doc.removeEventListener("mousemove", move, true);
+		doc.removeEventListener("mouseup", up, true);
+		doc.removeEventListener("touchmove", move, true);
+		doc.removeEventListener("touchend", up, true);
+		doc.removeEventListener("touchcancel", cancel, true);
+		this.drawFillBox(null);
+		if (commit && state.dst) this.fillRange(state.src, state.dst);
+	}
+
+	/**
+	 * Write the series into `dst`, and extend the selection over it.
+	 *
+	 * Public because the touch and mouse paths are not the only callers worth
+	 * having: it is also the whole feature, testable without a pointer.
+	 *
+	 * Everything a cell is travels: the value (or the continued series), the
+	 * style, the number mask and the checkbox type, repeating the samples in
+	 * order. A formula is the exception the series rules already carve out - it
+	 * is rewritten by offset instead of continued (see {@link shiftFormula}).
+	 */
+	fillRange(src: ClipRect, dst: ClipRect): { rows: number; cols: number } {
+		const ws = this.first();
+		if (!ws || this.readOnly) return { rows: 0, cols: 0 };
+		const size = this.dimensions();
+		const rect = {
+			r1: Math.max(0, dst.r1),
+			c1: Math.max(0, dst.c1),
+			r2: Math.min(size.rows - 1, dst.r2),
+			c2: Math.min(size.cols - 1, dst.c2),
+		};
+		if (rect.r2 < rect.r1 || rect.c2 < rect.c1) return { rows: 0, cols: 0 };
+
+		const vertical = rect.c1 === src.c1 && rect.c2 === src.c2;
+		// Which way the series travels: away from the source rectangle.
+		const forward = vertical ? rect.r1 > src.r2 : rect.c1 > src.c2;
+		const mark = this.historyMark(ws);
+		const refs: string[] = [];
+		const styles = new Map<string, CellStyle>();
+		const boxes: string[] = [];
+		const plain: string[] = [];
+
+		try {
+			const lanes = vertical ? src.c2 - src.c1 + 1 : src.r2 - src.r1 + 1;
+			for (let lane = 0; lane < lanes; lane++) {
+				// The source cells of this lane, in the order the fill travels: a
+				// drag upwards reads them bottom-to-top, and the series code needs
+				// no idea which way it is going.
+				const sources: { row: number; col: number }[] = [];
+				const span = vertical ? src.r2 - src.r1 + 1 : src.c2 - src.c1 + 1;
+				for (let i = 0; i < span; i++) {
+					const step = forward ? i : span - 1 - i;
+					sources.push(
+						vertical
+							? { row: src.r1 + step, col: src.c1 + lane }
+							: { row: src.r1 + lane, col: src.c1 + step },
+					);
+				}
+				const targets: { row: number; col: number }[] = [];
+				const count = vertical ? rect.r2 - rect.r1 + 1 : rect.c2 - rect.c1 + 1;
+				for (let i = 0; i < count; i++) {
+					const step = forward ? i : count - 1 - i;
+					targets.push(
+						vertical
+							? { row: rect.r1 + step, col: src.c1 + lane }
+							: { row: src.r1 + lane, col: rect.c1 + step },
+					);
+				}
+
+				const raws = sources.map((p) => this.getRawValue(cellRef(p.row, p.col)));
+				// A lane with a hole in it describes no series anybody could name,
+				// so it repeats instead - which is what `values: []` selects below.
+				const complete = raws.every((v) => v !== null && v !== "");
+				const values = complete ? planFill(raws as FillValue[], targets.length) : [];
+
+				targets.forEach((t, i) => {
+					const from = sources[i % sources.length] as { row: number; col: number };
+					const raw = raws[i % raws.length];
+					const ref = cellRef(t.row, t.col);
+					let value: FillValue = "";
+					if (isFormula(raw)) {
+						value = shiftFormula(raw, t.row - from.row, t.col - from.col);
+					} else if (values.length > 0) {
+						value = values[i] as FillValue;
+					} else if (raw !== null && raw !== undefined) {
+						value = raw;
+					}
+					refs.push(ref);
+					styles.set(ref, this.getStyleAt(cellRef(from.row, from.col)));
+					(this.getCellType(cellRef(from.row, from.col)) === "cb" ? boxes : plain).push(ref);
+					ws.setValueFromCoords(t.col, t.row, value as JssCellValue);
+				});
+			}
+		} catch (e) {
+			console.error("leovale-sheets: filling a range failed", e);
+			return { rows: 0, cols: 0 };
+		}
+
+		this.applyStyle(refs, (_cur, ref) => styles.get(ref) ?? {});
+		if (boxes.length > 0) this.setCellType(boxes, "cb");
+		if (plain.length > 0) this.setCellType(plain, null);
+		// One drag is one undo. See {@link historyMark}.
+		this.coalesceHistory(ws, mark);
+		// The source AND what it produced end up selected, as in Excel: the next
+		// drag continues the longer series.
+		this.selectRange(
+			Math.min(src.r1, rect.r1),
+			Math.min(src.c1, rect.c1),
+			Math.max(src.r2, rect.r2),
+			Math.max(src.c2, rect.c2),
+		);
+		this.notify();
+		return { rows: rect.r2 - rect.r1 + 1, cols: rect.c2 - rect.c1 + 1 };
+	}
+
+	/** Where the engine's undo stack stands right now; see {@link coalesceHistory}. */
+	private historyMark(ws: WorksheetInstance): number {
+		const idx = (ws as unknown as { historyIndex?: number }).historyIndex;
+		return typeof idx === "number" ? idx + 1 : -1;
+	}
+
+	/**
+	 * Fold everything a fill pushed onto the engine's undo stack into ONE entry.
+	 *
+	 * A fill writes cell by cell (`setValueFromCoords`) and then styles them in
+	 * one go, which is a `setValue` record per cell plus a `setStyle` record -
+	 * i.e. one drag would cost twenty presses of Ctrl+Z. The vendor's own paste
+	 * has the same shape and solves it the same way: a single
+	 * `{action: "setValue", records, oldStyle, newStyle}` entry, which its `undo`
+	 * already knows how to replay (it walks `records` for the values and calls
+	 * `resetStyle(oldStyle)` for the appearance).
+	 *
+	 * Defensive by construction: anything unexpected on the stack and the entries
+	 * are left exactly as they were, so the worst case is the old behaviour
+	 * rather than a broken undo.
+	 */
+	private coalesceHistory(ws: WorksheetInstance, mark: number): void {
+		if (mark < 0) return;
+		try {
+			const inner = ws as unknown as {
+				history?: Record<string, unknown>[];
+				historyIndex?: number;
+				selectedCell?: number[];
+			};
+			const history = inner.history;
+			const index = inner.historyIndex;
+			if (!Array.isArray(history) || typeof index !== "number" || index < mark) return;
+			const records: unknown[] = [];
+			let oldStyle: unknown;
+			let newStyle: unknown;
+			for (let i = mark; i <= index; i++) {
+				const entry = history[i];
+				if (!entry) return;
+				if (entry["action"] === "setValue" && Array.isArray(entry["records"])) {
+					records.push(...(entry["records"] as unknown[]));
+				} else if (entry["action"] === "setStyle") {
+					// Only the FIRST style write's "before" is the real before.
+					if (oldStyle === undefined) oldStyle = entry["oldValue"];
+					newStyle = entry["newValue"];
+				} else {
+					return;
+				}
+			}
+			if (records.length === 0) return;
+			history.length = mark;
+			history[mark] = {
+				action: "setValue",
+				records,
+				selection: inner.selectedCell,
+				oldStyle,
+				newStyle,
+			};
+			inner.historyIndex = mark;
+		} catch (e) {
+			console.error("leovale-sheets: folding the fill into one undo failed", e);
+		}
+	}
+
+	/** Paint the selection over a rectangle, without moving the anchor's scroll. */
+	private selectRange(r1: number, c1: number, r2: number, c2: number): void {
+		const ws = this.first();
+		if (!ws) return;
+		try {
+			ws.updateSelectionFromCoords(c1, r1, c2, r2);
+			(ws as unknown as { selectedCell?: number[] }).selectedCell = [c1, r1, c2, r2];
+			this.lastSelection = [c1, r1, c2, r2];
+		} catch (e) {
+			console.error("leovale-sheets: selecting the filled range failed", e);
+		}
+		this.notifySelection();
+	}
+
 	/* ---------------------------------------------------------- column width */
 
 	columnWidth(col: number): number {
@@ -2201,8 +2658,8 @@ export class SheetEngine {
 			ctx.font = `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
 			max = Math.max(max, ctx.measureText(text).width);
 		}
-		// cell padding (4+6 px each side in the theme layer) plus the borders
-		const width = Math.max(MIN_COL_WIDTH, Math.min(MAX_COL_WIDTH, Math.ceil(max) + 16));
+		// cell padding (8px each side in the theme layer) plus the borders
+		const width = Math.max(MIN_COL_WIDTH, Math.min(MAX_COL_WIDTH, Math.ceil(max) + 20));
 		this.setColumnWidth([col], width);
 		return width;
 	}
@@ -2655,6 +3112,15 @@ export class SheetEngine {
 			this.root.removeEventListener(type, fn, capture);
 		}
 		this.touchHandlers = [];
+		// A drag in flight owns listeners on the DOCUMENT; ending it first is what
+		// keeps them from outliving the grid.
+		this.endFill(false);
+		for (const [type, fn] of this.fillHandlers) {
+			this.root.removeEventListener(type, fn, true);
+		}
+		this.fillHandlers = [];
+		this.fillBox?.remove();
+		this.fillBox = null;
 		if (this.keyBridge && this.keyBridgeDoc) {
 			this.keyBridgeDoc.removeEventListener("keydown", this.keyBridge);
 		}

@@ -196,6 +196,9 @@ const EN = {
 	cmCut: "Cut",
 	cmCutReady: "Cut {rows}×{cols} cells; paste to move them",
 	cmPasted: "Pasted {rows}×{cols} cells",
+
+	/* 1.5.x: the fill handle */
+	fillHandle: "Drag to fill the series",
 } as const;
 
 export type StringKey = keyof typeof EN;
@@ -351,6 +354,8 @@ const RU: Record<StringKey, string> = {
 	cmCut: "Вырезать",
 	cmCutReady: "Вырезано ячеек: {rows}×{cols}; вставьте, чтобы переместить",
 	cmPasted: "Вставлено ячеек: {rows}×{cols}",
+
+	fillHandle: "Потяните, чтобы продолжить ряд",
 };
 
 const ZH: Record<StringKey, string> = {
@@ -503,6 +508,8 @@ const ZH: Record<StringKey, string> = {
 	cmCut: "剪切",
 	cmCutReady: "已剪切 {rows}×{cols} 个单元格；粘贴即可移动",
 	cmPasted: "已粘贴 {rows}×{cols} 个单元格",
+
+	fillHandle: "拖动以填充序列",
 };
 
 const ZH_TW: Record<StringKey, string> = {
@@ -655,6 +662,8 @@ const ZH_TW: Record<StringKey, string> = {
 	cmCut: "剪下",
 	cmCutReady: "已剪下 {rows}×{cols} 個儲存格；貼上即可移動",
 	cmPasted: "已貼上 {rows}×{cols} 個儲存格",
+
+	fillHandle: "拖曳以填滿序列",
 };
 
 const DE: Record<StringKey, string> = {
@@ -809,6 +818,8 @@ const DE: Record<StringKey, string> = {
 	cmCut: "Ausschneiden",
 	cmCutReady: "{rows}×{cols} Zellen ausgeschnitten; zum Verschieben einfügen",
 	cmPasted: "{rows}×{cols} Zellen eingefügt",
+
+	fillHandle: "Ziehen, um die Reihe fortzusetzen",
 };
 
 const FR: Record<StringKey, string> = {
@@ -963,6 +974,8 @@ const FR: Record<StringKey, string> = {
 	cmCut: "Couper",
 	cmCutReady: "{rows}×{cols} cellules coupées ; collez pour les déplacer",
 	cmPasted: "{rows}×{cols} cellules collées",
+
+	fillHandle: "Faites glisser pour continuer la série",
 };
 
 const ES: Record<StringKey, string> = {
@@ -1117,6 +1130,8 @@ const ES: Record<StringKey, string> = {
 	cmCut: "Cortar",
 	cmCutReady: "{rows}×{cols} celdas cortadas; pega para moverlas",
 	cmPasted: "{rows}×{cols} celdas pegadas",
+
+	fillHandle: "Arrastre para continuar la serie",
 };
 
 const JA: Record<StringKey, string> = {
@@ -1271,6 +1286,8 @@ const JA: Record<StringKey, string> = {
 	cmCut: "切り取り",
 	cmCutReady: "{rows}×{cols} セルを切り取りました。貼り付けると移動します",
 	cmPasted: "{rows}×{cols} セルを貼り付けました",
+
+	fillHandle: "ドラッグして連続データを入力",
 };
 
 const KO: Record<StringKey, string> = {
@@ -1423,6 +1440,8 @@ const KO: Record<StringKey, string> = {
 	cmCut: "잘라내기",
 	cmCutReady: "{rows}×{cols} 셀을 잘라냈습니다. 붙여넣으면 이동합니다",
 	cmPasted: "{rows}×{cols} 셀을 붙여넣었습니다",
+
+	fillHandle: "끌어서 연속 데이터 채우기",
 };
 
 const PT_BR: Record<StringKey, string> = {
@@ -1577,6 +1596,8 @@ const PT_BR: Record<StringKey, string> = {
 	cmCut: "Recortar",
 	cmCutReady: "{rows}×{cols} células recortadas; cole para movê-las",
 	cmPasted: "{rows}×{cols} células coladas",
+
+	fillHandle: "Arraste para continuar a sequência",
 };
 
 const IT: Record<StringKey, string> = {
@@ -1731,6 +1752,8 @@ const IT: Record<StringKey, string> = {
 	cmCut: "Taglia",
 	cmCutReady: "{rows}×{cols} celle tagliate; incolla per spostarle",
 	cmPasted: "{rows}×{cols} celle incollate",
+
+	fillHandle: "Trascina per continuare la serie",
 };
 
 const PL: Record<StringKey, string> = {
@@ -1885,6 +1908,8 @@ const PL: Record<StringKey, string> = {
 	cmCut: "Wytnij",
 	cmCutReady: "Wycięto {rows}×{cols} komórek; wklej, aby je przenieść",
 	cmPasted: "Wklejono {rows}×{cols} komórek",
+
+	fillHandle: "Przeciągnij, aby kontynuować serię",
 };
 
 export const TABLES: Record<Lang, Record<StringKey, string>> = {

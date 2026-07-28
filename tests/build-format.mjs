@@ -11,6 +11,7 @@ await esbuild.build({
 		"src/i18n.ts",
 		"src/numfmt.ts",
 		"src/embedsrc.ts",
+		"src/fillseries.ts",
 		"src/sheetops.ts",
 		"src/links.ts",
 		"src/xlsx.ts",

@@ -1510,6 +1510,11 @@ async function main() {
 				vertical: cs.verticalAlign,
 				style: window.sheetView().sheetEngine.getStyleAt("B2"),
 				untouched: getComputedStyle(plain).textAlign,
+				// C2 is `=B2*2`, i.e. a NUMBER, and since 1.5.x a number is drawn
+				// right-aligned by default. So "the toolbar did not touch it" is
+				// asked of the STORED style, which is the thing the button writes,
+				// rather than of the computed alignment, which the content decides.
+				untouchedStyle: window.sheetView().sheetEngine.getStyleAt("C2"),
 				button: document.querySelector(".leovale-sheet-tb-align").className,
 			};
 		});
@@ -1521,8 +1526,11 @@ async function main() {
 			aligned.style.ha === "r" && aligned.style.va === "t",
 			JSON.stringify(aligned.style),
 		);
-		check("a neighbouring cell keeps the default alignment", aligned.untouched === "left",
-			aligned.untouched);
+		check(
+			"a neighbouring cell was not touched: no alignment was written into it",
+			aligned.untouchedStyle.ha === undefined && aligned.untouchedStyle.va === undefined,
+			JSON.stringify([aligned.untouched, aligned.untouchedStyle]),
+		);
 		check("the align button reflects the selection", aligned.button.includes("is-active"),
 			aligned.button);
 		check(
@@ -5420,6 +5428,749 @@ async function main() {
 			});
 			await page.waitForTimeout(1200);
 		}
+
+		/* ------------------------------------------------------------------------
+		 * 1.5.x, part one: FORMULAS THAT NAME ROW 1.
+		 *
+		 * Reported as "=A1, =B1*2 and =SUM(B1:B2) all give #ERROR, rows 2 and down
+		 * are fine". The cause was not the parser and not our mapping: jspreadsheet
+		 * asks a DIRECT `eval` whether a reference is an already-defined NAME
+		 * before it supplies the cell's value, that eval sees the bundle's MINIFIED
+		 * module scope, and esbuild names module-scope variables `A1`, `C1`, `E1`.
+		 * The whole diagnosis is in scripts/patch-vendor.mjs; the unit tests pin
+		 * the patch, and this pins the behaviour - on a production build, which is
+		 * the only build the bug ever existed in.
+		 *
+		 * Everything below is TYPED BY HAND into an empty sheet, because that is
+		 * how it was reported and because a seeded formula travels a different code
+		 * path (the file loader) than a typed one.
+		 * -------------------------------------------------------------------- */
+		const POLISH_PATH = "Polish.sheet";
+		await page.evaluate(async (p) => {
+			const app = window.app;
+			app.workspace.detachLeavesOfType("leovale-sheet-view");
+			const old = app.vault.getAbstractFileByPath(p);
+			if (old) await app.vault.delete(old);
+			const f = await app.vault.create(
+				p,
+				JSON.stringify(
+					{ format: "leovale-sheet", version: 4, sheets: [{ name: "Sheet1", rows: 24, cols: 8, cells: {} }] },
+					null,
+					2,
+				),
+			);
+			await app.workspace.getLeaf(true).openFile(f);
+		}, POLISH_PATH);
+		await page.waitForTimeout(2400);
+		await installViewIndex(page);
+		await setBaseTheme(page, "moonstone");
+		await page.waitForTimeout(500);
+
+		step("1.5.x: a formula that names row 1 computes (the whole A1..H1 band)");
+		// The data is seeded; only the FORMULAS are typed, which is what the report
+		// was about and what keeps this section under a minute.
+		await page.evaluate(() => {
+			const e = window.engineAt(0);
+			const letters = "ABCDEFGH";
+			for (let i = 0; i < letters.length; i++) e.setRawValue(`${letters[i]}1`, String(i + 1));
+			e.setRawValue("A2", "10");
+			e.setRawValue("B2", "20");
+		});
+		await page.waitForTimeout(600);
+		// One typed formula per column of row 1: every letter esbuild may have
+		// used for a module-scope name, not just the one that was reported.
+		for (let x = 0; x < 8; x++) {
+			await typeInCell(page, x, 2, `=${String.fromCharCode(65 + x)}1`);
+		}
+		await page.waitForTimeout(400);
+		const rowOne = await page.evaluate(() =>
+			[...Array(8).keys()].map(
+				(x) =>
+					document.querySelector(
+						`.leovale-sheet-content .leovale-sheet-root td[data-x="${x}"][data-y="2"]`,
+					)?.textContent,
+			),
+		);
+		console.log("  row-1 references:", JSON.stringify(rowOne));
+		check(
+			"=A1 .. =H1 all compute; none of them is #ERROR",
+			JSON.stringify(rowOne) === JSON.stringify(["1", "2", "3", "4", "5", "6", "7", "8"]),
+			JSON.stringify(rowOne),
+		);
+
+		step("1.5.x: the rest of the class - arithmetic, ranges, column A, mixed rows");
+		await typeInCell(page, 0, 4, "=A1*2");
+		await typeInCell(page, 1, 4, "=B1*2");
+		await typeInCell(page, 2, 4, "=SUM(A1:B1)");
+		await typeInCell(page, 3, 4, "=SUM(A1:A2)");
+		await typeInCell(page, 4, 4, "=A1+B2");
+		await typeInCell(page, 5, 4, "=SUM(A1:B2)");
+		await typeInCell(page, 6, 4, "=A2*2");
+		await page.waitForTimeout(400);
+		const mixed = await page.evaluate(() =>
+			[...Array(7).keys()].map(
+				(x) =>
+					document.querySelector(
+						`.leovale-sheet-content .leovale-sheet-root td[data-x="${x}"][data-y="4"]`,
+					)?.textContent,
+			),
+		);
+		console.log("  formula class:", JSON.stringify(mixed));
+		check(
+			"=A1*2, =B1*2, =SUM(A1:B1), =SUM(A1:A2), =A1+B2, =SUM(A1:B2), =A2*2",
+			JSON.stringify(mixed) === JSON.stringify(["2", "4", "3", "11", "21", "33", "20"]),
+			JSON.stringify(mixed),
+		);
+
+		step("1.5.x: and it survives a row inserted above, and its deletion");
+		await page.evaluate(() => window.engineAt(0).insertRows(0, 1, true));
+		await page.waitForTimeout(900);
+		const rowInsert = await page.evaluate(() => {
+			const e = window.engineAt(0);
+			const cell = (x, y) =>
+				document.querySelector(
+					`.leovale-sheet-content .leovale-sheet-root td[data-x="${x}"][data-y="${y}"]`,
+				)?.textContent;
+			return { src: e.getRawValue("A6"), shown: cell(0, 5), sum: cell(3, 5) };
+		});
+		console.log("  after insert:", JSON.stringify(rowInsert));
+		check(
+			"the reference followed the row it points at (=A1*2 -> =A2*2) and still computes",
+			rowInsert.src === "=A2*2" && rowInsert.shown === "2" && rowInsert.sum === "11",
+			JSON.stringify(rowInsert),
+		);
+		await page.evaluate(() => window.engineAt(0).deleteRows(0, 1));
+		await page.waitForTimeout(900);
+		const afterDelete = await page.evaluate(() => {
+			const e = window.engineAt(0);
+			const cell = (x, y) =>
+				document.querySelector(
+					`.leovale-sheet-content .leovale-sheet-root td[data-x="${x}"][data-y="${y}"]`,
+				)?.textContent;
+			return { src: e.getRawValue("A5"), shown: cell(0, 4), sum: cell(3, 4) };
+		});
+		console.log("  after delete:", JSON.stringify(afterDelete));
+		check(
+			"deleting that row puts it back on row 1 and it computes there too",
+			afterDelete.src === "=A1*2" && afterDelete.shown === "2" && afterDelete.sum === "11",
+			JSON.stringify(afterDelete),
+		);
+
+		/* ------------------------------------------------------------------------
+		 * 1.5.x, part two: THE FILL HANDLE.
+		 *
+		 * Driven with a REAL mouse on the vendor's own 7px corner square, because
+		 * the gesture is the feature: everything below goes through the same
+		 * `mousedown`/`mousemove`/`mouseup` a user produces, and the preview is
+		 * measured while the button is still down.
+		 * -------------------------------------------------------------------- */
+		const cornerSel = ".leovale-sheet-content .leovale-sheet-root .jss_corner";
+
+		/**
+		 * Select a range, then drag its corner to a cell. `midDrag` runs with the
+		 * button still down, which is the only moment the preview exists.
+		 */
+		const fillDrag = async (from, to, target, midDrag = null) => {
+			await dragSelect(page, from[0], from[1], to[0], to[1]);
+			const c = await page.locator(cornerSel).boundingBox();
+			const t = await page.locator(selCell(target[0], target[1])).boundingBox();
+			await page.mouse.move(c.x + c.width / 2, c.y + c.height / 2);
+			await page.mouse.down();
+			await page.mouse.move(t.x + t.width / 2, t.y + t.height / 2, { steps: 12 });
+			await page.waitForTimeout(160);
+			if (midDrag) await midDrag();
+			await page.mouse.up();
+			await page.waitForTimeout(600);
+		};
+
+		const cells = (refs) =>
+			page.evaluate((list) => {
+				const e = window.engineAt(0);
+				const out = {};
+				for (const ref of list) out[ref] = e.getRawValue(ref);
+				return out;
+			}, refs);
+
+		step("1.5.x: 1, 2, 3 dragged down continues 4, 5, 6 - with a live preview");
+		await page.evaluate(() => {
+			const e = window.engineAt(0);
+			e.clearRect({ r1: 0, c1: 0, r2: 23, c2: 7 });
+			e.setRawValue("A1", "1");
+			e.setRawValue("A2", "2");
+			e.setRawValue("A3", "3");
+		});
+		await page.waitForTimeout(700);
+		let preview = null;
+		await fillDrag([0, 0], [0, 2], [0, 5], async () => {
+			preview = await page.evaluate(() => {
+				const box = document.querySelector(".leovale-sheet-content .leovale-sheet-fillbox");
+				if (!box) return null;
+				const b = box.getBoundingClientRect();
+				const a4 = document
+					.querySelector('.leovale-sheet-content .leovale-sheet-root td[data-x="0"][data-y="3"]')
+					.getBoundingClientRect();
+				const a6 = document
+					.querySelector('.leovale-sheet-content .leovale-sheet-root td[data-x="0"][data-y="5"]')
+					.getBoundingClientRect();
+				return {
+					shown: getComputedStyle(box).display,
+					style: getComputedStyle(box).borderTopStyle,
+					dTop: Math.round(b.top - a4.top),
+					dBottom: Math.round(b.bottom - a6.bottom),
+					width: Math.round(b.width),
+					cellWidth: Math.round(a4.width),
+				};
+			});
+		});
+		console.log("  fill preview:", JSON.stringify(preview));
+		check(
+			"the target range is previewed while the finger is still down, dashed and exact",
+			!!preview &&
+				preview.shown === "block" &&
+				preview.style === "dashed" &&
+				Math.abs(preview.dTop) <= 2 &&
+				Math.abs(preview.dBottom) <= 2 &&
+				Math.abs(preview.width - preview.cellWidth) <= 2,
+			JSON.stringify(preview),
+		);
+		const down = await cells(["A4", "A5", "A6", "A7"]);
+		console.log("  fill down:", JSON.stringify(down));
+		check(
+			"the series continues 4, 5, 6 and stops where the drag stopped",
+			Number(down.A4) === 4 && Number(down.A5) === 5 && Number(down.A6) === 6 &&
+				(down.A7 === null || down.A7 === ""),
+			JSON.stringify(down),
+		);
+		check(
+			"the preview is gone once the button is up",
+			(await page.evaluate(
+				() =>
+					getComputedStyle(document.querySelector(".leovale-sheet-content .leovale-sheet-fillbox"))
+						.display,
+			)) === "none",
+		);
+
+		step("1.5.x: one Ctrl+Z undoes the whole drag");
+		await page.click(selCell(0, 0));
+		await page.keyboard.press("Control+z");
+		await page.waitForTimeout(800);
+		const undone = await cells(["A1", "A2", "A3", "A4", "A5", "A6"]);
+		console.log("  after undo:", JSON.stringify(undone));
+		check(
+			"a single undo empties every cell the fill wrote, and touches nothing else",
+			Number(undone.A1) === 1 &&
+				Number(undone.A2) === 2 &&
+				Number(undone.A3) === 3 &&
+				[undone.A4, undone.A5, undone.A6].every((v) => v === null || v === ""),
+			JSON.stringify(undone),
+		);
+		await page.keyboard.press("Control+y");
+		await page.waitForTimeout(700);
+
+		step("1.5.x: up, right and left, and a single cell that is still a copy");
+		await page.evaluate(() => {
+			const e = window.engineAt(0);
+			e.clearRect({ r1: 0, c1: 0, r2: 23, c2: 7 });
+			e.setRawValue("D5", "10");
+			e.setRawValue("D6", "8");
+			e.setRawValue("B10", "10");
+			e.setRawValue("C10", "20");
+			e.setRawValue("F12", "100");
+			e.setRawValue("G12", "90");
+			e.setRawValue("A14", "x");
+		});
+		await page.waitForTimeout(700);
+		await fillDrag([3, 4], [3, 5], [3, 2]); // D5:D6 upwards to D3
+		await fillDrag([1, 9], [2, 9], [4, 9]); // B10:C10 rightwards to E10
+		await fillDrag([5, 11], [6, 11], [4, 11]); // F12:G12 leftwards to E12
+		await fillDrag([0, 13], [0, 13], [0, 15]); // A14 alone, downwards
+		const dirs = await cells(["D4", "D3", "D2", "D10", "E10", "E12", "D12", "A15", "A16"]);
+		console.log("  directions:", JSON.stringify(dirs));
+		check("upwards continues the series upwards", dirs.D4 === 12 && dirs.D3 === 14, JSON.stringify(dirs));
+		check("rightwards continues it sideways", dirs.D10 === 30 && dirs.E10 === 40, JSON.stringify(dirs));
+		check("leftwards too, and only where it was dragged", dirs.E12 === 110 && (dirs.D12 === null || dirs.D12 === ""),
+			JSON.stringify(dirs));
+		check("a single cell is still a plain copy, as it always was",
+			dirs.A15 === "x" && dirs.A16 === "x", JSON.stringify(dirs));
+
+		step("1.5.x: dates, text with a number, formulas, and the styles that came with them");
+		await page.evaluate(() => {
+			const e = window.engineAt(0);
+			e.clearRect({ r1: 0, c1: 0, r2: 23, c2: 7 });
+			e.setRawValue("A1", "2026-01-01");
+			e.setRawValue("A2", "2026-01-02");
+			e.setRawValue("B1", "Товар 1");
+			e.setRawValue("B2", "Товар 2");
+			e.setRawValue("C1", "5");
+			e.setRawValue("C2", "7");
+			e.setRawValue("D1", "=C1*2");
+			e.applyStyle(["A1"], () => ({ bg: "#fff2cc", b: true }));
+			e.applyStyle(["A2"], () => ({ bg: "#deebf7" }));
+		});
+		await page.waitForTimeout(800);
+		await fillDrag([0, 0], [0, 1], [0, 5]); // dates + their alternating fills
+		await fillDrag([1, 0], [1, 1], [1, 4]); // Товар N
+		await fillDrag([3, 0], [3, 0], [3, 2]); // the formula, alone
+		const rich = await page.evaluate(() => {
+			const e = window.engineAt(0);
+			return {
+				dates: ["A3", "A4", "A5", "A6"].map((r) => e.getRawValue(r)),
+				goods: ["B3", "B4", "B5"].map((r) => e.getRawValue(r)),
+				formulas: ["D2", "D3"].map((r) => e.getRawValue(r)),
+				shown: ["D2", "D3"].map(
+					(r) =>
+						document.querySelector(
+							`.leovale-sheet-content .leovale-sheet-root td[data-x="3"][data-y="${
+								Number(r.slice(1)) - 1
+							}"]`,
+						)?.textContent,
+				),
+				styles: ["A3", "A4", "A5"].map((r) => e.getStyleAt(r)),
+			};
+		});
+		console.log("  rich fill:", JSON.stringify(rich));
+		check("a date series steps by its own step",
+			JSON.stringify(rich.dates) === JSON.stringify(["2026-01-03", "2026-01-04", "2026-01-05", "2026-01-06"]),
+			JSON.stringify(rich.dates));
+		check("text with a trailing number moves the number only",
+			JSON.stringify(rich.goods) === JSON.stringify(["Товар 3", "Товар 4", "Товар 5"]),
+			JSON.stringify(rich.goods));
+		check("a formula shifts its references instead of continuing a series",
+			rich.formulas[0] === "=C2*2" && rich.formulas[1] === "=C3*2" && rich.shown[0] === "14",
+			JSON.stringify(rich.formulas) + " " + JSON.stringify(rich.shown));
+		check("the samples' styles repeat over the filled cells",
+			rich.styles[0].bg === "#fff2cc" && rich.styles[0].b === true && rich.styles[1].bg === "#deebf7" &&
+				rich.styles[2].bg === "#fff2cc",
+			JSON.stringify(rich.styles));
+
+		step("1.5.x: the handle is a real touch target, and a finger can drag it");
+		await page.evaluate(() => {
+			const e = window.engineAt(0);
+			e.clearRect({ r1: 0, c1: 0, r2: 23, c2: 7 });
+			e.setRawValue("A1", "2");
+			e.setRawValue("A2", "4");
+		});
+		await page.waitForTimeout(700);
+		await installTouchDriver(page);
+		const fillTouchCdp = await ctx.newCDPSession(page);
+		await fillTouchCdp.send("Emulation.setTouchEmulationEnabled", { enabled: true, maxTouchPoints: 5 });
+		await page.evaluate(() => document.body.classList.add("is-mobile"));
+		await page.waitForTimeout(500);
+		await dragSelect(page, 0, 0, 0, 1);
+		await page.waitForTimeout(300);
+		const handleHit = await page.evaluate((sel) => {
+			const c = document.querySelector(sel);
+			if (!c) return null;
+			const box = c.getBoundingClientRect();
+			const after = getComputedStyle(c, "::after");
+			const inset = Number.parseFloat(after.insetBlockStart || after.top || "0");
+			// What a fingertip can actually land on: the square plus its halo.
+			const reach = box.width - 2 * inset;
+			const cx = box.left + box.width / 2;
+			const cy = box.top + box.height / 2;
+			// ...and it has to be the CORNER that answers a point out on the halo,
+			// not the cell underneath it.
+			const edge = document.elementFromPoint(Math.round(cx - reach / 2 + 2), Math.round(cy));
+			return {
+				reach: Math.round(reach),
+				square: Math.round(box.width),
+				owns: edge === c,
+				// The one new UI string of this release, and the only affordance a
+				// 7px square has.
+				title: c.getAttribute("title"),
+				label: c.getAttribute("aria-label"),
+			};
+		}, cornerSel);
+		console.log("  fill handle touch target:", JSON.stringify(handleHit));
+		check("on a tablet the handle answers to a 24px target, not a 7px one",
+			!!handleHit && handleHit.reach >= 24 && handleHit.owns, JSON.stringify(handleHit));
+		check("and it says what it is, from the translation table",
+			handleHit?.title === "Drag to fill the series" && handleHit?.label === handleHit?.title,
+			JSON.stringify([handleHit?.title, handleHit?.label]));
+		const touchRect = await page.evaluate(
+			([corner, cell]) => {
+				const c = document.querySelector(corner).getBoundingClientRect();
+				const t = document.querySelector(cell).getBoundingClientRect();
+				return { dx: Math.round(t.left + t.width / 2 - (c.left + c.width / 2)), dy: Math.round(t.top + t.height / 2 - (c.top + c.height / 2)) };
+			},
+			[cornerSel, selCell(0, 4)],
+		);
+		await page.evaluate(
+			async ([sel, d]) => window.__touch({ selector: sel, dx: d.dx, dy: d.dy, steps: 8 }),
+			[cornerSel, touchRect],
+		);
+		await page.waitForTimeout(800);
+		const byFinger = await cells(["A3", "A4", "A5"]);
+		console.log("  filled by finger:", JSON.stringify(byFinger));
+		check("a finger dragging the handle fills the series, exactly as the mouse does",
+			byFinger.A3 === 6 && byFinger.A4 === 8 && byFinger.A5 === 10, JSON.stringify(byFinger));
+		await page.evaluate(() => document.body.classList.remove("is-mobile"));
+		await fillTouchCdp.send("Emulation.setTouchEmulationEnabled", { enabled: false });
+		await page.waitForTimeout(400);
+
+		/* ------------------------------------------------------------------------
+		 * 1.5.x, part three: WHAT THE GRID LOOKS LIKE.
+		 *
+		 * Four findings of the 2026-07-28 design audit and one request of the
+		 * user's, all measured off the RENDERING: where the line breaks fall, where
+		 * the digits sit, what the compositor actually painted in the dark theme,
+		 * and where the sort marker is relative to the letter it must not move.
+		 * -------------------------------------------------------------------- */
+		const LOOK_PATH = "Look.sheet";
+		await page.evaluate(
+			async ([p, text]) => {
+				const app = window.app;
+				app.workspace.detachLeavesOfType("leovale-sheet-view");
+				const old = app.vault.getAbstractFileByPath(p);
+				if (old) await app.vault.delete(old);
+				const f = await app.vault.create(p, text);
+				await app.workspace.getLeaf(true).openFile(f);
+			},
+			[
+				LOOK_PATH,
+				JSON.stringify(
+					{
+						format: "leovale-sheet",
+						version: 4,
+						sheets: [
+							{
+								name: "Sheet1",
+								rows: 14,
+								cols: 5,
+								colWidths: { 0: 96 },
+								cells: {
+									A1: { v: "Чекбоксы кликаются пальцем", s: { wrap: true } },
+									A2: { v: "Позиция" },
+									A3: { v: "Товар 1" },
+									A4: { v: "Товар 12" },
+									B1: { v: "Сумма" },
+									B2: { v: 1234.5 },
+									B3: { v: 99 },
+									B4: { v: 7 },
+									C1: { v: "Ставка" },
+									C2: { v: 0.25, s: { nf: "0%" } },
+									C3: { v: 111, s: { ha: "c" } },
+									C4: { v: "12 штук" },
+									D1: { v: "Цвет" },
+									D2: { v: "жёлтый", s: { bg: "#fff2cc" } },
+									D3: { v: "серый", s: { bg: "#d9d9d9", bd: "trbl" } },
+									D4: { v: "[[README]]" },
+									E1: { v: "Дата" },
+									E2: { v: "2026-01-01" },
+								},
+							},
+						],
+					},
+					null,
+					2,
+				),
+			],
+		);
+		await page.waitForTimeout(2400);
+		await installViewIndex(page);
+		await setBaseTheme(page, "moonstone");
+		await page.waitForTimeout(700);
+		const lookCdp = await ctx.newCDPSession(page);
+
+		step("1.5.x: a wrapped cell breaks between words, not inside them");
+		const wrapping = await page.evaluate((sel) => {
+			const td = document.querySelector(sel);
+			const node = [...td.childNodes].find((n) => n.nodeType === 3);
+			if (!node) return null;
+			const text = node.textContent;
+			const doc = td.ownerDocument;
+			// Where the LINES really start, asked of the layout one character at a
+			// time: a character whose box sits lower than the one before it is the
+			// first character of a new line. Nothing here reads the stylesheet.
+			const range = doc.createRange();
+			const topOf = (i) => {
+				range.setStart(node, i);
+				range.setEnd(node, i + 1);
+				return Math.round(range.getBoundingClientRect().top);
+			};
+			const starts = [];
+			let prev = topOf(0);
+			for (let i = 1; i < text.length; i++) {
+				const top = topOf(i);
+				if (top > prev + 2) starts.push(i);
+				prev = top;
+			}
+			return {
+				text,
+				lines: starts.length + 1,
+				// A line that starts in the middle of a word: the character before
+				// its first one is a letter rather than a space or a hyphen.
+				broken: starts.filter((i) => /\S/.test(text[i - 1]) && text[i - 1] !== "-").map((i) => text.slice(i - 4, i + 4)),
+				computed: [getComputedStyle(td).wordBreak, getComputedStyle(td).overflowWrap],
+			};
+		}, selCell(0, 0));
+		console.log("  wrapping:", JSON.stringify(wrapping));
+		check("the wrapped cell really does wrap onto several lines",
+			!!wrapping && wrapping.lines >= 2, JSON.stringify(wrapping));
+		check("and not one of those lines starts inside a word",
+			!!wrapping && wrapping.broken.length === 0, JSON.stringify(wrapping?.broken));
+		check("word-break is `normal`; breaking a word is the last resort only",
+			!!wrapping && wrapping.computed[0] === "normal" && wrapping.computed[1] === "break-word",
+			JSON.stringify(wrapping?.computed));
+
+		step("1.5.x: numbers sit on the right and their digits line up");
+		const numbers = await page.evaluate(() => {
+			const at = (x, y) =>
+				document.querySelector(
+					`.leovale-sheet-content .leovale-sheet-root td[data-x="${x}"][data-y="${y}"]`,
+				);
+			// The right edge of the TEXT, not of the cell: this is the measurement
+			// that says the digits form a column.
+			const inkRight = (td) => {
+				const node = [...td.childNodes].find((n) => n.nodeType === 3);
+				if (!node) return null;
+				const r = td.ownerDocument.createRange();
+				r.selectNodeContents(node);
+				return Math.round(r.getBoundingClientRect().right);
+			};
+			const cellRight = (td) => Math.round(td.getBoundingClientRect().right);
+			const cellLeft = (td) => Math.round(td.getBoundingClientRect().left);
+			return {
+				// B2 = 1234.5, B3 = 99, B4 = 7: three numbers of three lengths.
+				numRight: [at(1, 1), at(1, 2), at(1, 3)].map(inkRight),
+				numCellRight: cellRight(at(1, 1)),
+				// C2 has a percent mask, and a masked number is still a number.
+				maskedAlign: getComputedStyle(at(2, 1)).textAlign,
+				maskedText: at(2, 1).textContent,
+				// Text that merely contains a number stays where text belongs.
+				textAlign: getComputedStyle(at(0, 2)).textAlign,
+				textLeft: [cellLeft(at(0, 2)), inkRight(at(0, 2))],
+				// "12 штук" is text too.
+				mixedAlign: getComputedStyle(at(2, 3)).textAlign,
+				// An explicit alignment still wins over the default.
+				explicitAlign: getComputedStyle(at(2, 2)).textAlign,
+				tabular: getComputedStyle(at(1, 1)).fontVariantNumeric,
+			};
+		});
+		console.log("  numbers:", JSON.stringify(numbers));
+		check("plain numbers are right-aligned by default",
+			numbers.numRight.every((r) => numbers.numCellRight - r <= 12 && numbers.numCellRight - r >= 4),
+			JSON.stringify(numbers));
+		check("...so their digits line up down the column, to the pixel",
+			new Set(numbers.numRight).size === 1, JSON.stringify(numbers.numRight));
+		check("a masked number is a number too", numbers.maskedAlign === "right" && /%$/.test(numbers.maskedText),
+			JSON.stringify([numbers.maskedAlign, numbers.maskedText]));
+		check("text stays on the left, even when it holds a number",
+			numbers.textAlign === "left" && numbers.mixedAlign === "left", JSON.stringify(numbers));
+		check("an explicit alignment beats the default", numbers.explicitAlign === "center",
+			numbers.explicitAlign);
+		check("digits are tabular, so the columns cannot drift",
+			/tabular-nums/.test(numbers.tabular), numbers.tabular);
+
+		step("1.5.x: comfortable, equal insets on cells and on the coordinate headers");
+		const insets = await page.evaluate(() => {
+			const one = (sel) => {
+				const cs = getComputedStyle(document.querySelector(sel));
+				return [cs.paddingTop, cs.paddingRight, cs.paddingBottom, cs.paddingLeft].join(" ");
+			};
+			return {
+				cell: one('.leovale-sheet-content .leovale-sheet-root td[data-x="1"][data-y="1"]'),
+				colHead: one('.leovale-sheet-content .leovale-sheet-root thead td[data-x="1"]'),
+				rowHead: one(".leovale-sheet-content .leovale-sheet-root tbody tr td:first-child"),
+			};
+		});
+		console.log("  padding:", JSON.stringify(insets));
+		check("a data cell and both gutters use the same 4px/8px inset",
+			insets.cell === "4px 8px 4px 8px" && insets.colHead === "4px 8px 4px 8px" &&
+				insets.rowHead === "4px 8px 4px 8px",
+			JSON.stringify(insets));
+
+		step("1.5.x: the sort marker is muted, out of flow, and leaves the letter centred");
+		const letterCentre = (x) =>
+			page.evaluate((col) => {
+				const td = document.querySelector(
+					`.leovale-sheet-content .leovale-sheet-root thead td[data-x="${col}"]`,
+				);
+				const node = [...td.childNodes].find((n) => n.nodeType === 3 && n.textContent.trim());
+				const r = td.ownerDocument.createRange();
+				r.selectNodeContents(node);
+				const ink = r.getBoundingClientRect();
+				const box = td.getBoundingClientRect();
+				return {
+					offset: Math.round((ink.left + ink.right) / 2 - (box.left + box.width / 2)),
+					letter: node.textContent.trim(),
+				};
+			}, x);
+		const beforeSort = await letterCentre(1);
+		await page.click(selCell(1, 1));
+		await page.waitForTimeout(300);
+		await page.evaluate(() => window.sheetViewAt(0).sortSelectedColumn("desc"));
+		await page.waitForTimeout(900);
+		const afterSort = await letterCentre(1);
+		const marker = await page.evaluate(() => {
+			const td = document.querySelector(
+				'.leovale-sheet-content .leovale-sheet-root thead td[data-x="1"]',
+			);
+			const after = getComputedStyle(td, "::after");
+			const probe = document.createElement("div");
+			probe.style.color = "var(--text-muted)";
+			td.ownerDocument.body.appendChild(probe);
+			const muted = getComputedStyle(probe).color;
+			probe.remove();
+			return {
+				content: after.content,
+				position: after.position,
+				right: after.right,
+				size: after.fontSize,
+				colour: after.color,
+				muted,
+				sticky: getComputedStyle(td).position,
+			};
+		});
+		console.log("  sort marker:", JSON.stringify(marker), "letter:", JSON.stringify([beforeSort, afterSort]));
+		check("the marker is the descending triangle, absolutely positioned at the right edge",
+			marker.content.includes("▼") && marker.position === "absolute" &&
+				Number.parseFloat(marker.right) <= 6,
+			JSON.stringify(marker));
+		check("small and muted, not the theme's accent",
+			Number.parseFloat(marker.size) <= 8 && marker.colour === marker.muted, JSON.stringify(marker));
+		check("the header cell is STILL sticky, so its letter cannot scroll away",
+			marker.sticky === "sticky", marker.sticky);
+		check("and the letter has not moved a pixel from the centre it had unsorted",
+			Math.abs(afterSort.offset) <= 1 && afterSort.offset === beforeSort.offset,
+			JSON.stringify([beforeSort, afterSort]));
+		// The pixels, not only the declaration. The selection is moved off column B
+		// first, or the two headers would differ by the selection wash rather than
+		// by the marker - which is the whole thing being measured.
+		await page.click(selCell(4, 6));
+		await page.waitForTimeout(400);
+		const sortedAvg = await avgColor(
+			lookCdp,
+			page,
+			".leovale-sheet-content .leovale-sheet-root thead td.leovale-sheet-sorted",
+		);
+		const plainAvg = await avgColor(
+			lookCdp,
+			page,
+			'.leovale-sheet-content .leovale-sheet-root thead td[data-x="2"]',
+		);
+		console.log("  header means:", JSON.stringify({ sortedAvg, plainAvg }));
+		check("the marker is really PAINTED: the sorted header differs from an unsorted one",
+			colorDelta(sortedAvg, plainAvg) > 0, JSON.stringify({ sortedAvg, plainAvg }));
+		const headRect = await page.evaluate(() => {
+			const r = document
+				.querySelector(".leovale-sheet-content .leovale-sheet-root thead")
+				.getBoundingClientRect();
+			return { x: r.left, y: r.top - 1, width: Math.min(r.width, 560), height: r.height + 2 };
+		});
+		await zoomShot(lookCdp, page, headRect, "42-sort-marker-light", 6);
+		await page.evaluate(() => window.sheetViewAt(0).sortSelectedColumn(null));
+		await page.waitForTimeout(700);
+
+		step("1.5.x: light and dark screenshots of the polished grid");
+		const lookRect = await page.evaluate(() => {
+			const r = document
+				.querySelector(".leovale-sheet-content .leovale-sheet-root .jss_worksheet")
+				.getBoundingClientRect();
+			return { x: r.left, y: r.top, width: Math.min(r.width, 620), height: Math.min(r.height, 320) };
+		});
+		await zoomShot(lookCdp, page, lookRect, "40-grid-polish-light");
+
+		step("1.5.x: the dark theme is readable where the audit said it was not");
+		await setBaseTheme(page, "obsidian");
+		await page.waitForTimeout(900);
+		const darkFacts = await page.evaluate(() => {
+			const root = document.querySelector(".leovale-sheet-content .leovale-sheet-root");
+			const at = (sel) => root.querySelector(sel);
+			// Chromium serialises a resolved `color-mix()` as `color(srgb r g b)`
+			// with 0..1 channels, and an unfilled cell's background as
+			// `rgba(0, 0, 0, 0)`. Both have to be understood, or a measurement of
+			// "is this readable" measures nothing.
+			const toRgb = (css) => {
+				const s = String(css);
+				const wide = /^color\(srgb\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)/.exec(s);
+				if (wide) return [1, 2, 3].map((i) => Math.round(Number(wide[i]) * 255)).concat([1]);
+				const m = /rgba?\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)(?:[,\s/]+([\d.]+))?/.exec(s);
+				if (!m) return null;
+				return [Number(m[1]), Number(m[2]), Number(m[3]), m[4] === undefined ? 1 : Number(m[4])];
+			};
+			/** The background a HUMAN sees behind `el`: the first opaque ancestor. */
+			const backdrop = (el) => {
+				for (let n = el; n; n = n.parentElement) {
+					const c = toRgb(getComputedStyle(n).backgroundColor);
+					if (c && c[3] > 0.99) return c;
+				}
+				return [0, 0, 0, 1];
+			};
+			const lum = (c) => {
+				const [r, g, b] = c.slice(0, 3).map((v) => {
+					const s = v / 255;
+					return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
+				});
+				return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+			};
+			const ratio = (fg, bg) => {
+				const la = lum(fg);
+				const lb = lum(bg);
+				return Math.round(((Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05)) * 100) / 100;
+			};
+			const ink = (el) => toRgb(getComputedStyle(el).color);
+			const colHead = at('thead td[data-x="1"]');
+			const rowHead = at("tbody tr td:first-child");
+			const bordered = at('td[data-x="3"][data-y="2"]');
+			const link = at("a.leovale-sheet-link");
+			const border = toRgb(getComputedStyle(bordered).borderTopColor);
+			return {
+				colHead: ratio(ink(colHead), backdrop(colHead)),
+				rowHead: ratio(ink(rowHead), backdrop(rowHead)),
+				link: link ? ratio(ink(link), backdrop(link)) : null,
+				border,
+				borderFromWhite: border ? border.slice(0, 3).reduce((a, v) => a + (255 - v), 0) : 0,
+				fillDim: getComputedStyle(at('td[data-x="3"][data-y="1"]')).backgroundImage,
+				filledClass: at('td[data-x="3"][data-y="1"]').classList.contains("leovale-sheet-filled"),
+			};
+		});
+		console.log("  dark theme:", JSON.stringify(darkFacts));
+		check("the column letters clear WCAG AA against their own header",
+			darkFacts.colHead >= 4.5, String(darkFacts.colHead));
+		check("so do the row numbers", darkFacts.rowHead >= 4.5, String(darkFacts.rowHead));
+		check("a wiki link is readable on a dark cell", (darkFacts.link ?? 0) >= 4.5, String(darkFacts.link));
+		check("a user's cell border is softened rather than painted pure white",
+			darkFacts.borderFromWhite > 120, JSON.stringify(darkFacts.border));
+		check("a filled cell carries the dark theme's dimming layer",
+			darkFacts.filledClass && /gradient/.test(darkFacts.fillDim), JSON.stringify(darkFacts.fillDim));
+		// ...and it is really painted, which is the only proof that counts.
+		const darkFillPaint = await avgColor(
+			lookCdp,
+			page,
+			'.leovale-sheet-content .leovale-sheet-root td[data-x="3"][data-y="1"]',
+		);
+		console.log("  painted yellow fill in the dark theme:", JSON.stringify(darkFillPaint));
+		check("the pastel fill is genuinely darker on screen than the colour in the file",
+			!!darkFillPaint && darkFillPaint[0] < 255 && darkFillPaint[0] + darkFillPaint[1] + darkFillPaint[2] <
+				255 + 242 + 204 - 90,
+			JSON.stringify(darkFillPaint));
+		await zoomShot(lookCdp, page, lookRect, "41-grid-polish-dark");
+		// The marker again, in the theme where a loud accent hurt most.
+		await page.click(selCell(1, 1));
+		await page.waitForTimeout(250);
+		await page.evaluate(() => window.sheetViewAt(0).sortSelectedColumn("asc"));
+		await page.waitForTimeout(800);
+		await page.click(selCell(4, 6));
+		await page.waitForTimeout(300);
+		await zoomShot(lookCdp, page, headRect, "43-sort-marker-dark", 6);
+		await page.evaluate(() => window.sheetViewAt(0).sortSelectedColumn(null));
+		await page.waitForTimeout(600);
+		await setBaseTheme(page, "moonstone");
+		await page.waitForTimeout(600);
+
+		await page.evaluate(
+			async ([a, b]) => {
+				const app = window.app;
+				app.workspace.detachLeavesOfType("leovale-sheet-view");
+				for (const name of [a, b]) {
+					const f = app.vault.getAbstractFileByPath(name);
+					if (f) await app.vault.delete(f);
+				}
+			},
+			[POLISH_PATH, LOOK_PATH],
+		);
+		await page.waitForTimeout(500);
 
 		await page.evaluate(
 			async ([a, b]) => {
