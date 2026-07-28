@@ -117,6 +117,38 @@ export function normalizeCellType(input: unknown): CellType | undefined {
 }
 
 /**
+ * Is EVERY cell of a selection already a checkbox?
+ *
+ * This is the toolbar button's PRESSED state and, one line below, the direction
+ * of the next press - and they have to be the same question, which is what the
+ * bug was: the button lit up when the FIRST cell of the selection was a
+ * checkbox, while the press asked "is any of them not one". On a mixed range
+ * that made a lit button add even more checkboxes.
+ *
+ * An empty selection is not "all of them": nothing is selected, so nothing is
+ * lit and there is no direction to promise.
+ */
+export function isAllCheckbox(types: Iterable<CellType | undefined | null>): boolean {
+	let seen = false;
+	for (const type of types) {
+		if (type !== "cb") return false;
+		seen = true;
+	}
+	return seen;
+}
+
+/**
+ * What one press of the checkbox button must write: `null` takes the type off
+ * every cell of the selection, `"cb"` puts it on every cell. Two presses on any
+ * selection therefore end with no checkboxes at all - there is no third state.
+ */
+export function nextCheckboxType(
+	types: Iterable<CellType | undefined | null>,
+): CellType | null {
+	return isAllCheckbox(types) ? null : "cb";
+}
+
+/**
  * How a checkbox reads a value. Everything that is not a truthy boolean, a
  * non-zero number or a "true"-ish word is unticked, so a checkbox put on a
  * column of text never shows a tick it cannot explain.

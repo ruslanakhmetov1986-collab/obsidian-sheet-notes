@@ -13,9 +13,11 @@ import {
 	SheetFormatError,
 	cellRef,
 	colToName,
+	isAllCheckbox,
 	isCheckedValue,
 	isEmptyCell,
 	isEmptyStyle,
+	nextCheckboxType,
 	normalizeCellType,
 	isSupportedVersion,
 	nameToCol,
@@ -974,6 +976,64 @@ test("an unticked checkbox is not an empty cell", () => {
 	doc.sheets[0].cells = { B2: { t: "cb" } };
 	const back = parseSheet(serializeSheet(doc));
 	assert.equal(back.sheets[0].cells.B2.t, "cb");
+});
+
+/* --------------------------------------- 1.7.x: removing the checkbox type */
+
+test("the checkbox toggle direction is decided by the WHOLE selection", () => {
+	// The bug this encodes: the button was lit whenever the FIRST cell of the
+	// selection was a checkbox, while the press acted on "is any of them not
+	// one" - so on a mixed range the lit button made even more checkboxes.
+	assert.equal(isAllCheckbox(["cb"]), true);
+	assert.equal(isAllCheckbox(["cb", "cb", "cb"]), true);
+	assert.equal(isAllCheckbox(["cb", undefined]), false);
+	assert.equal(isAllCheckbox([undefined, "cb"]), false);
+	assert.equal(isAllCheckbox([undefined, undefined]), false);
+	// Nothing selected is not "all of them are checkboxes": an empty selection
+	// must leave the button dark, or the toggle direction is a guess.
+	assert.equal(isAllCheckbox([]), false);
+
+	// ...and the press follows exactly that: all boxes -> take the type off,
+	// anything else -> put it on all of them.
+	assert.equal(nextCheckboxType(["cb"]), null);
+	assert.equal(nextCheckboxType(["cb", "cb"]), null);
+	assert.equal(nextCheckboxType(["cb", undefined]), "cb");
+	assert.equal(nextCheckboxType([undefined]), "cb");
+	assert.equal(nextCheckboxType([]), "cb");
+	// Two presses on ANY selection end with no checkboxes: the first writes the
+	// same type into every cell, which is the state the second one removes.
+	const first = nextCheckboxType(["cb", undefined]);
+	assert.equal(first, "cb");
+	assert.equal(nextCheckboxType([first, first]), null);
+});
+
+test("a checkbox that stops being one leaves NO value behind", () => {
+	// WHY the removal clears the value as well (Google Sheets does the same).
+	// A boolean is a value like any other to the writer, so a cell that kept it
+	// after losing its type is written out...
+	assert.equal(isEmptyCell({ v: false }), false);
+	assert.equal(isEmptyCell({ v: true }), false);
+	const kept = newSheetDoc();
+	kept.sheets[0].cells = { B2: { v: false } };
+	assert.ok(serializeSheet(kept).includes('"B2": { "v": false }'));
+	// ...and reads back as the WORD "false" sitting in the cell, which is what
+	// the bug report was: "it just shows false and stays a checkbox".
+	assert.equal(parseSheet(serializeSheet(kept)).sheets[0].cells.B2.v, false);
+
+	// Cleared instead, the cell leaves the file completely: no `v`, no `t`.
+	const cleared = newSheetDoc();
+	cleared.sheets[0].cells = { B2: { v: "" } };
+	assert.equal(isEmptyCell({ v: "" }), true);
+	const text = serializeSheet(cleared);
+	assert.ok(!text.includes('"B2"'), text.split("\n").find((l) => l.includes("B2")) ?? "");
+	assert.equal(parseSheet(text).sheets[0].cells.B2, undefined);
+
+	// A style survives it, because clearing content is not clearing formatting.
+	const styled = newSheetDoc();
+	styled.sheets[0].cells = { B2: { v: "", s: { bg: "#fff2cc" } } };
+	const styledText = serializeSheet(styled);
+	assert.ok(styledText.includes('"B2": { "s": { "bg": "#fff2cc" } }'), styledText);
+	assert.equal(parseSheet(styledText).sheets[0].cells.B2.t, undefined);
 });
 
 test("an unknown cell type is dropped rather than carried around", () => {

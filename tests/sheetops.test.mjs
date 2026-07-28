@@ -54,6 +54,28 @@ test("sorting moves a row's style and mask with its values", () => {
 	assert.deepEqual(sorted.cells.A1, { v: "Fruit", s: { b: true } });
 });
 
+test("sorting moves the checkbox TYPE with its row", () => {
+	// A row is moved as a WHOLE, and `t` is part of the cell exactly like `s`
+	// is: a sort that copied everything but the type turned a ticked box into
+	// the bare word "true" in a column that used to be checkboxes.
+	const page = fruitPage();
+	page.cols = 3;
+	page.cells.C1 = { v: "Done", s: { b: true } };
+	page.cells.C2 = { v: true, t: "cb" };
+	page.cells.C3 = { v: false, t: "cb" };
+	page.cells.C4 = { v: true, t: "cb" };
+	const { page: sorted } = sortPage(page, 0, "asc", 1);
+	// apple (was row 3) is first now, and its box came along unticked
+	assert.equal(sorted.cells.C2.t, "cb", JSON.stringify(sorted.cells.C2));
+	assert.equal(sorted.cells.C2.v, false);
+	assert.equal(sorted.cells.C3.t, "cb");
+	assert.equal(sorted.cells.C3.v, true);
+	assert.equal(sorted.cells.C4.t, "cb");
+	assert.equal(sorted.cells.C4.v, true);
+	// the header is not a checkbox and must not become one
+	assert.equal(sorted.cells.C1.t, undefined);
+});
+
 test("sorting is not destructive: the input page is untouched", () => {
 	const page = fruitPage();
 	const before = JSON.stringify(page);

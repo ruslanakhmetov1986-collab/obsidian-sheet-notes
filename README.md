@@ -383,9 +383,21 @@ underneath it becomes a real boolean.
 ```
 
 - Clicking the box writes `true` or `false` and saves like any other edit.
-- The values are left alone when you switch a column over: a column of
-  `true`/`false` becomes a column of ticked and unticked boxes, and pressing the
-  button again gives the words back.
+- The button is a **toggle**: it is lit while every selected cell is already a
+  checkbox, and pressing it then takes the boxes off again. On a mixed selection
+  it is dark, and the first press makes them all checkboxes — so the second
+  press always takes them all off. There is no third state.
+- Turning cells INTO checkboxes leaves their values alone: a column of
+  `true`/`false` becomes a column of ticked and unticked boxes.
+- Taking a checkbox OFF clears the value with it, exactly as Google Sheets does.
+  The boolean was there for the box; a cell left holding it would show the bare
+  word `false` and stay in the file as content nobody typed. A formula is the
+  one thing that is never cleared this way.
+- **Delete** (and Backspace) on a checkbox cell empties it completely — value
+  and type — and leaves an ordinary empty cell, not an unticked box. Fills,
+  borders and number masks stay, because Delete clears content, not formatting.
+- All of it is one step of the document history: Ctrl+Z brings the box back
+  with the value it had.
 - A cell that has never been ticked still ends up in the file (as `false`), or
   the box would vanish on the next save.
 - A box is drawn in the middle of its cell, so a horizontal alignment set on a
@@ -854,7 +866,7 @@ Three safeguards here:
 npm install          # node_modules ~56 MB
 npm run build        # tsc --noEmit + esbuild production -> main.js, styles.css
 npm run dev          # esbuild --watch
-npm test             # 300 unit tests: format, styles, masks, CSV, embeds, i18n,
+npm test             # 303 unit tests: format, styles, masks, CSV, embeds, i18n,
                      # sort/filter/markdown, wiki links, the xlsx round trip,
                      # the undo history and the version store
 npm run test:coverage  # the same tests under c8, with the threshold gate
@@ -917,7 +929,7 @@ Notes on the build configuration:
 - The engine's hard-coded colours (`#fff`, `#ccc`, `#f3f3f3`) are remapped to
   Obsidian CSS variables. No `filter: invert(1)` anywhere.
 
-The e2e suite (915 assertions) launches a separate Obsidian instance with its
+The e2e suite (948 assertions) launches a separate Obsidian instance with its
 own `--user-data-dir` on CDP port 9333, so your running Obsidian is left alone.
 It installs and enables the plugin, creates a sheet, types values and formulas
 with real keyboard events, drags column and row edges, formats a selection with
@@ -942,7 +954,9 @@ checks which rows the DOM hides, scrolls a frozen row and measures where it
 parked, drives the find strip, F2, Ctrl+D, Home/End and Ctrl+arrows as real
 keystrokes, round-trips a Markdown table through the real clipboard, resizes a
 column through the dialog and by double-clicking its header edge, ticks a
-checkbox cell with a real click and reads the boolean back out of the file,
+checkbox cell with a real click and reads the boolean back out of the file, takes
+that checkbox off again with the toolbar and proves the file kept neither the
+type nor the value (and that one Ctrl+Z brings both back byte for byte),
 hovers a `[[link]]` to catch the `hover-link` event and clicks it to see the
 note open, merges a range from the toolbar (through the confirm dialog) and
 splits it again, exports an `.xlsx` and imports it back through the file menu to
@@ -1170,6 +1184,29 @@ ends in a branch that reads `e.target.classList` and a Document has none.
 Measured, with the view's own scope handlers counted: one Ctrl+D in a pop-out
 calls `fillDown` exactly once - Obsidian's keymap does not act on an untrusted
 event, the vendor does.
+
+A cell TYPE has to come off the same way it went on, value included. Removing
+`"t": "cb"` and leaving the value behind is what "the checkbox cannot be
+removed" looked like from the user's side: the box disappeared, the boolean it
+had been drawn from stayed, and the cell was left showing the bare word `false`
+while the file kept `{ "v": false }` - a cell with content nobody typed, which
+comes back looking exactly like a cell the button refused to touch. Delete had
+the mirror-image fault: it cleared the value and left the type, so an emptied
+checkbox came straight back as an unticked box. So the type and the boolean
+under it are removed together (`setCellType(refs, null, true)`), and Delete
+takes the type off as well - it clears CONTENT, and a checkbox is content, not
+formatting. The two callers that take a type off in passing - a paste writing
+plain cells over a checkbox column, fill-down - keep the values they have just
+written, and a formula is never cleared by any of them.
+
+A toggle button's lit state and its direction must be the SAME question. The
+checkbox button lit up when the FIRST cell of the selection was a checkbox while
+the press asked "is any of them not one", so on a mixed range a lit button made
+even more checkboxes and the user could not tell which way the next press would
+go. Both now go through `isAllCheckbox()` in format.ts: lit exactly when every
+selected cell already has the type, i.e. exactly when the press will remove it.
+One press on any selection makes them all checkboxes, the next takes them all
+off, and there is no third state.
 
 A longer selector replaces the properties it MENTIONS, and nothing else. The
 checked checkbox shipped as an accent square with an unreadable dash in it.

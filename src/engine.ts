@@ -1222,13 +1222,30 @@ export class SheetEngine {
 	 * Turn cells into checkboxes, or back into plain cells.
 	 *
 	 * The type is an attribute, not a style: it changes what the cell IS, and it
-	 * must survive a row insert exactly like a number mask does. Values are left
-	 * alone - a column of `true`/`false` becomes a column of ticked boxes, and
-	 * removing the type gives the words back.
+	 * must survive a row insert exactly like a number mask does. Putting the type
+	 * ON leaves the values alone - a column of `true`/`false` becomes a column of
+	 * ticked boxes.
+	 *
+	 * TAKING IT OFF IS A DIFFERENT QUESTION, and `clearValues` is the answer to
+	 * it. A checkbox's value is a BOOLEAN, kept for the box and for nothing else,
+	 * so a cell that merely loses its type is left showing the word `true` or
+	 * `false` - and the file keeps `{ "v": false }`, i.e. a cell with content
+	 * that nobody typed. That is what the "the checkbox cannot be removed" report
+	 * looked like from the user's side. Google Sheets clears the value with the
+	 * tick box, and so do we, but only for the callers that MEAN "this cell stops
+	 * being a checkbox" (the toolbar toggle, Delete). The ones that take the type
+	 * off in passing - a paste writing plain cells over a checkbox column,
+	 * fill-down - have already written the values they want and pass `false`,
+	 * because clearing there would erase the very cells they just filled.
+	 *
+	 * A FORMULA is never cleared, whatever the caller asks: a boolean put there
+	 * for a tick box is ours to remove, a formula the user typed is not, and
+	 * dropping one on a toolbar press would be silent data loss.
 	 */
-	setCellType(refs: string[], type: CellType | null): void {
+	setCellType(refs: string[], type: CellType | null, clearValues = false): void {
 		if (this.readOnly || refs.length === 0) return;
 		const data = this.rawData();
+		const dropped: string[] = [];
 		for (const ref of refs) {
 			const el = this.cellElement(ref);
 			if (!el) continue;
@@ -1242,7 +1259,20 @@ export class SheetEngine {
 				} catch {
 					continue;
 				}
-				this.undecorateCheckbox(el, data[coords.row]?.[coords.col]);
+				const raw = data[coords.row]?.[coords.col];
+				const isFormula = typeof raw === "string" && raw.startsWith("=");
+				const clear = clearValues && !isFormula;
+				if (clear) dropped.push(ref);
+				this.undecorateCheckbox(el, clear ? "" : raw);
+			}
+		}
+		// After the attributes, never before: with the type still on the cell the
+		// write would be re-decorated as a box on its way through the engine.
+		if (clearValues && dropped.length > 0) {
+			try {
+				this.first()?.setValue(dropped, "" as JssCellValue);
+			} catch (e) {
+				console.error("leovale-sheets: clearing a former checkbox failed", e);
 			}
 		}
 		this.syncDecor();
@@ -1982,7 +2012,16 @@ export class SheetEngine {
 		return !!(this.first() as unknown as { edition?: unknown } | null)?.edition;
 	}
 
-	/** Delete: empty every cell of the selection, styles and masks untouched. */
+	/**
+	 * Delete: empty every cell of the selection. Styles and number masks are
+	 * untouched - Delete clears CONTENT, not formatting, which is what it does in
+	 * every spreadsheet.
+	 *
+	 * The cell TYPE goes, though, and it is not an exception to that rule: a
+	 * checkbox is not a look, it is what the cell is. Clearing only the value
+	 * left the box behind, unticked, so Delete on a checkbox looked like it had
+	 * done nothing at all and there was no way to get an ordinary cell back.
+	 */
 	clearSelection(): void {
 		const ws = this.first();
 		if (!ws || this.readOnly) return;
@@ -1992,6 +2031,12 @@ export class SheetEngine {
 			ws.setValue(refs, "");
 		} catch (e) {
 			console.error("leovale-sheets: clearing the selection failed", e);
+			return;
+		}
+		// Calls `notify` itself, but only when a type really came off, so the
+		// plain-cell case still notifies exactly once - here.
+		if (refs.some((ref) => this.getCellType(ref) === "cb")) {
+			this.setCellType(refs, null);
 			return;
 		}
 		this.notify();

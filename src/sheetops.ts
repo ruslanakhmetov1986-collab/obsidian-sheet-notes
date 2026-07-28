@@ -92,12 +92,19 @@ export interface SortResult {
 	movedFormula: boolean;
 }
 
-/** Deep-enough copy of a cell: the style is the only nested object. */
+/**
+ * Deep-enough copy of a cell: the style is the only nested object.
+ *
+ * `t` travels with the row like `s` does. A sort that copied everything but the
+ * type turned a column of tick boxes into a column of bare `true`/`false` words
+ * the moment it was sorted, and the file was written that way.
+ */
 function copyCell(cell: SheetCell): SheetCell {
 	const out: SheetCell = {};
 	if (cell.v !== undefined) out.v = cell.v;
 	if (cell.f !== undefined) out.f = cell.f;
 	if (cell.s) out.s = { ...cell.s };
+	if (cell.t) out.t = cell.t;
 	return out;
 }
 
