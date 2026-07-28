@@ -192,7 +192,21 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # Release notes = the squash commit's own body (our commit messages
+          # are written as ready-made bullet lists), then GitHub's generated
+          # PR/changelog block appended via the API.
+          subj=$(git log -1 --format=%s HEAD~1)
+          body=$(git log -1 --format=%b HEAD~1)
+          notes_file=$(mktemp)
+          {
+            echo "### ${subj}"
+            echo
+            if [ -n "$body" ]; then echo "$body"; echo; fi
+            gh api "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+              -f tag_name="${{ steps.version.outputs.ver }}" \
+              --jq .body
+          } > "$notes_file"
           gh release create "${{ steps.version.outputs.ver }}" \
             --title "${{ steps.version.outputs.ver }}" \
-            --generate-notes \
+            --notes-file "$notes_file" \
             main.js manifest.json styles.css
