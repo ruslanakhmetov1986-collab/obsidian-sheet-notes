@@ -179,8 +179,8 @@ them. Who keeps the focus afterwards depends on the device, and deliberately so:
 | Resize a column | Drag the right edge of the `A`, `B`, … header |
 | Resize a row | Drag the bottom edge of the row number |
 | Insert / delete rows and columns | Right-click anywhere in the grid (long press on touch) |
-| Context menu | Right click, or a long press on a tablet: edit, copy, paste, insert and delete rows and columns, merge |
-| Copy, paste, undo, redo | `Ctrl+C` / `Ctrl+V`, `Ctrl+Z` / `Ctrl+Y` |
+| Context menu | Right click, or a long press on a tablet: edit, copy, cut, paste, insert and delete rows and columns, merge |
+| Copy, cut, paste, undo, redo | `Ctrl+C` / `Ctrl+X` / `Ctrl+V`, `Ctrl+Z` / `Ctrl+Y` |
 | Edit the active cell | `F2` |
 | Fill down | `Ctrl+D` (the top row of the selection over the rest, or the cell above into a single cell) |
 | Start / end of the row | `Home` / `End` (`End` stops at the last filled cell, not at column Z) |
@@ -204,6 +204,18 @@ text field, and everywhere else in Obsidian they stay Obsidian's own.
 
 Column widths and row heights are stored in the file, so they survive closing
 and reopening the note.
+
+**Copy, cut and paste keep the formatting.** Inside the plugin a copied range
+carries its fills, bold, borders, alignment, number masks and checkbox cells
+along with the values, into any other sheet and into a sheet in a pop-out
+window. The plain tab-separated text still goes to the system clipboard at the
+same time, so the range pastes into Excel, into Google Sheets or into a note as
+before - and anything copied in another application pastes into the grid as
+plain values, exactly as it always did. `Ctrl+X` is a MOVE: the cut cells are
+marked with a dashed outline and are emptied by the paste that completes the
+move, so nothing is lost if you change your mind - `Esc` calls the cut off.
+Formulas are pasted as written (`=B2+1` stays `=B2+1`, it is not rewritten for
+its new address), the same rule fill-down follows.
 
 Formulas are evaluated by the bundled Jspreadsheet CE engine: `SUM`, `AVERAGE`,
 `IF`, `VLOOKUP`, `SUMIF`, `IFERROR`, `SUMPRODUCT`, `TEXTJOIN` and a few hundred
@@ -1010,6 +1022,60 @@ rule can beat an inline declaration - the rows scrolling underneath showed
 straight through every bold-but-unfilled header cell. The inline value is
 `var(--leovale-sheet-cell-bg)` instead, and the frozen-pane rules redefine that
 variable on the cells they pin.
+
+That same inline background made a selected range invisible, and for three
+releases nothing could see it but a human. The tint over the selected cells was
+a `background-color` on the vendor's `.highlight` class, so it reached the cells
+that had never been styled and no others: a range covering a filled cell, a bold
+cell or a checkbox cell drew its border and left the interior exactly as it was.
+Measured in the user's own vault, the mean colour of a selected filled cell was
+identical to its unselected mean, byte for byte, while every DOM assertion - the
+class, the rule, the computed declaration - answered correctly. A tint that has
+to survive an inline `background-color` cannot be a colour at all: it is a
+`background-image` layer (`linear-gradient(tint, tint)`), which is painted OVER
+the background colour whatever set it, and translucent, so the cell's own fill
+still shows through - the fill is data. The anchor cell is left clear, as Google
+Sheets leaves it, so the cell you are about to type into stays readable; the
+column letters and row numbers of the range are mixed with the accent rather
+than washed with it, because both are `position: sticky` and a translucent
+background lets the rows sliding underneath show through. The regression test
+for it is a screenshot of one cell at 4x, averaged: an assertion about pixels,
+because that is the only kind this bug could not pass.
+
+The OUTLINE round the selection had the same fault for the same reason, one
+layer out. It was drawn by recolouring the edge cells' own borders, which is how
+the vendor does it - and a cell border is an edge SHARED with the neighbour. The
+plugin's own cell borders are written inline and are the stronger declaration,
+so the shared edge went to them: selecting a cell with borders on all four sides
+drew the accent on its top and left only, and selecting one whose neighbours
+were all bordered drew almost nothing. It is one overlay box now,
+`position: absolute` in the vendor's own `.jss_content`, 2px of accent with
+`pointer-events: none`, sized to the union of the cells the vendor marked. That
+union is what makes it right for a merged cell (one `<td>`, several addresses)
+and for a range crossing a filtered-out row (whose cells measure zero and are
+skipped). It lives in `.jss_content` rather than in the view's own positioned
+box so that it SCROLLS WITH THE GRID with no scroll listener at all, and its
+`z-index` is 5: above the frozen panes (2-4), so a selection inside a frozen row
+keeps its outline, and below the fill handle (the vendor's 20), which stays
+attached to the outline's corner.
+
+A range copied inside the plugin travels twice, and only one of the two is
+trusted. The system clipboard gets tab-separated TEXT, which is what makes a
+range paste into Excel, into Google Sheets or into a note - and text is all it
+can hold, so a paste back into a sheet used to arrive stripped of the fill, the
+borders, the number mask and the fact that a cell was a tick box. The structured
+payload is kept in a module-level store beside it (which is what lets a range
+copied in one sheet be pasted into another, in another window), keyed on the
+exact text that went out with it. A paste takes the rich route only while the
+system clipboard still holds THAT text: copy anything else anywhere in the OS
+and the fingerprint stops matching, so the paste falls back to plain values -
+which is the right answer, because what the user copied last is what they expect
+to paste. The comparison folds CRLF and trailing newlines, or it would never
+match on Windows. A cut is the same payload plus a promise: the source is
+emptied by the paste that completes it, never by the Ctrl+X, so an abandoned cut
+loses nothing and Escape simply withdraws it. Formulas travel as their SOURCE,
+unrebased - the same rule fill-down, the file format and a paste of plain text
+have always followed.
 
 Sorting through the engine would separate a row from its formatting. `orderBy()`
 permutes `options.data` and the `<tr>` elements, but styles live in

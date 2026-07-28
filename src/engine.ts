@@ -15,6 +15,14 @@ import "jsuites/dist/jsuites.css";
 import "jspreadsheet-ce/dist/jspreadsheet.css";
 import type { CellValue as JssCellValue, WorksheetInstance } from "jspreadsheet-ce";
 import { WRAP_CLASS, WRAP_ON, cssToStyle, styleToCss } from "./cellcss";
+import {
+	type ClipCell,
+	type ClipRect,
+	type SheetClip,
+	cancelCut,
+	makeClip,
+	pendingCut,
+} from "./clipboard";
 import { formatValue } from "./numfmt";
 import {
 	CURRENT_VERSION,
@@ -91,6 +99,10 @@ export const FOUND_CURRENT_CLASS = "leovale-sheet-found-current";
 export const FILTERED_CLASS = "leovale-sheet-filtered";
 /** Marks the column the page is sorted by, in the header. */
 export const SORTED_CLASS = "leovale-sheet-sorted";
+/** Marks the cells a pending CUT will clear on the next paste. */
+export const CUT_CLASS = "leovale-sheet-cut";
+/** The overlay that outlines the selected range; see {@link SheetEngine.syncSelectionBox}. */
+export const SELBOX_CLASS = "leovale-sheet-selbox";
 
 /** Sane bounds for a column width, in px, whatever the user or autofit asks. */
 export const MIN_COL_WIDTH = 24;
@@ -272,6 +284,26 @@ export interface EngineOptions {
 	 * whole sequence, `touchstart` included, to recognise it.
 	 */
 	touchPassThrough?: (e: TouchEvent) => boolean;
+	/**
+	 * What Ctrl+C / Ctrl+X / Ctrl+V and Escape do on the grid.
+	 *
+	 * Supplied by the host for the same reason the menu is: the operations end in
+	 * `navigator.clipboard` and in Obsidian notices, and the engine has no
+	 * `obsidian` import. The engine's part is the keystroke - it is the one thing
+	 * here that knows which grid the vendor currently considers current, and it
+	 * has to intercept before the vendor's own handler runs (see
+	 * {@link SheetEngine.installClipboardKeys}).
+	 */
+	clipboard?: ClipboardActions;
+}
+
+/** The host's clipboard operations; see {@link EngineOptions.clipboard}. */
+export interface ClipboardActions {
+	copy: () => void;
+	cut: () => void;
+	paste: () => void;
+	/** Escape while a cut is pending: withdraw it, leave the source alone. */
+	cancelCut: () => void;
 }
 
 /**
@@ -376,6 +408,15 @@ export class SheetEngine {
 	/** The pop-out key bridge, and the document it listens on; see {@link installKeyBridge}. */
 	private keyBridge: ((e: KeyboardEvent) => void) | null = null;
 	private keyBridgeDoc: Document | null = null;
+	/** What the host does on Ctrl+C/X/V; see {@link EngineOptions.clipboard}. */
+	private clipboard?: ClipboardActions;
+	/** The clipboard key handler and the document it captures on. */
+	private clipKeys: ((e: KeyboardEvent) => void) | null = null;
+	private clipKeysDoc: Document | null = null;
+	/** Cells currently wearing the cut marker; see {@link markCutRange}. */
+	private cutRefs: string[] = [];
+	/** The selection outline overlay; see {@link syncSelectionBox}. */
+	private selBox: HTMLElement | null = null;
 
 	constructor(parent: HTMLElement, doc: SheetDoc, opts: EngineOptions) {
 		this.readOnly = !!opts.readOnly;
@@ -389,6 +430,7 @@ export class SheetEngine {
 		this.links = opts.links;
 		this.menuBuilder = opts.menu;
 		this.passTouch = opts.touchPassThrough;
+		this.clipboard = opts.clipboard;
 		this.root = parent.createDiv({ cls: ROOT_CLASS });
 		this.root.addClass(this.uid);
 		this.host = this.root.createDiv({ cls: "leovale-sheet-host" });
@@ -423,6 +465,7 @@ export class SheetEngine {
 				if (rect.every((n) => typeof n === "number" && Number.isFinite(n))) {
 					this.lastSelection = [x1, y1, x2, y2];
 				}
+				this.syncSelectionBox();
 				try {
 					opts.onSelection?.();
 				} catch (e) {
@@ -492,6 +535,88 @@ export class SheetEngine {
 		this.observeResize();
 		this.installTouchGestures();
 		this.installKeyBridge();
+		this.installClipboardKeys();
+	}
+
+	/**
+	 * Is the grid the vendor is currently acting on one of ours?
+	 *
+	 * `jspreadsheet.current` is global and is set by the vendor's own
+	 * document-level `mousedown`, i.e. it is "the grid the user last clicked in",
+	 * across every sheet in every window. Every document-level handler here is
+	 * gated on it, or a keystroke meant for one sheet would drive another.
+	 */
+	private ownsCurrent(): boolean {
+		const current = (jspreadsheet as unknown as { current?: unknown }).current;
+		return !!current && !!this.worksheets?.includes(current as WorksheetInstance);
+	}
+
+	/* --------------------------------------------------------- clipboard keys */
+
+	/**
+	 * Ctrl+C, Ctrl+X, Ctrl+V and Escape, taken off the vendor.
+	 *
+	 * WHY THEY ARE INTERCEPTED AT ALL. The vendor implements all three itself, in
+	 * its `keydown` handler on the document: Ctrl+C builds tab-separated text,
+	 * puts it in a hidden textarea and calls `execCommand("copy")`; Ctrl+X does
+	 * that and blanks the VALUES; Ctrl+V is served by a `paste` listener that
+	 * writes `clipboardData.getData("text")` into the grid. Text, in all three
+	 * directions - which is precisely the limitation this feature exists to lift
+	 * (see clipboard.ts). Leaving the vendor's handlers in place next to ours
+	 * would mean two writers on one clipboard, racing.
+	 *
+	 * WHY THE CAPTURE PHASE ON THE DOCUMENT. The vendor listens on the document
+	 * in the BUBBLE phase, so a capture listener on the same document is the last
+	 * point at which the keystroke can still be taken away from it:
+	 * `stopPropagation()` from a capture listener on an ancestor cancels the rest
+	 * of the trip, the bubble half included. `preventDefault()` on the keydown is
+	 * what stops the browser from also firing its own `copy`/`paste` events, so
+	 * the range is written to the clipboard exactly once, by us.
+	 *
+	 * In a pop-out this listens on the pop-out's document, which is also what
+	 * stops {@link installKeyBridge} from carrying these particular keystrokes to
+	 * the main window - by the time the bridge's bubble handler would run, the
+	 * event is no longer travelling.
+	 *
+	 * Escape is NOT consumed: it only withdraws a pending cut, and the vendor
+	 * still needs it to close an open editor.
+	 */
+	private installClipboardKeys(): void {
+		const doc = this.root.ownerDocument;
+		if (!doc || !this.clipboard) return;
+		const actions = this.clipboard;
+
+		const handler = (e: KeyboardEvent) => {
+			if (!this.ownsCurrent()) return;
+			// A text field owns its own clipboard keys: the formula bar, the find
+			// box, and the in-cell editor are all inputs, and Ctrl+C in one of them
+			// means "copy this text", not "copy this range".
+			const target = e.target;
+			if (
+				target instanceof HTMLInputElement ||
+				target instanceof HTMLTextAreaElement ||
+				(target instanceof HTMLElement && target.isContentEditable)
+			) {
+				return;
+			}
+			if (this.isEditing()) return;
+			if (e.key === "Escape") {
+				actions.cancelCut();
+				return;
+			}
+			if (!(e.ctrlKey || e.metaKey) || e.shiftKey || e.altKey) return;
+			const key = e.key.toLowerCase();
+			if (key !== "c" && key !== "x" && key !== "v") return;
+			e.preventDefault();
+			e.stopPropagation();
+			if (key === "c") actions.copy();
+			else if (key === "x") actions.cut();
+			else actions.paste();
+		};
+
+		doc.addEventListener("keydown", handler, true);
+		this.clipKeys = handler;
+		this.clipKeysDoc = doc;
 	}
 
 	/* ------------------------------------------------------ pop-out keyboard */
@@ -548,8 +673,7 @@ export class SheetEngine {
 		if (!doc || doc === document) return;
 
 		const bridge = (e: KeyboardEvent) => {
-			const current = (jspreadsheet as unknown as { current?: unknown }).current;
-			if (!current || !this.worksheets?.includes(current as WorksheetInstance)) return;
+			if (!this.ownsCurrent()) return;
 			// A synthesized keydown carrying the legacy fields too: the vendor reads
 			// `which`/`keyCode` for navigation and `key` for typing entry.
 			const copy = new KeyboardEvent("keydown", {
@@ -836,6 +960,7 @@ export class SheetEngine {
 			/* engine already torn down */
 		}
 		if (!isEmptyFreeze(this.freezes[0] ?? {})) this.syncFreeze();
+		this.syncSelectionBox();
 	}
 
 	private first(): WorksheetInstance | null {
@@ -927,6 +1052,10 @@ export class SheetEngine {
 				.forEach((el) => el.classList.add(WRAP_CLASS));
 			this.syncCheckboxes();
 			this.syncLinks();
+			// The outline is geometry, so it goes stale on anything that moves a
+			// cell: a resized column, a row that grew because its text wraps, an
+			// inserted row, a filter that hid one.
+			this.syncSelectionBox();
 		} catch (e) {
 			console.error("leovale-sheets: decor sync failed", e);
 		}
@@ -1623,6 +1752,7 @@ export class SheetEngine {
 	}
 
 	private notifySelection(): void {
+		this.syncSelectionBox();
 		try {
 			this.selectionListener?.();
 		} catch (e) {
@@ -1829,6 +1959,194 @@ export class SheetEngine {
 		return this.writeRange(anchor.row, anchor.col, values);
 	}
 
+	/**
+	 * The selection as a STRUCTURED payload: raw values, formula sources, styles
+	 * (number mask included) and cell types, plus the TSV that goes out with it.
+	 * See clipboard.ts for what the two halves are for.
+	 *
+	 * A formula travels as its SOURCE, verbatim and unrebased - `=B2+1` pasted
+	 * three rows down is still `=B2+1`. That is what fill-down does with a
+	 * formula, what the file format stores, and what a paste of TEXT has always
+	 * done here; a relative rewrite would be a third rule for the same cell.
+	 */
+	selectionClip(cut = false): SheetClip | null {
+		const rect = this.selectionRect();
+		if (!rect) return null;
+		const cells: ClipCell[][] = [];
+		for (let r = rect.r1; r <= rect.r2; r++) {
+			const line: ClipCell[] = [];
+			for (let c = rect.c1; c <= rect.c2; c++) {
+				const ref = cellRef(r, c);
+				const raw = this.getRawValue(ref);
+				line.push({
+					// `makeClip` prefers `f` and drops the other, so both may be given.
+					v: raw === null ? undefined : raw,
+					f: typeof raw === "string" && raw.startsWith("=") ? raw : undefined,
+					s: this.getStyleAt(ref),
+					t: this.getCellType(ref),
+				});
+			}
+			cells.push(line);
+		}
+		return makeClip(cells, this.selectionTsv(), cut ? { owner: this, rect } : null);
+	}
+
+	/**
+	 * Write a structured payload into the grid, anchored at the selection and
+	 * clipped to the grid's own size - the same rule {@link writeRange} follows,
+	 * for the same reason.
+	 *
+	 * The style is REPLACED rather than merged: a copied cell brings its whole
+	 * appearance, and a destination that kept its old fill under a pasted one
+	 * would be neither.
+	 */
+	pasteClip(clip: SheetClip): { rows: number; cols: number } {
+		const ws = this.first();
+		const anchor = this.activeCell();
+		if (!ws || this.readOnly || !anchor) return { rows: 0, cols: 0 };
+		const size = this.dimensions();
+		const rows = Math.max(0, Math.min(clip.rows, size.rows - anchor.row));
+		const cols = Math.max(0, Math.min(clip.cols, size.cols - anchor.col));
+		if (rows === 0 || cols === 0) return { rows: 0, cols: 0 };
+
+		const refs: string[] = [];
+		const styles = new Map<string, CellStyle>();
+		const boxes: string[] = [];
+		const plain: string[] = [];
+		try {
+			for (let r = 0; r < rows; r++) {
+				for (let c = 0; c < cols; c++) {
+					const cell = clip.cells[r]?.[c] ?? {};
+					const ref = cellRef(anchor.row + r, anchor.col + c);
+					refs.push(ref);
+					styles.set(ref, cell.s ?? {});
+					(cell.t === "cb" ? boxes : plain).push(ref);
+					ws.setValueFromCoords(
+						anchor.col + c,
+						anchor.row + r,
+						(cell.f ?? cell.v ?? "") as JssCellValue,
+					);
+				}
+			}
+		} catch (e) {
+			console.error("leovale-sheets: pasting a range failed", e);
+			return { rows: 0, cols: 0 };
+		}
+		this.applyStyle(refs, (_cur, ref) => styles.get(ref) ?? {});
+		// Types go on in two passes because they are an attribute per cell, and a
+		// destination that used to be a checkbox column must stop being one.
+		if (boxes.length > 0) this.setCellType(boxes, "cb");
+		if (plain.length > 0) this.setCellType(plain, null);
+		this.notify();
+		return { rows, cols };
+	}
+
+	/**
+	 * Empty a rectangle completely: values, formulas, styles and types. This is
+	 * the "source" half of a cut, and it is deliberately more than
+	 * {@link clearSelection} (which is the Delete key, and Delete clears content,
+	 * not formatting).
+	 */
+	clearRect(rect: ClipRect): void {
+		const ws = this.first();
+		if (!ws || this.readOnly) return;
+		const refs: string[] = [];
+		for (let r = rect.r1; r <= rect.r2; r++) {
+			for (let c = rect.c1; c <= rect.c2; c++) refs.push(cellRef(r, c));
+		}
+		if (refs.length === 0) return;
+		try {
+			ws.setValue(refs, "" as JssCellValue);
+		} catch (e) {
+			console.error("leovale-sheets: clearing a range failed", e);
+			return;
+		}
+		this.setCellType(refs, null);
+		// Last, and it is what calls `notify`: the style write is the one that
+		// cannot be skipped even when nothing else changed.
+		this.applyStyle(refs, () => ({}));
+	}
+
+	/**
+	 * Draw the outline of the selected range as an OVERLAY, above every cell.
+	 *
+	 * WHY NOT THE CELLS' OWN BORDERS, which is how the vendor does it (and how
+	 * this plugin did it until the outline was reported half-missing). The
+	 * vendor puts `highlight-top`/`-left`/`-right`/`-bottom` on the edge cells
+	 * and recolours the matching border. A cell border is a shared edge, and it
+	 * is shared with a cell that may have a border of its own: ours are 1px
+	 * accent, a user's are `1px solid var(--leovale-sheet-border-strong)` written
+	 * INLINE - and an inline declaration beats a rule, so the user's border took
+	 * the edge every time. Measured on the user's sheet: a cell with borders on
+	 * all four sides showed the accent outline on its top and left only, and a
+	 * cell whose neighbours were all bordered showed almost none of it. The same
+	 * arithmetic makes the outline vanish behind a fill's neighbour, a merged
+	 * cell's edge, and anything else that owns a border.
+	 *
+	 * An overlay has no shared edges. One absolutely positioned box, 2px of
+	 * accent, `pointer-events: none` so it cannot swallow a click, sized to the
+	 * union of the cells the vendor actually marked - which is what makes it
+	 * right for a merged cell (one `<td>`, several addresses) and for a range
+	 * crossing hidden rows (a filtered row's cells measure 0 and are skipped).
+	 *
+	 * It lives in `.jss_content`, the vendor's own positioned container and the
+	 * one the fill handle is placed in, so it SCROLLS WITH THE GRID for free:
+	 * no scroll listener, nothing to go stale between frames. Its `z-index` sits
+	 * above the frozen panes (2-4) and below the fill handle (20), so a
+	 * selection inside a frozen row keeps its outline; the cost is that an
+	 * outline belonging to rows scrolled underneath a frozen pane draws over it,
+	 * which is the lesser of the two and only while it is being scrolled past.
+	 */
+	syncSelectionBox(): void {
+		const content = this.host.querySelector<HTMLElement>(".jss_content");
+		if (!content) return;
+		let box = this.selBox;
+		if (!box || !box.isConnected || box.parentElement !== content) {
+			box?.remove();
+			box = content.createDiv({ cls: SELBOX_CLASS });
+			this.selBox = box;
+		}
+		let left = Infinity;
+		let top = Infinity;
+		let right = -Infinity;
+		let bottom = -Infinity;
+		this.host.querySelectorAll<HTMLElement>("tbody > tr > td.highlight").forEach((cell) => {
+			const r = cell.getBoundingClientRect();
+			// A row hidden by a filter, or a cell swallowed by a merge, measures 0.
+			if (r.width < 1 || r.height < 1) return;
+			left = Math.min(left, r.left);
+			top = Math.min(top, r.top);
+			right = Math.max(right, r.right);
+			bottom = Math.max(bottom, r.bottom);
+		});
+		if (!Number.isFinite(left)) {
+			box.style.display = "none";
+			return;
+		}
+		// Absolute children are placed against the containing block's PADDING box;
+		// `.jss_content` has padding but no border, so its client rect is that box.
+		const base = content.getBoundingClientRect();
+		box.style.display = "block";
+		box.style.left = `${Math.round(left - base.left)}px`;
+		box.style.top = `${Math.round(top - base.top)}px`;
+		box.style.width = `${Math.round(right - left)}px`;
+		box.style.height = `${Math.round(bottom - top)}px`;
+	}
+
+	/** Draw, or with `null` remove, the marker on the cells a cut is holding. */
+	markCutRange(rect: ClipRect | null): void {
+		for (const ref of this.cutRefs) this.cellElement(ref)?.classList.remove(CUT_CLASS);
+		this.cutRefs = [];
+		if (!rect) return;
+		for (let r = rect.r1; r <= rect.r2; r++) {
+			for (let c = rect.c1; c <= rect.c2; c++) {
+				const ref = cellRef(r, c);
+				this.cutRefs.push(ref);
+				this.cellElement(ref)?.classList.add(CUT_CLASS);
+			}
+		}
+	}
+
 	/* ---------------------------------------------------------- column width */
 
 	columnWidth(col: number): number {
@@ -1929,12 +2247,21 @@ export class SheetEngine {
 	 * A cell whose links we rendered gives back the SOURCE (`[[Note]]`), not the
 	 * link's label: a wiki link pasted into a note is a working link there, and
 	 * the label alone would be a link thrown away.
+	 *
+	 * A checkbox gives back `true`/`false` for a related reason and one extra:
+	 * its text was REPLACED by an `<input>`, so the element has nothing to read
+	 * and the cell used to travel as an empty string - into Excel, into a
+	 * Markdown table, and into the text a paste is matched against, where a
+	 * column of tick boxes made the whole range unrecognisable.
 	 */
 	displayText(ref: string): string {
 		const el = this.cellElement(ref);
 		if (!el) return "";
 		const link = el.getAttribute(LINK_SRC_ATTR);
 		if (link !== null && el.querySelector(`a.${LINK_CLASS}`)) return link;
+		if (normalizeCellType(el.getAttribute(TYPE_ATTR)) === "cb") {
+			return String(isCheckedValue(this.getRawValue(ref) as CellValue));
+		}
 		return el.textContent ?? "";
 	}
 
@@ -2333,6 +2660,18 @@ export class SheetEngine {
 		}
 		this.keyBridge = null;
 		this.keyBridgeDoc = null;
+		if (this.clipKeys && this.clipKeysDoc) {
+			this.clipKeysDoc.removeEventListener("keydown", this.clipKeys, true);
+		}
+		this.clipKeys = null;
+		this.clipKeysDoc = null;
+		// A cut whose source is being torn down cannot be completed: the marker
+		// would outlive the grid it points into, and the next paste would call
+		// `clearRect` on a destroyed engine.
+		if (pendingCut()?.owner === this) cancelCut();
+		this.cutRefs = [];
+		this.selBox?.remove();
+		this.selBox = null;
 		if (this.freezeTimer !== null) {
 			window.clearTimeout(this.freezeTimer);
 			this.freezeTimer = null;

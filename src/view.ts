@@ -12,7 +12,7 @@ import { SheetEngine } from "./engine";
 import { SheetToolbar } from "./toolbar";
 import { SheetFormulaBar } from "./formulabar";
 import { SheetFind } from "./find";
-import { openGridMenu } from "./gridmenu";
+import { cancelPendingCut, copySelection, openGridMenu, pasteInto } from "./gridmenu";
 import { ColumnWidthModal, ConfirmModal } from "./dialogs";
 import { exportDocAsXlsx } from "./xlsxio";
 import {
@@ -399,6 +399,29 @@ export class SheetView extends TextFileView {
 					const engine = this.sheetEngine;
 					if (!engine) return;
 					openGridMenu(engine, ctx, { merge: () => this.mergeSelection() });
+				},
+				// Ctrl+C / Ctrl+X / Ctrl+V / Escape. The engine owns the keystroke
+				// (it is the only place that knows which grid the vendor is on), the
+				// operations live where the notices and the clipboard API are.
+				clipboard: {
+					copy: () => {
+						const engine = this.sheetEngine;
+						if (engine) void copySelection(engine);
+					},
+					cut: () => {
+						const engine = this.sheetEngine;
+						if (engine && !this.sheetReadOnly) void copySelection(engine, true);
+					},
+					paste: () => {
+						const engine = this.sheetEngine;
+						if (!engine) return;
+						if (this.sheetReadOnly) {
+							new Notice(t("sheetReadOnly"));
+							return;
+						}
+						void pasteInto(engine);
+					},
+					cancelCut: () => cancelPendingCut(),
 				},
 			});
 		} catch (e) {

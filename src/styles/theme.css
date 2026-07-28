@@ -525,9 +525,13 @@ body.is-mobile .leovale-sheet-find-input,
 	text-align: center !important;
 }
 
+/* The column letters and row numbers of the selected range, as in every
+   spreadsheet. The vendor already puts `selected` on the header of every column
+   in the range and on every row element of it; what was wrong was the colour -
+   see `--leovale-sheet-sel-head` in the selection block below. */
 .leovale-sheet-root .jss_worksheet > thead > tr > td.selected,
 .leovale-sheet-root .jss_worksheet > tbody > tr.selected > td:first-child {
-	background-color: var(--background-modifier-hover);
+	background-color: var(--leovale-sheet-sel-head);
 	color: var(--text-normal);
 }
 
@@ -681,34 +685,156 @@ body.is-mobile .leovale-sheet-find-input,
 		inset 0 0 0 2px var(--interactive-accent);
 }
 
-/* ---- selection --------------------------------------------------------- */
+/* ---- selection ---------------------------------------------------------
+ *
+ * A range is drawn in TWO channels, and which one carries what is the whole
+ * point of this block.
+ *
+ * The BORDER round the range and the corner handle are the vendor's: classes on
+ * the edge cells (`highlight-top` and friends), repainted here in the accent.
+ *
+ * The TINT over the interior cannot be a `background-color`. Every styled cell
+ * carries one INLINE - `setStyle` merges, so a removed fill has to be actively
+ * reset, and an unfilled cell therefore says `var(--leovale-sheet-cell-bg)`
+ * rather than nothing (see cellcss.ts). An inline declaration beats any rule, so
+ * the vendor's `.highlight { background-color }` reached the never-styled cells
+ * ONLY. Measured on the user's sheet, selection A1:D4: an untouched cell tinted
+ * rgba(138,92,245,.2), the cell beside it with a yellow fill unchanged, mean
+ * colour identical to its unselected state to the byte. What the user saw was a
+ * thick border with nothing inside it.
+ *
+ * A background IMAGE is a different layer: it is painted OVER the background
+ * colour, inline or not. A one-stop `linear-gradient` is how a flat translucent
+ * wash is expressed as an image, and that is all this is. The tint is the accent
+ * at a low alpha, so the cell's own fill still shows through - in a spreadsheet
+ * the fill is data and must not be replaced by the selection.
+ *
+ * The ANCHOR cell (`highlight-selected`) stays clear, as it does in Google
+ * Sheets: the cell you are about to type into is the one you can read. A
+ * single-cell selection is therefore border-only.
+ * ---------------------------------------------------------------------- */
 
+.leovale-sheet-root {
+	/* Alphas picked against both extremes of the light theme - plain white and a
+	   pastel fill - where a wash has to be visible without turning a yellow cell
+	   green. */
+	--leovale-sheet-sel-tint: color-mix(in srgb, var(--interactive-accent) 13%, transparent);
+	/* The letter of a selected column and the number of a selected row. MIXED
+	   into the header colour, not laid over it: both cells are `position:
+	   sticky`, and a translucent background lets the rows sliding underneath
+	   show through. The vendor default we used to take here,
+	   `--background-modifier-hover`, is exactly such a colour - rgba(0,0,0,.067)
+	   - so the gutter was both see-through and, on top of `--background-
+	   secondary`, almost indistinguishable from an unselected header. */
+	--leovale-sheet-sel-head: color-mix(in srgb, var(--interactive-accent) 24%, var(--background-secondary));
+}
+
+/* The same alpha over a dark surface reads as almost nothing, so the dark theme
+   gets its own pair rather than a single compromise value. */
+.theme-dark .leovale-sheet-root {
+	--leovale-sheet-sel-tint: color-mix(in srgb, var(--interactive-accent) 26%, transparent);
+	--leovale-sheet-sel-head: color-mix(in srgb, var(--interactive-accent) 34%, var(--background-secondary));
+}
+
+.leovale-sheet-root .jss_worksheet > tbody > tr > td.highlight {
+	background-image: linear-gradient(var(--leovale-sheet-sel-tint), var(--leovale-sheet-sel-tint));
+}
+
+/* The anchor cell is the exception: no wash, only the border. */
+.leovale-sheet-root .jss_worksheet > tbody > tr > td.highlight.highlight-selected {
+	background-image: none;
+}
+
+/* The vendor's own flat wash is switched OFF rather than restyled. It could only
+   ever land on cells with no inline background of their own, which made a
+   selection look different depending on whether a cell had once been styled;
+   the layer above is the single source of the tint now. Frozen cells keep their
+   opaque background - the generated freeze rule carries more specificity than
+   this one (see SheetEngine.buildFreezeCss). */
 .leovale-sheet-root .jss_worksheet .highlight {
-	background-color: var(--text-selection);
+	background-color: transparent;
 }
 
-.leovale-sheet-root .jss_worksheet .highlight-top {
-	border-top: 1px solid var(--interactive-accent);
-	box-shadow: 0 -1px var(--interactive-accent);
+/* The vendor paints a link inside a selection `blue`, hardcoded, from a selector
+   long enough to beat ours. A note link keeps the theme's link colour whether
+   its cell is selected or not. */
+.leovale-sheet-root .jss_worksheet > tbody > tr > td.highlight > a.leovale-sheet-link {
+	color: var(--link-color, var(--text-accent));
 }
 
-.leovale-sheet-root .jss_worksheet .highlight-left {
-	border-left: 1px solid var(--interactive-accent);
-	box-shadow: -1px 0 var(--interactive-accent);
+/* ---- a pending cut -----------------------------------------------------
+ *
+ * The cells Ctrl+X is holding, which the next paste will empty. Google's
+ * marching ants, standing still: an animated dash repaints on every frame of
+ * every scroll, and the mark's whole job is to say WHICH cells are about to
+ * move.
+ *
+ * An `outline` rather than a border, because all four borders of a cell are
+ * spoken for - they carry the user's own cell borders - and because an outline
+ * costs no layout, so marking a range cannot shift the grid by a pixel. */
+.leovale-sheet-root .jss_worksheet > tbody > tr > td.leovale-sheet-cut {
+	outline: 2px dashed var(--interactive-accent);
+	outline-offset: -2px;
 }
 
-.leovale-sheet-root .jss_worksheet .highlight-right {
-	border-right: 1px solid var(--interactive-accent);
-	box-shadow: 1px 0 var(--interactive-accent);
+/* ---- the range outline -------------------------------------------------
+ *
+ * Drawn as ONE overlay box, not as four recoloured cell borders, and the
+ * difference is the whole reason this block exists.
+ *
+ * A cell border is an edge SHARED with the neighbour, and the neighbour may own
+ * it: a user's cell border is written INLINE (`1px solid
+ * var(--leovale-sheet-border-strong)`, see cellcss.ts) and beats any rule of
+ * ours on the same edge. Reported by the user, measured on their sheet: select
+ * a cell that has borders on all four sides and the accent outline appears on
+ * the top and left only; select one whose four neighbours are bordered and
+ * almost none of it appears. The same arithmetic hides the outline against a
+ * merged cell's edge and against the grid's own frozen-pane seam.
+ *
+ * So the four vendor classes are switched back to the ordinary gridline here -
+ * they still mark which cells are on the edge, which is what the overlay is
+ * measured from - and the outline itself is `.leovale-sheet-selbox`, an
+ * absolutely positioned box in the vendor's own `.jss_content`. See
+ * `SheetEngine.syncSelectionBox` for why that container and that z-index.
+ * ---------------------------------------------------------------------- */
+
+.leovale-sheet-root .jss_worksheet > tbody > tr > td.highlight-top {
+	border-top-color: var(--background-modifier-border);
 }
 
-.leovale-sheet-root .jss_worksheet .highlight-bottom {
-	border-bottom: 1px solid var(--interactive-accent);
-	box-shadow: 0 1px var(--interactive-accent);
+.leovale-sheet-root .jss_worksheet > tbody > tr > td.highlight-left {
+	border-left-color: var(--background-modifier-border);
 }
 
+/* The right and bottom borders of a cell are the vendor's own spare pair, kept
+   transparent so the neighbour's left/top draws the line. */
+.leovale-sheet-root .jss_worksheet > tbody > tr > td.highlight-right {
+	border-right-color: transparent;
+}
+
+.leovale-sheet-root .jss_worksheet > tbody > tr > td.highlight-bottom {
+	border-bottom-color: transparent;
+}
+
+/* The vendor hangs a grey `box-shadow` off the same classes to fake the outer
+   half of its outline. Nothing is faked here any more. */
+.leovale-sheet-root .jss_worksheet .highlight-top,
+.leovale-sheet-root .jss_worksheet .highlight-left,
+.leovale-sheet-root .jss_worksheet .highlight-right,
+.leovale-sheet-root .jss_worksheet .highlight-bottom,
 .leovale-sheet-root .jss_worksheet .highlight-top.highlight-left {
-	box-shadow: -1px -1px var(--interactive-accent);
+	box-shadow: none;
+}
+
+.leovale-sheet-root .leovale-sheet-selbox {
+	position: absolute;
+	display: none;
+	pointer-events: none;
+	box-sizing: border-box;
+	border: 2px solid var(--interactive-accent);
+	border-radius: 1px;
+	/* Above the frozen panes (2-4), below the fill handle (the vendor's 20). */
+	z-index: 5;
 }
 
 .leovale-sheet-root .jss_corner {
@@ -1309,11 +1435,33 @@ body.is-mobile .leovale-sheet-root input.leovale-sheet-cb {
 		print-color-adjust: exact;
 	}
 
-	/* Nothing is selected on paper. */
+	/* Nothing is selected on paper.
+	 *
+	 * The tints go through their VARIABLES rather than through
+	 * `background-image: none`, which on a column header would also erase the
+	 * filter dot - that dot is a background image too, and it is data. The
+	 * `!important` is what beats `.theme-dark .leovale-sheet-root`, which is one
+	 * class more specific than the light-theme definition. */
+	.leovale-sheet-root {
+		--leovale-sheet-sel-tint: transparent !important;
+		--leovale-sheet-sel-head: var(--background-secondary) !important;
+	}
+
 	.leovale-sheet-root .jss_worksheet > tbody > tr > td.highlight,
 	.leovale-sheet-root .jss_worksheet > tbody > tr > td.highlight-selected {
 		background-color: transparent !important;
 		box-shadow: none !important;
+	}
+
+	/* Nor is a cut in progress: it is a thing you are in the middle of doing. */
+	.leovale-sheet-root .jss_worksheet > tbody > tr > td.leovale-sheet-cut {
+		outline: none !important;
+	}
+
+	/* The range outline is an element rather than a style, so it is hidden the
+	   way an element is. (The fill handle above it is already `display: none`.) */
+	.leovale-sheet-root .leovale-sheet-selbox {
+		display: none !important;
 	}
 
 	/* A tick box goes on paper as a CHARACTER, not as a styled `<input>`.

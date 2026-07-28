@@ -7,8 +7,8 @@
   "scripts": {
     "dev": "node esbuild.config.mjs",
     "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
-    "test": "node tests/build-format.mjs && node --test tests/format.test.mjs tests/csv.test.mjs tests/i18n.test.mjs tests/numfmt.test.mjs tests/embed.test.mjs tests/sheetops.test.mjs tests/links.test.mjs tests/xlsx.test.mjs",
-    "test:coverage": "node tests/build-format.mjs && c8 node --test tests/format.test.mjs tests/csv.test.mjs tests/i18n.test.mjs tests/numfmt.test.mjs tests/embed.test.mjs tests/sheetops.test.mjs tests/links.test.mjs tests/xlsx.test.mjs",
+    "test": "node tests/build-format.mjs && node --test tests/format.test.mjs tests/clipboard.test.mjs tests/csv.test.mjs tests/i18n.test.mjs tests/numfmt.test.mjs tests/embed.test.mjs tests/sheetops.test.mjs tests/links.test.mjs tests/xlsx.test.mjs",
+    "test:coverage": "node tests/build-format.mjs && c8 node --test tests/format.test.mjs tests/clipboard.test.mjs tests/csv.test.mjs tests/i18n.test.mjs tests/numfmt.test.mjs tests/embed.test.mjs tests/sheetops.test.mjs tests/links.test.mjs tests/xlsx.test.mjs",
     "e2e": "node tests/e2e.mjs"
   },
   "keywords": [],

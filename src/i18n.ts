@@ -193,6 +193,9 @@ const EN = {
 	cmPaste: "Paste",
 	cmCopied: "Copied {rows}×{cols} cells",
 	cmPasteEmpty: "The clipboard is empty.",
+	cmCut: "Cut",
+	cmCutReady: "Cut {rows}×{cols} cells; paste to move them",
+	cmPasted: "Pasted {rows}×{cols} cells",
 } as const;
 
 export type StringKey = keyof typeof EN;
@@ -345,6 +348,9 @@ const RU: Record<StringKey, string> = {
 	cmPaste: "Вставить",
 	cmCopied: "Скопировано ячеек: {rows}×{cols}",
 	cmPasteEmpty: "Буфер обмена пуст.",
+	cmCut: "Вырезать",
+	cmCutReady: "Вырезано ячеек: {rows}×{cols}; вставьте, чтобы переместить",
+	cmPasted: "Вставлено ячеек: {rows}×{cols}",
 };
 
 const ZH: Record<StringKey, string> = {
@@ -494,6 +500,9 @@ const ZH: Record<StringKey, string> = {
 	cmPaste: "粘贴",
 	cmCopied: "已复制 {rows}×{cols} 个单元格",
 	cmPasteEmpty: "剪贴板是空的。",
+	cmCut: "剪切",
+	cmCutReady: "已剪切 {rows}×{cols} 个单元格；粘贴即可移动",
+	cmPasted: "已粘贴 {rows}×{cols} 个单元格",
 };
 
 const ZH_TW: Record<StringKey, string> = {
@@ -643,6 +652,9 @@ const ZH_TW: Record<StringKey, string> = {
 	cmPaste: "貼上",
 	cmCopied: "已複製 {rows}×{cols} 個儲存格",
 	cmPasteEmpty: "剪貼簿是空的。",
+	cmCut: "剪下",
+	cmCutReady: "已剪下 {rows}×{cols} 個儲存格；貼上即可移動",
+	cmPasted: "已貼上 {rows}×{cols} 個儲存格",
 };
 
 const DE: Record<StringKey, string> = {
@@ -794,6 +806,9 @@ const DE: Record<StringKey, string> = {
 	cmPaste: "Einfügen",
 	cmCopied: "{rows}×{cols} Zellen kopiert",
 	cmPasteEmpty: "Die Zwischenablage ist leer.",
+	cmCut: "Ausschneiden",
+	cmCutReady: "{rows}×{cols} Zellen ausgeschnitten; zum Verschieben einfügen",
+	cmPasted: "{rows}×{cols} Zellen eingefügt",
 };
 
 const FR: Record<StringKey, string> = {
@@ -945,6 +960,9 @@ const FR: Record<StringKey, string> = {
 	cmPaste: "Coller",
 	cmCopied: "{rows}×{cols} cellules copiées",
 	cmPasteEmpty: "Le presse-papiers est vide.",
+	cmCut: "Couper",
+	cmCutReady: "{rows}×{cols} cellules coupées ; collez pour les déplacer",
+	cmPasted: "{rows}×{cols} cellules collées",
 };
 
 const ES: Record<StringKey, string> = {
@@ -1096,6 +1114,9 @@ const ES: Record<StringKey, string> = {
 	cmPaste: "Pegar",
 	cmCopied: "{rows}×{cols} celdas copiadas",
 	cmPasteEmpty: "El portapapeles está vacío.",
+	cmCut: "Cortar",
+	cmCutReady: "{rows}×{cols} celdas cortadas; pega para moverlas",
+	cmPasted: "{rows}×{cols} celdas pegadas",
 };
 
 const JA: Record<StringKey, string> = {
@@ -1247,6 +1268,9 @@ const JA: Record<StringKey, string> = {
 	cmPaste: "貼り付け",
 	cmCopied: "{rows}×{cols} セルをコピーしました",
 	cmPasteEmpty: "クリップボードは空です。",
+	cmCut: "切り取り",
+	cmCutReady: "{rows}×{cols} セルを切り取りました。貼り付けると移動します",
+	cmPasted: "{rows}×{cols} セルを貼り付けました",
 };
 
 const KO: Record<StringKey, string> = {
@@ -1396,6 +1420,9 @@ const KO: Record<StringKey, string> = {
 	cmPaste: "붙여넣기",
 	cmCopied: "{rows}×{cols} 셀을 복사했습니다",
 	cmPasteEmpty: "클립보드가 비어 있습니다.",
+	cmCut: "잘라내기",
+	cmCutReady: "{rows}×{cols} 셀을 잘라냈습니다. 붙여넣으면 이동합니다",
+	cmPasted: "{rows}×{cols} 셀을 붙여넣었습니다",
 };
 
 const PT_BR: Record<StringKey, string> = {
@@ -1547,6 +1574,9 @@ const PT_BR: Record<StringKey, string> = {
 	cmPaste: "Colar",
 	cmCopied: "{rows}×{cols} células copiadas",
 	cmPasteEmpty: "A área de transferência está vazia.",
+	cmCut: "Recortar",
+	cmCutReady: "{rows}×{cols} células recortadas; cole para movê-las",
+	cmPasted: "{rows}×{cols} células coladas",
 };
 
 const IT: Record<StringKey, string> = {
@@ -1698,6 +1728,9 @@ const IT: Record<StringKey, string> = {
 	cmPaste: "Incolla",
 	cmCopied: "{rows}×{cols} celle copiate",
 	cmPasteEmpty: "Gli appunti sono vuoti.",
+	cmCut: "Taglia",
+	cmCutReady: "{rows}×{cols} celle tagliate; incolla per spostarle",
+	cmPasted: "{rows}×{cols} celle incollate",
 };
 
 const PL: Record<StringKey, string> = {
@@ -1849,6 +1882,9 @@ const PL: Record<StringKey, string> = {
 	cmPaste: "Wklej",
 	cmCopied: "Skopiowano komórki {rows}×{cols}",
 	cmPasteEmpty: "Schowek jest pusty.",
+	cmCut: "Wytnij",
+	cmCutReady: "Wycięto {rows}×{cols} komórek; wklej, aby je przenieść",
+	cmPasted: "Wklejono {rows}×{cols} komórek",
 };
 
 export const TABLES: Record<Lang, Record<StringKey, string>> = {
