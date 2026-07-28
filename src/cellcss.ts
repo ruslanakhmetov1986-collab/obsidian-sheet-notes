@@ -24,6 +24,7 @@ import {
 	normalizeSides,
 	normalizeStyle,
 } from "./format";
+import type { StringKey } from "./i18n";
 
 export const BORDER_ON = "1px solid var(--leovale-sheet-border-strong)";
 /** vendor default for top/left */
@@ -97,6 +98,104 @@ export function contrastColor(hex: string): string {
 	if (![r, g, b].every((n) => Number.isFinite(n))) return "inherit";
 	const lum = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
 	return lum > 0.5 ? "#1f1f1f" : "#f2f2f2";
+}
+
+/**
+ * The fill palette, laid out as the 6x2 grid the toolbar draws.
+ *
+ * It lives here rather than in the toolbar because it is not a piece of chrome:
+ * it is the set of colours a cell can actually be painted, and the dark theme's
+ * guarantee about them ({@link DARK_FILL_DIM}) is only checkable if the list is
+ * reachable from a module with no `obsidian` import.
+ */
+export const FILL_COLORS: { value: string | null; label: StringKey }[] = [
+	{ value: null, label: "fillNone" },
+	{ value: "#ffffff", label: "fillWhite" },
+	{ value: "#fff2cc", label: "fillYellow" },
+	{ value: "#fce5cd", label: "fillOrange" },
+	{ value: "#ffe0e0", label: "fillRed" },
+	{ value: "#f4d9e8", label: "fillPink" },
+	{ value: "#e2f0d9", label: "fillGreen" },
+	{ value: "#d0e8e4", label: "fillTeal" },
+	{ value: "#deebf7", label: "fillBlue" },
+	{ value: "#e6e0f8", label: "fillPurple" },
+	{ value: "#d9d9d9", label: "fillGrey" },
+	{ value: "#434343", label: "fillDark" },
+];
+
+/**
+ * How much of the dark theme's background is laid OVER a user fill, as an alpha.
+ *
+ * The audit's complaint was that the pastel fills "hit you in the eye" against a
+ * dark surface, and it is right: the palette was picked on white paper. Nothing
+ * about the stored colour changes - a `.sheet` file opened in the light theme
+ * still paints `#fff2cc` exactly - only what is drawn on top of it, as one
+ * translucent layer in `styles/theme.css`.
+ *
+ * The number is not a matter of taste. The cell's TEXT colour is chosen from the
+ * undimmed fill ({@link contrastColor}), so dimming can only ever reduce the
+ * contrast between the two, and 0.28 is the strongest dim under which every
+ * colour in {@link FILL_COLORS} still clears WCAG AA (4.5:1) against the ink it
+ * was given. The unit tests measure exactly that, so a "slightly darker" edit
+ * that breaks readability fails the suite instead of shipping.
+ */
+export const DARK_FILL_DIM = 0.28;
+
+function channels(hex: string): [number, number, number] | null {
+	const m = /^#([0-9a-f]{6})$/i.exec(hex.trim());
+	if (!m || !m[1]) return null;
+	const n = parseInt(m[1], 16);
+	return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+
+const hex2 = (n: number) => Math.round(Math.max(0, Math.min(255, n))).toString(16).padStart(2, "0");
+
+/**
+ * A fill as it is really PAINTED in the dark theme: the colour with the theme's
+ * background composited over it at {@link DARK_FILL_DIM}. `over` defaults to the
+ * near-black Obsidian uses for `--background-primary` in its own dark theme.
+ */
+export function dimmedFill(hex: string, alpha = DARK_FILL_DIM, over = "#1e1e1e"): string {
+	const fill = channels(hex);
+	const back = channels(over);
+	if (!fill || !back) return hex;
+	const mix = fill.map((c, i) => c * (1 - alpha) + (back[i] as number) * alpha);
+	return `#${mix.map(hex2).join("")}`;
+}
+
+/** WCAG relative luminance. */
+function luminance(hex: string): number {
+	const rgb = channels(hex);
+	if (!rgb) return 0;
+	const [r, g, b] = rgb.map((c) => {
+		const s = c / 255;
+		return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
+	}) as [number, number, number];
+	return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+
+/** WCAG contrast ratio between two opaque colours, 1..21. */
+export function contrastRatio(a: string, b: string): number {
+	const la = luminance(a);
+	const lb = luminance(b);
+	return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05);
+}
+
+/**
+ * Does this cell hold a NUMBER, as opposed to text that contains one?
+ *
+ * The distinction is the whole of the right-alignment rule: `1234` and `-0.5`
+ * are numbers and line up on the right with their digits in a column; `Товар 1`
+ * and `2 items` are text and stay on the left, where text belongs. The RAW value
+ * is what is asked, never the rendered text, so a currency mask showing
+ * `1 234,00 ₽` is still a number.
+ */
+export function looksNumeric(value: unknown): boolean {
+	if (typeof value === "number") return Number.isFinite(value);
+	if (typeof value !== "string") return false;
+	const s = value.trim();
+	if (s === "") return false;
+	return /^[+-]?(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?$/.test(s);
 }
 
 /** Normalized style -> canonical inline CSS. */

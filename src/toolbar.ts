@@ -9,6 +9,7 @@
  */
 
 import { Menu, setIcon } from "obsidian";
+import { FILL_COLORS } from "./cellcss";
 import type { SheetEngine } from "./engine";
 import {
 	type CellStyle,
@@ -78,21 +79,13 @@ const V_ALIGN_ITEMS: { value: VAlign | null; label: StringKey; icon: string }[] 
 	{ value: "b", label: "alignBottom", icon: "arrow-down" },
 ];
 
-/** Palette laid out as a 6x2 grid, Google-Sheets style. */
-export const FILL_COLORS: { value: string | null; label: StringKey }[] = [
-	{ value: null, label: "fillNone" },
-	{ value: "#ffffff", label: "fillWhite" },
-	{ value: "#fff2cc", label: "fillYellow" },
-	{ value: "#fce5cd", label: "fillOrange" },
-	{ value: "#ffe0e0", label: "fillRed" },
-	{ value: "#f4d9e8", label: "fillPink" },
-	{ value: "#e2f0d9", label: "fillGreen" },
-	{ value: "#d0e8e4", label: "fillTeal" },
-	{ value: "#deebf7", label: "fillBlue" },
-	{ value: "#e6e0f8", label: "fillPurple" },
-	{ value: "#d9d9d9", label: "fillGrey" },
-	{ value: "#434343", label: "fillDark" },
-];
+/**
+ * The palette, still exported from here because that is where every caller
+ * expects it, but OWNED by cellcss.ts: the colours a cell can be painted are a
+ * cell-appearance fact, and the dark theme's readability guarantee about them is
+ * unit-tested there. See `FILL_COLORS` and `DARK_FILL_DIM`.
+ */
+export { FILL_COLORS };
 
 export type BorderMode = "none" | "all" | "outline" | "t" | "r" | "b" | "l";
 

@@ -34,12 +34,17 @@ import {
 import {
 	BORDER_ON,
 	CELL_BG_NONE,
+	DARK_FILL_DIM,
+	FILL_COLORS,
 	H_ALIGN_CSS,
 	V_ALIGN_CSS,
 	WRAP_CLASS,
 	WRAP_ON,
 	contrastColor,
+	contrastRatio,
 	cssToStyle,
+	dimmedFill,
+	looksNumeric,
 	styleToCss,
 } from "./.build/cellcss.mjs";
 
@@ -989,4 +994,56 @@ test("a v3 file gains nothing at all until a checkbox is put in it", () => {
 	const written = serializeSheet(doc);
 	const added = written.split("\n").filter((l) => !v3.split("\n").includes(l));
 	assert.deepEqual(added, ['  "version": 4,']);
+});
+
+/* ------------------------------------------- how a cell is PAINTED, 1.5.x */
+
+test("a number is a number; text that contains one is not", () => {
+	for (const yes of [0, -5, 3.14, 1e6, "42", " 42 ", "-0.5", ".5", "1e3"]) {
+		assert.equal(looksNumeric(yes), true, JSON.stringify(yes));
+	}
+	for (const no of ["", "  ", "Товар 1", "1 item", "2026-01-01", "1,5", "=A1", true, null, {}, NaN]) {
+		assert.equal(looksNumeric(no), false, JSON.stringify(no));
+	}
+});
+
+test("every palette fill stays readable after the dark theme dims it", () => {
+	// The cell's ink is picked from the UNDIMMED colour (contrastColor is what
+	// the file's own style string carries), so the dim can only ever eat into
+	// the contrast. This is the guarantee that says how far it may eat.
+	for (const { value } of FILL_COLORS) {
+		if (!value) continue;
+		const ink = contrastColor(value);
+		const painted = dimmedFill(value);
+		const ratio = contrastRatio(ink, painted);
+		assert.ok(
+			ratio >= 4.5,
+			`${value} dims to ${painted}, ink ${ink}, contrast ${ratio.toFixed(2)} (needs 4.5)`,
+		);
+	}
+});
+
+test("the dim is a dim: darker than the fill, and not by more than it says", () => {
+	assert.equal(DARK_FILL_DIM > 0 && DARK_FILL_DIM < 0.5, true);
+	// 28% of #1e1e1e over #ffffff.
+	assert.equal(dimmedFill("#ffffff", 0.28, "#1e1e1e"), "#c0c0c0");
+	assert.equal(dimmedFill("#ffffff", 0, "#1e1e1e"), "#ffffff");
+	assert.equal(dimmedFill("#ffffff", 1, "#1e1e1e"), "#1e1e1e");
+	// Anything that is not a plain hex is returned untouched rather than mangled.
+	assert.equal(dimmedFill("var(--x)"), "var(--x)");
+});
+
+test("contrastRatio agrees with the WCAG extremes", () => {
+	assert.equal(Math.round(contrastRatio("#000000", "#ffffff")), 21);
+	assert.equal(contrastRatio("#777777", "#777777"), 1);
+	// Symmetric, whichever way round the pair is given.
+	assert.equal(contrastRatio("#123456", "#abcdef"), contrastRatio("#abcdef", "#123456"));
+});
+
+test("the palette is the one the toolbar draws: twelve swatches, one of them empty", () => {
+	assert.equal(FILL_COLORS.length, 12);
+	assert.equal(FILL_COLORS.filter((c) => c.value === null).length, 1);
+	for (const { value } of FILL_COLORS) {
+		if (value) assert.match(value, /^#[0-9a-f]{6}$/);
+	}
 });
