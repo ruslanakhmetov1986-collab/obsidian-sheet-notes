@@ -35,6 +35,12 @@ export interface ToolbarActions {
 	columnWidth: () => void;
 	/** Merge or split the selection; asks first when a value would be dropped. */
 	merge: () => void;
+	/** One document-level step back / forward; see history.ts. */
+	undo: () => void;
+	redo: () => void;
+	/** Whether there is anything to step to, i.e. whether the button is live. */
+	canUndo: () => boolean;
+	canRedo: () => boolean;
 }
 
 /** How many distinct values a filter menu will list before it gives up. */
@@ -126,6 +132,8 @@ export class SheetToolbar {
 	 */
 	private doc: Document;
 	private getEngine: () => SheetEngine | null;
+	private undoButton!: HTMLButtonElement;
+	private redoButton!: HTMLButtonElement;
 	private boldButton!: HTMLButtonElement;
 	private sizeButton!: HTMLButtonElement;
 	private sizeLabel!: HTMLElement;
@@ -226,6 +234,17 @@ export class SheetToolbar {
 	}
 
 	private build(): void {
+		// --- group 0: undo + redo --------------------------------------------
+		// First in the bar, as in every editor the user already knows. The state
+		// they show is the DOCUMENT history's, not the grid's: see history.ts.
+		const group0 = this.el.createDiv({ cls: "leovale-sheet-tb-group" });
+		this.undoButton = this.iconButton(group0, "leovale-sheet-tb-undo", "undo-2", t("tbUndo"));
+		this.undoButton.onclick = () => this.actions.undo();
+		this.redoButton = this.iconButton(group0, "leovale-sheet-tb-redo", "redo-2", t("tbRedo"));
+		this.redoButton.onclick = () => this.actions.redo();
+
+		this.el.createDiv({ cls: "leovale-sheet-tb-sep" });
+
 		// --- group 1: bold + font size --------------------------------------
 		const group1 = this.el.createDiv({ cls: "leovale-sheet-tb-group" });
 
@@ -890,6 +909,11 @@ export class SheetToolbar {
 		}
 		// Find works on a read-only sheet: it changes nothing.
 		this.findButton.toggleAttribute("disabled", !engine);
+		// Undo and redo are disabled by the HISTORY, not by the selection: a step
+		// exists or it does not, and a button that looks pressable and does
+		// nothing is how a user concludes that undo is broken.
+		this.undoButton.toggleAttribute("disabled", disabled || !this.actions.canUndo());
+		this.redoButton.toggleAttribute("disabled", disabled || !this.actions.canRedo());
 		if (!engine) return;
 
 		const view = engine.getView();

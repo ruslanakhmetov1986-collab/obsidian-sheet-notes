@@ -4,7 +4,9 @@ import esbuild from "esbuild";
 await esbuild.build({
 	entryPoints: [
 		"src/format.ts",
+		"src/backups.ts",
 		"src/cellcss.ts",
+		"src/history.ts",
 		"src/clipboard.ts",
 		"src/csv.ts",
 		"src/formulabar.ts",

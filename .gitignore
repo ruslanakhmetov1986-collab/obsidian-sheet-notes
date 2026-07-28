@@ -8,3 +8,6 @@ main.css
 styles.css
 *.log
 .npmrc
+
+# A second checkout runs its e2e sandbox under its own name (SHEETS_SANDBOX_DIR).
+.e2e-*/

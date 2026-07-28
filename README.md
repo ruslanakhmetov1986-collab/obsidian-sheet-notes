@@ -180,7 +180,8 @@ them. Who keeps the focus afterwards depends on the device, and deliberately so:
 | Resize a row | Drag the bottom edge of the row number |
 | Insert / delete rows and columns | Right-click anywhere in the grid (long press on touch) |
 | Context menu | Right click, or a long press on a tablet: edit, copy, cut, paste, insert and delete rows and columns, merge |
-| Copy, cut, paste, undo, redo | `Ctrl+C` / `Ctrl+X` / `Ctrl+V`, `Ctrl+Z` / `Ctrl+Y` |
+| Copy, cut, paste | `Ctrl+C` / `Ctrl+X` / `Ctrl+V` |
+| Undo, redo | `Ctrl+Z`, `Ctrl+Y` or `Ctrl+Shift+Z`, or the two toolbar buttons. Covers sort, merge, paste, fill-down, row and column edits - see "Undo and redo" |
 | Edit the active cell | `F2` |
 | Fill down | `Ctrl+D` (the top row of the selection over the rest, or the cell above into a single cell) |
 | Continue a series | Drag the small square at the bottom-right corner of the selection (the fill handle) |
@@ -195,6 +196,7 @@ them. Who keeps the focus afterwards depends on the device, and deliberately so:
 | Merge or split cells | The merge toolbar button, or `Sheets: Merge or split cells` |
 | Turn cells into checkboxes | The checkbox toolbar button |
 | Open a `[[link]]` in a cell | Click it (`Ctrl`-click for a new tab) |
+| Older versions of this file | `Sheets: Version history`, or right-click the file in the explorer |
 | Print | `Sheets: Print spreadsheet` |
 | Excel | `Sheets: Export as .xlsx` / `Sheets: Import .xlsx as sheet` |
 
@@ -570,11 +572,124 @@ embedded the same way.
 - The code block form takes the same reference, or `path:` / `sheet:` /
   `range:` / `plain:` on separate lines.
 
+### Undo and redo
+
+`Ctrl+Z` steps back, `Ctrl+Y` or `Ctrl+Shift+Z` steps forward, and the two
+buttons at the left end of the toolbar do the same and grey out when there is
+nothing to step to. Both are commands as well (`Sheets: Undo spreadsheet
+change`, `Sheets: Redo spreadsheet change`), so the shortcuts can be rebound in
+Settings -> Hotkeys. It all works the same in a split and in a pop-out window.
+
+What changed in this release is not the keystroke but what it covers. Ctrl+Z
+used to be the grid engine's own, and the engine only knows about the operations
+it performs itself - so everything this plugin added on top was **irreversible**:
+sorting, merging, a rich paste, a cut completed by a paste, fill-down, rows and
+columns inserted or deleted from the context menu. Worse, after a sort the
+engine's stack still held entries belonging to a grid that no longer existed, so
+one Ctrl+Z could undo something three operations old, or nothing at all.
+
+The history is now kept over DOCUMENTS, at the same point that feeds autosave,
+and one entry is one serialized document - the very bytes that would be written
+to disk. Every one of these is exactly one step, and undoing it restores the
+file byte for byte:
+
+- a typed value or formula, a style, a number format, a column width, a row height
+- sort, filters, frozen panes
+- merge and split
+- a copy-paste with formatting, a cut completed by a paste (the move), a
+  Markdown table paste, fill-down
+- rows and columns inserted or deleted from the context menu
+- restoring a version from the history dialog (see below)
+
+Worth knowing:
+
+- The history belongs to the OPEN VIEW and lives in memory. Two tabs on the same
+  file have two of them; closing the tab forgets it. Undo can therefore never
+  reach into a file that is no longer on screen.
+- It holds 100 steps or 8 MB of snapshots, whichever comes first, and drops the
+  oldest step when either is reached. Measured: an ordinary 20x8 sheet
+  serializes to ~5 KB, a 100x26 grid with 500 filled cells to ~15 KB, so the
+  step count is what bites first for anything a note-taker keeps.
+- Changes that land within 300 ms of each other are one step. That is what makes
+  a paste (which writes values and then styles) or a cut-and-paste (which clears
+  the source and fills the destination) reversible in a single Ctrl+Z rather
+  than in two or three.
+- An undo REBUILDS the grid from the restored document - the same rebuild
+  sorting has done since 1.3.0. Measured on this machine: ~35 ms for the default
+  100x26 grid, 55 ms at 2 000 filled cells, 120 ms at 5 000.
+- Snapshots rather than inverse patches, deliberately. An inverse-patch layer
+  needs one correct inverse per operation and a new one for every operation
+  added later, which is the class of bug that makes an undo feature worse than
+  none: silently wrong instead of visibly absent.
+
+### Version history
+
+Every time the file is really written, the bytes that were written are also
+kept, gzipped, in
+
+```
+.obsidian/plugins/leovale-sheets/backups/<hash of the path>/<timestamp>.json.gz
+```
+
+next to an `index.json` listing what is there: when, how big, and a one-line
+summary of what changed ("B4, C2 changed", "Layout changed"). It is a plain
+folder of ordinary gzip files, not a database - a `.json.gz` is the spreadsheet
+as it was, and any file manager can open one.
+
+`Sheets: Version history` (command palette, or right-click a `.sheet` in the
+file explorer) opens the log:
+
+- versions newest first, with time, size and what changed;
+- a read-only preview of whichever one you select - the same grid mount an
+  embedded sheet uses, so it cannot write anything;
+- **Restore**, which puts that document back into the open sheet through the
+  ordinary save path. So a restore is an ordinary change: one Ctrl+Z undoes it,
+  and the state it replaced is itself snapshotted by the next save. Nothing here
+  is a one-way door;
+- **Delete**, for one version, after a confirm.
+
+Rotation is enforced twice: the newest 50 versions per file, and ~20 MB across
+the whole vault, oldest first. A file's newest version is never evicted, whatever
+the global cap says. Measured on real documents, gzip is 5-7x (a 15 KB
+spreadsheet stores as 2.4 KB; the whole e2e run's 50 versions of one file came to
+18 KB on disk for 48 KB of documents), so 20 MB is a great deal of history.
+`CompressionStream` is feature-detected: where it is missing, snapshots are
+written as plain `.json` and everything else is unchanged.
+
+Two limits worth stating plainly. The log is keyed on the file's PATH, so
+renaming a spreadsheet starts a fresh log (the old one stays under its old hash
+until it rotates out). And versions are kept for `.sheet`/`.lsheet` only: a
+`.csv` is usually somebody else's file, and its round trip through the grid is
+lossy enough that "what changed" would be a guess.
+
+**Does Obsidian's own File Recovery not already do this?** No - measured, not
+assumed. Obsidian's core File Recovery plugin keeps its snapshots in an
+IndexedDB called `<vault id>-backup`. In a sandbox vault, a `.md` file and a
+`.sheet` file were created and then modified through the same `vault.modify`
+call within the same second: the note appears in that database within seconds,
+the spreadsheet never does. The same holds for a `.sheet` open in the plugin's
+own view and edited through the grid, and for a plain `.txt` - the core plugin
+records Markdown. (A `.sheet` can turn up in there through Obsidian's own
+emergency path in a long session, which is not something to rely on.) On top of
+that, File Recovery keeps 7 days at a 5-minute granularity and its restore
+dialog is a plain-text diff - for a JSON spreadsheet, unreadable. Hence a log of
+our own, with a grid preview. The e2e suite re-runs that probe on every release.
+
 ### Saving
 
 Saving is automatic: roughly 1.5 s after you stop editing, the plugin asks
 Obsidian to save (Obsidian adds ~2 s of its own). Closing a tab flushes any
 pending changes. `Sheets: Save spreadsheet now` writes the file immediately.
+
+The right end of the formula-bar row says where that stands, in the Google Docs
+manner: **Unsaved changes...** while the debounce runs, **Saving...** during the
+write, **Saved just now**, and after a minute **Saved at 14:03**. If a write
+FAILS the line turns red and sticks - `Save failed` - until a save actually
+succeeds; clicking it shows the error. That last part is the point of the
+feature: until this release a failed write went to the developer console and
+nowhere else, so a vault on a disconnected network drive could quietly stop
+saving while the grid happily accepted edits. Embedded sheets have no indicator
+because they have no save path at all.
 
 ## The `.sheet` file format
 
@@ -710,6 +825,18 @@ Three safeguards here:
   last known-good version is returned instead of an empty string.
 - If a file cannot be parsed (broken JSON, foreign format), it opens read-only,
   and writing to it is impossible by construction.
+- **A failed write is now visible.** It used to reach `console.error` and
+  nothing else; it is a red, sticky `Save failed` on the formula-bar row, and the
+  error itself is one click away. See "Saving".
+- **Every save is kept.** A gzipped snapshot of each written version goes into
+  the plugin's own backups folder, with a summary of what changed, and the
+  Version history dialog restores any of them through the normal save path. This
+  is not a duplicate of Obsidian's File Recovery, which does not record `.sheet`
+  files at all - measured, see "Version history".
+- **Every document-level operation is reversible.** Sorting, merging, a cut, a
+  rich paste and the rest used to be one-way; the undo history is over documents
+  now, and the e2e suite asserts that each of them, done and then undone, leaves
+  the file on disk byte for byte what it was. See "Undo and redo".
 - **Opening a file cannot change it.** Mounting a grid fires a lot of events, and
   a straggler from the document being replaced (a blur from a focused formula
   bar, an in-cell editor closing) used to be able to arrive after the next one
@@ -727,8 +854,9 @@ Three safeguards here:
 npm install          # node_modules ~56 MB
 npm run build        # tsc --noEmit + esbuild production -> main.js, styles.css
 npm run dev          # esbuild --watch
-npm test             # 200 unit tests: format, styles, masks, CSV, embeds, i18n,
-                     # sort/filter/markdown, wiki links, the xlsx round trip
+npm test             # 300 unit tests: format, styles, masks, CSV, embeds, i18n,
+                     # sort/filter/markdown, wiki links, the xlsx round trip,
+                     # the undo history and the version store
 npm run test:coverage  # the same tests under c8, with the threshold gate
 npm run e2e          # e2e in a sandboxed Obsidian, screenshots into tests/shots/
 ```
@@ -738,7 +866,7 @@ npm run e2e          # e2e in a sandboxed Obsidian, screenshots into tests/shots
 `npm run test:coverage` runs the unit suite under [c8] and prints a per-file
 table. It is a **gate**: the thresholds in `.c8rc.json` are the level the suite
 actually reached when they were last set, rounded down (lines and statements
-96%, functions 92%, branches 87%, measured 96.18 / 92.06 / 87.95), so the command
+96%, functions 92%, branches 87%, measured 96.71 / 93.41 / 87.41), so the command
 fails when coverage DROPS and never asks for a number nobody has reached. Both CI
 workflows run it.
 
@@ -789,7 +917,7 @@ Notes on the build configuration:
 - The engine's hard-coded colours (`#fff`, `#ccc`, `#f3f3f3`) are remapped to
   Obsidian CSS variables. No `filter: invert(1)` anywhere.
 
-The e2e suite (709 assertions) launches a separate Obsidian instance with its
+The e2e suite (915 assertions) launches a separate Obsidian instance with its
 own `--user-data-dir` on CDP port 9333, so your running Obsidian is left alone.
 It installs and enables the plugin, creates a sheet, types values and formulas
 with real keyboard events, drags column and row edges, formats a selection with
@@ -841,8 +969,11 @@ Two things the harness does that are worth knowing before touching it. It
 refuses to drive anything that is not a desktop Obsidian it launched: a leftover
 `adb forward tcp:9333` to a phone answers CDP exactly like a sandbox does, and
 its vault is real, so both the page URL and the vault path are checked first
-(`SHEETS_CDP_PORT` moves the port if something else owns 9333). And the sandbox
-is launched with `--disable-features=CalculateNativeWinOcclusion`: without it a
+(`SHEETS_CDP_PORT` moves the port if something else owns 9333, and
+`SHEETS_SANDBOX_DIR` renames the sandbox folder so a second checkout of this
+repo can run its own suite side by side; the process filter matches the full
+user-data-dir path, so neither run can kill the other's Obsidian). And the
+sandbox is launched with `--disable-features=CalculateNativeWinOcclusion`: without it a
 window that ends up behind another one is reported as hidden, rendering stops,
 and every click times out on "waiting for element to be stable" with the grid
 perfectly present in the DOM.
@@ -944,6 +1075,59 @@ nothing drove the real app between the unit tests and the tag.
   800x1340; phones untested.
 
 ## Gotchas worth knowing
+
+Two undo stacks cannot share one keystroke. The grid engine has its own, driven
+from its `keydown` handler on the document, and it only ever saw the operations
+it performs itself; the document-level history added in 1.7.0 sees all of them.
+Leaving both alive means one Ctrl+Z does one, the other, or both, depending on
+what was clicked last - and after a sort the engine's entries point into a grid
+that no longer exists. So the keystroke is intercepted in the CAPTURE phase on
+the grid's own document (the last point at which it can still be taken from the
+vendor's bubble-phase listener) and `stopPropagation()` ends its journey there.
+The view ALSO registers the shortcuts in its `Scope`, because that is the
+sanctioned way to get a hotkey inside a view and the only one that reaches the
+command palette; Obsidian's keymap listens on the window in the capture phase,
+i.e. strictly earlier, so the engine's handler reads `event.defaultPrevented` to
+tell "the scope has already acted" from "nobody has" and steps the history at
+most once. Verified: three edits, one Ctrl+Z, exactly one edit undone.
+
+Undo has to be measured against the FILE, not against the grid. Every operation
+here rebuilds or rewrites cells, styles, spans and view state, and a check that
+reads the grid back is checking the same code that just wrote it. The e2e does
+each operation, undoes it, forces the save, and compares the bytes on disk with
+`fs.readFileSync` - which is also how a merge that restored its values but not
+its spans, or a sort that restored values but left the fills where they landed,
+would be caught. A snapshot history makes that assertion trivially true, which is
+most of the argument for snapshots over inverse patches.
+
+An echo comes back through the save path. Applying an undo mounts the restored
+document, mounting schedules a save, and the save path records history - so the
+state just restored would be pushed as a new step and the next Ctrl+Z would look
+dead. Two things stop it: a flag while the restore is being applied, and the
+history's rule that bytes identical to the current state are never a step. The
+second is the one that matters, because the echo can also arrive later than the
+flag lives.
+
+`CompressionStream` is asynchronous, which decides where gzip is used. On disk,
+where a hundred versions per file pile up, it pays for itself 5-7x and the write
+is already async. In memory it would turn `record()` into a promise on the path
+of every keystroke to save a budget that is never reached (a hundred steps of the
+largest document measured here is 16 MB against a cap that evicts at 8). So:
+plain strings in memory, gzip on disk.
+
+The e2e sandbox has to be isolated by NAME, not only by port. `killSandbox()`
+matched every Obsidian whose command line contained `.sandbox`, which is every
+checkout of this repo on the machine - so a second working copy building the next
+release killed the first one's Obsidian mid-run, and the failure reads "Target
+page, context or browser has been closed" in a suite with nothing wrong with it.
+It now matches the full user-data-dir path, and `SHEETS_SANDBOX_DIR` renames the
+folder for the same reason `SHEETS_CDP_PORT` renumbers the port.
+
+A vault opened for the very first time asks whether its author is trusted, and
+that dialog's overlay eats every click. Enabling the plugins over the API
+answers the question but leaves the dialog up, so the suite dismisses any
+startup modal before its first click - otherwise the whole run times out on
+`page.click` with the grid perfectly present behind the overlay.
 
 A scrolling toolbar clips its own popovers, and no selector will tell you. When
 the bar grew to twelve controls it was given `overflow-x: auto; overflow-y:

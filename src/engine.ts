@@ -330,6 +330,21 @@ export interface EngineOptions {
 	 * {@link SheetEngine.installClipboardKeys}).
 	 */
 	clipboard?: ClipboardActions;
+	/**
+	 * What Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z do on this grid.
+	 *
+	 * Supplied by the host for a harder reason than the clipboard's: the history
+	 * this plugin offers is over DOCUMENTS, and the engine has no idea what a
+	 * document is. Handing the keystroke over here is also what TAKES it away
+	 * from the vendor's own undo stack - see {@link SheetEngine.installHistoryKeys}.
+	 */
+	history?: HistoryActions;
+}
+
+/** The host's undo/redo; see {@link EngineOptions.history}. */
+export interface HistoryActions {
+	undo: () => void;
+	redo: () => void;
 }
 
 /** The host's clipboard operations; see {@link EngineOptions.clipboard}. */
@@ -448,6 +463,11 @@ export class SheetEngine {
 	/** The clipboard key handler and the document it captures on. */
 	private clipKeys: ((e: KeyboardEvent) => void) | null = null;
 	private clipKeysDoc: Document | null = null;
+	/** What the host does on Ctrl+Z/Ctrl+Y; see {@link EngineOptions.history}. */
+	private historyActions?: HistoryActions;
+	/** The undo/redo key handler and the document it captures on. */
+	private histKeys: ((e: KeyboardEvent) => void) | null = null;
+	private histKeysDoc: Document | null = null;
 	/** Cells currently wearing the cut marker; see {@link markCutRange}. */
 	private cutRefs: string[] = [];
 	/** The selection outline overlay; see {@link syncSelectionBox}. */
@@ -480,6 +500,7 @@ export class SheetEngine {
 		this.menuBuilder = opts.menu;
 		this.passTouch = opts.touchPassThrough;
 		this.clipboard = opts.clipboard;
+		this.historyActions = opts.history;
 		this.root = parent.createDiv({ cls: ROOT_CLASS });
 		this.root.addClass(this.uid);
 		this.host = this.root.createDiv({ cls: "leovale-sheet-host" });
@@ -586,6 +607,7 @@ export class SheetEngine {
 		this.installFillHandle();
 		this.installKeyBridge();
 		this.installClipboardKeys();
+		this.installHistoryKeys();
 	}
 
 	/**
@@ -667,6 +689,79 @@ export class SheetEngine {
 		doc.addEventListener("keydown", handler, true);
 		this.clipKeys = handler;
 		this.clipKeysDoc = doc;
+	}
+
+	/* ----------------------------------------------------------- undo / redo */
+
+	/**
+	 * Ctrl+Z, Ctrl+Y and Ctrl+Shift+Z, taken off the vendor for good.
+	 *
+	 * THE PROBLEM THIS SOLVES. The bundled engine keeps an undo stack of its own
+	 * and drives it from the same document-level `keydown` handler that owns the
+	 * clipboard keys. That stack only ever saw the operations the ENGINE
+	 * performs, so everything this plugin does at the document level - sorting
+	 * (which rewrites the page and remounts the grid), merging, a rich paste, a
+	 * cut completed by a paste, fill-down, our own insert/delete row - was
+	 * invisible to it and simply could not be undone. Worse than absent: after a
+	 * sort the vendor's stack still held entries pointing into a grid that no
+	 * longer exists, so one Ctrl+Z would undo an operation from three steps ago,
+	 * or throw. Two stacks racing for one keystroke is not a thing that can be
+	 * made to behave; one of them has to go, and it is not going to be the one
+	 * that knows what a document is.
+	 *
+	 * So the keystroke is intercepted in the CAPTURE phase on this grid's own
+	 * document - the last point at which it can still be taken away from the
+	 * vendor's bubble-phase listener - and handed to the host, which owns the
+	 * document-level history (see history.ts). `stopPropagation()` ends the
+	 * event's journey there, so the vendor's stack is never consulted, whatever
+	 * else it may still be recording.
+	 *
+	 * THE ONE-KEYSTROKE-ONE-STEP RULE. Obsidian's own keymap listens on the
+	 * WINDOW in the capture phase, i.e. strictly before this handler, and the
+	 * view registers the same shortcuts in its `Scope` (which is the sanctioned
+	 * way to get a hotkey inside a view, and the only one that also reaches the
+	 * command palette). When the scope has already acted it answers "handled" the
+	 * only way a scope can: by preventing the default. That is what
+	 * `defaultPrevented` is read for here - the event is still consumed so the
+	 * vendor cannot see it, but the history is NOT stepped a second time. In a
+	 * pop-out, where Obsidian's keymap may not be listening at all, this handler
+	 * is the one that acts. Either way: exactly one step per keystroke.
+	 */
+	private installHistoryKeys(): void {
+		const doc = this.root.ownerDocument;
+		if (!doc || !this.historyActions) return;
+		const actions = this.historyActions;
+
+		const handler = (e: KeyboardEvent) => {
+			if (!this.ownsCurrent()) return;
+			if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
+			const key = e.key.toLowerCase();
+			const undo = key === "z" && !e.shiftKey;
+			const redo = key === "y" || (key === "z" && e.shiftKey);
+			if (!undo && !redo) return;
+			// A text field owns its own undo: an in-cell editor and the formula bar
+			// are inputs, and Ctrl+Z in one of them means "undo my typing".
+			const target = e.target;
+			if (
+				target instanceof HTMLInputElement ||
+				target instanceof HTMLTextAreaElement ||
+				(target instanceof HTMLElement && target.isContentEditable)
+			) {
+				return;
+			}
+			if (this.isEditing()) return;
+
+			const already = e.defaultPrevented;
+			e.preventDefault();
+			e.stopPropagation();
+			if (already) return;
+			if (undo) actions.undo();
+			else actions.redo();
+		};
+
+		doc.addEventListener("keydown", handler, true);
+		this.histKeys = handler;
+		this.histKeysDoc = doc;
 	}
 
 	/* ------------------------------------------------------ pop-out keyboard */
@@ -2513,7 +2608,19 @@ export class SheetEngine {
 		this.applyStyle(refs, (_cur, ref) => styles.get(ref) ?? {});
 		if (boxes.length > 0) this.setCellType(boxes, "cb");
 		if (plain.length > 0) this.setCellType(plain, null);
-		// One drag is one undo. See {@link historyMark}.
+		// One drag is one undo, on BOTH layers.
+		//
+		// The engine's own stack is folded here (see {@link historyMark}), which
+		// is what keeps it coherent for anything that still reads it. What Ctrl+Z
+		// actually walks since 1.7.0 is the DOCUMENT history in history.ts, and
+		// that one is satisfied by construction rather than by folding: every
+		// write a fill performs - a value per cell, then the styles, then the cell
+		// types - happens inside this one synchronous call, so the view's coalescing
+		// window (300 ms, restarted by each change) closes once, after the last of
+		// them, and the whole drag becomes a single snapshot. However long the
+		// pointer was held makes no difference: nothing is written until the
+		// button comes up. The e2e proves it on the file: drag, one Ctrl+Z, the
+		// bytes on disk are what they were.
 		this.coalesceHistory(ws, mark);
 		// The source AND what it produced end up selected, as in Excel: the next
 		// drag continues the longer series.
@@ -3131,6 +3238,11 @@ export class SheetEngine {
 		}
 		this.clipKeys = null;
 		this.clipKeysDoc = null;
+		if (this.histKeys && this.histKeysDoc) {
+			this.histKeysDoc.removeEventListener("keydown", this.histKeys, true);
+		}
+		this.histKeys = null;
+		this.histKeysDoc = null;
 		// A cut whose source is being torn down cannot be completed: the marker
 		// would outlive the grid it points into, and the next paste would call
 		// `clearRect` on a destroyed engine.

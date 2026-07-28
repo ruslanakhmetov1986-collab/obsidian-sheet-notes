@@ -13,7 +13,8 @@
 		"defaults in place every file came out at 0%.",
 		"",
 		"The thresholds are the level the suite actually reached when they were set",
-		"(96.18 lines, 92.06 functions, 87.95 branches), rounded down. They are a",
+		"(96.71 lines, 93.41 functions, 87.41 branches at the last measurement),",
+		"rounded down. They are a",
 		"REGRESSION gate, not a target: raise them when the real number rises."
 	],
 	"all": true,
