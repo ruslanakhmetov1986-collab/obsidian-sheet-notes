@@ -39,6 +39,9 @@ import {
 	sortPage,
 	toMarkdownTable,
 } from "./sheetops";
+import { type HistoryState, SheetHistory } from "./history";
+import { type SaveStatus, SheetSaveIndicator } from "./saveindicator";
+import { backupStore } from "./versions";
 
 export const VIEW_TYPE_SHEET = "leovale-sheet-view";
 
@@ -61,6 +64,24 @@ const SAVE_DEBOUNCE_MS = 1500;
  * A human cannot type in the first 250 ms of a view they just opened.
  */
 const LOAD_QUIET_MS = 250;
+
+/**
+ * Quiet time before a change becomes an undo step.
+ *
+ * ONE Ctrl+Z HAS TO MEAN ONE OPERATION, and the operations do not arrive as
+ * one event each: a rich paste writes values and then styles, a cut completed
+ * by a paste clears the source and fills the destination, a merge changes the
+ * spans and then the cells. Each of those reaches the save path several times
+ * in the same tick or the next one. Grouping by a short silence turns every one
+ * of them into a single step, and 300 ms is far below the time it takes a human
+ * to reach the next command (measured on the slowest path there is - a context
+ * menu opened, read, and clicked - which is over a second) while being far
+ * above the gap between two halves of the same operation (under a frame).
+ *
+ * The window is also flushed explicitly before an undo, a redo and a save, so
+ * nothing can be sitting in it when it matters.
+ */
+const HISTORY_COALESCE_MS = 300;
 
 /**
  * How close to the LEFT EDGE of the screen a finger has to land for the gesture
@@ -121,6 +142,25 @@ export class SheetView extends TextFileView {
 	private sheetEdgeGesture = false;
 	/** Delimiter sniffed from the CSV we loaded; preserved on every write. */
 	private sheetDelimiter: CsvDelimiter = DEFAULT_DELIMITER;
+	/**
+	 * Document-level undo/redo for THIS open view.
+	 *
+	 * Per view and in memory, deliberately: a history is a train of thought, and
+	 * two tabs on the same file are two of them. It dies with the view, which is
+	 * also what makes "undo cannot reach into a file I closed" true by
+	 * construction rather than by a check somewhere.
+	 */
+	private sheetHistory = new SheetHistory();
+	private sheetHistoryTimer: number | null = null;
+	/** True while an undo/redo is being mounted; the echo must not be recorded. */
+	private sheetHistoryApplying = false;
+	private sheetIndicator: SheetSaveIndicator | null = null;
+	/** Survives the chrome being rebuilt (a sort, an undo, a restore). */
+	private sheetSaveStatus: SaveStatus = { name: "idle" };
+	/** The bytes this file held when it was opened; the first kept version. */
+	private sheetLoadedText: string | null = null;
+	/** The bytes the version store already knows about, for the change summary. */
+	private sheetVersionedText: string | null = null;
 
 	constructor(leaf: WorkspaceLeaf) {
 		super(leaf);
@@ -186,6 +226,20 @@ export class SheetView extends TextFileView {
 		const MOD: Modifier[][] = [["Mod"], ["Mod", "Shift"]];
 		const shifted = (e: KeyboardEvent) => e.shiftKey;
 
+		// Undo/redo. Registered here as well as intercepted by the engine (see
+		// SheetEngine.installHistoryKeys): this is the path Obsidian's own keymap
+		// takes, it is what makes the shortcut re-bindable in Settings -> Hotkeys
+		// through the commands, and the engine's capture handler stands down when
+		// it sees that this one has already acted. Exactly one step per keystroke,
+		// in the main window and in a pop-out alike.
+		// Both cases of the letter on purpose: with Shift held the browser reports
+		// `key: "Z"`, and a scope registration is matched on the key as it arrives.
+		for (const z of ["z", "Z"]) {
+			on([["Mod"]], z, () => this.undoStep(), true);
+			on([["Mod", "Shift"]], z, () => this.redoStep(), true);
+		}
+		for (const y of ["y", "Y"]) on([["Mod"]], y, () => this.redoStep(), true);
+
 		on([[]], "F2", () => {
 			const cur = this.sheetEngine?.activeCell();
 			if (cur) this.sheetEngine?.openEditorAt(cur.row, cur.col);
@@ -241,6 +295,11 @@ export class SheetView extends TextFileView {
 		this.sheetMode = JSON_EXTENSIONS.includes(ext) || ext === "" ? "sheet" : "csv";
 		this.sheetDirty = false;
 		this.sheetReadOnly = false;
+		// A new document: the previous one's history and its version bookkeeping
+		// belong to a file that is no longer on screen.
+		this.sheetLoadedText = data && data.trim().length > 0 ? data : null;
+		this.sheetVersionedText = null;
+		this.sheetSaveStatus = { name: "idle" };
 
 		if (this.sheetMode === "csv") {
 			// An empty CSV is a legitimate file, so "" counts as known-good here.
@@ -248,6 +307,7 @@ export class SheetView extends TextFileView {
 			const parsed = csvToDoc(data ?? "");
 			this.sheetDelimiter = parsed.delimiter;
 			this.renderSheet(parsed.doc);
+			this.resetHistory();
 			return;
 		}
 
@@ -271,6 +331,7 @@ export class SheetView extends TextFileView {
 		}
 
 		this.renderSheet(doc);
+		this.resetHistory();
 	}
 
 	getViewData(): string {
@@ -320,9 +381,13 @@ export class SheetView extends TextFileView {
 
 	clear(): void {
 		this.cancelScheduledSave();
+		this.cancelHistoryCapture();
+		this.sheetHistory.clear();
 		this.destroyEngine();
 		this.sheetDirty = false;
 		this.sheetLastGood = null;
+		this.sheetLoadedText = null;
+		this.sheetVersionedText = null;
 	}
 
 	/** Discard an editor that is open, so it cannot commit into the next file. */
@@ -378,11 +443,22 @@ export class SheetView extends TextFileView {
 			getEngine: () => this.sheetEngine,
 			badge: this.sheetMode === "csv" ? `CSV ${this.sheetDelimiter}` : undefined,
 		});
+		// The save state lives on the formula-bar row, right-aligned: the one strip
+		// that is always visible, never scrolls sideways (the toolbar does) and
+		// already carries the file-level badge in CSV mode.
+		this.sheetIndicator = new SheetSaveIndicator(this.sheetFormulaBar.rowEl(), (message) => {
+			new Notice(t("saveFailedNotice", { message: message || "?" }), 10_000);
+		});
+		this.sheetIndicator.set(this.sheetSaveStatus);
 		this.sheetToolbar = new SheetToolbar(this.contentEl, () => this.sheetEngine, {
 			sort: (dir) => this.sortSelectedColumn(dir),
 			toggleFind: () => this.sheetFind?.toggle(),
 			columnWidth: () => this.openColumnWidthDialog(),
 			merge: () => this.mergeSelection(),
+			undo: () => this.undoStep(),
+			redo: () => this.redoStep(),
+			canUndo: () => this.sheetHistory.canUndo(),
+			canRedo: () => this.sheetHistory.canRedo(),
 		});
 		this.sheetFind = new SheetFind(this.contentEl, () => this.sheetEngine);
 		this.sheetWrapper = this.contentEl.createDiv({ cls: "leovale-sheet-wrapper" });
@@ -422,6 +498,13 @@ export class SheetView extends TextFileView {
 						void pasteInto(engine);
 					},
 					cancelCut: () => cancelPendingCut(),
+				},
+				// Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z. Handing them over here is what
+				// takes them off the engine's own (grid-level) undo stack, so one
+				// keystroke is one document-level step; see installHistoryKeys.
+				history: {
+					undo: () => this.undoStep(),
+					redo: () => this.redoStep(),
 				},
 			});
 		} catch (e) {
@@ -663,10 +746,176 @@ export class SheetView extends TextFileView {
 
 	/** Rebuild the grid from a document we just rewrote, and schedule a save. */
 	private remountDoc(doc: SheetDoc, cursor?: { row: number; col: number }): void {
+		// The state BEFORE this operation becomes its own undo step, whatever was
+		// pending: a sort that follows a keystroke by 50 ms is still two steps.
+		this.captureHistory();
 		this.renderSheet(doc);
 		this.scheduleSave();
 		if (cursor) this.sheetEngine?.selectCell(cursor.row, cursor.col);
 		this.syncChrome();
+	}
+
+	/* ------------------------------------------------------ undo and redo */
+
+	/**
+	 * The document as it stands, in the bytes that would be written to disk.
+	 *
+	 * This is what a history step IS, and using the serializer rather than a
+	 * copy of the document object is the point: two states that serialize to the
+	 * same bytes are the same state (so an autosave that changed nothing is not
+	 * a step), and undoing to one of them puts those exact bytes back on disk.
+	 */
+	private currentText(): string | null {
+		const engine = this.sheetEngine;
+		if (!engine) return null;
+		try {
+			const doc = engine.readDoc();
+			return this.sheetMode === "csv" ? docToCsv(doc, this.sheetDelimiter) : serializeSheet(doc);
+		} catch (e) {
+			console.error("leovale-sheets: could not snapshot the document", e);
+			return null;
+		}
+	}
+
+	private docFromText(text: string): SheetDoc | null {
+		try {
+			return this.sheetMode === "csv" ? csvToDoc(text).doc : parseSheet(text);
+		} catch (e) {
+			console.error("leovale-sheets: could not read a history state back", e);
+			return null;
+		}
+	}
+
+	/** Baseline the history on the document that is on screen right now. */
+	private resetHistory(): void {
+		this.cancelHistoryCapture();
+		const text = this.currentText();
+		if (text === null) this.sheetHistory.clear();
+		else this.sheetHistory.reset(text, this.sheetEngine?.activeCell() ?? null);
+		this.sheetToolbar?.sync();
+	}
+
+	private scheduleHistoryCapture(): void {
+		if (this.sheetHistoryApplying || this.sheetReadOnly) return;
+		this.cancelHistoryCapture();
+		this.sheetHistoryTimer = window.setTimeout(() => {
+			this.sheetHistoryTimer = null;
+			this.captureHistory();
+		}, HISTORY_COALESCE_MS);
+	}
+
+	private cancelHistoryCapture(): void {
+		if (this.sheetHistoryTimer !== null) {
+			window.clearTimeout(this.sheetHistoryTimer);
+			this.sheetHistoryTimer = null;
+		}
+	}
+
+	/**
+	 * Close the current step, now.
+	 *
+	 * Idempotent and cheap when there is nothing to close (identical bytes are
+	 * not a step), which is why it can be called on every save, before every
+	 * undo and at the start of every document-level operation.
+	 */
+	private captureHistory(): void {
+		this.cancelHistoryCapture();
+		if (!this.sheetEngine || this.sheetReadOnly || this.sheetHistoryApplying) return;
+		const text = this.currentText();
+		if (text === null) return;
+		if (this.sheetHistory.record(text, this.sheetEngine.activeCell() ?? null)) this.syncChrome();
+	}
+
+	/** Ctrl+Z, the toolbar button and the command. */
+	undoStep(): void {
+		if (!this.sheetEngine) return;
+		if (this.sheetReadOnly) {
+			new Notice(t("sheetReadOnly"));
+			return;
+		}
+		this.captureHistory();
+		const state = this.sheetHistory.undo(this.sheetEngine.activeCell() ?? null);
+		if (!state) {
+			new Notice(t("histNothingUndo"));
+			return;
+		}
+		this.applyHistoryState(state);
+	}
+
+	/** Ctrl+Y / Ctrl+Shift+Z, the toolbar button and the command. */
+	redoStep(): void {
+		if (!this.sheetEngine) return;
+		if (this.sheetReadOnly) {
+			new Notice(t("sheetReadOnly"));
+			return;
+		}
+		this.captureHistory();
+		const state = this.sheetHistory.redo(this.sheetEngine.activeCell() ?? null);
+		if (!state) {
+			new Notice(t("histNothingRedo"));
+			return;
+		}
+		this.applyHistoryState(state);
+	}
+
+	/**
+	 * Put a remembered state back on screen.
+	 *
+	 * The grid is REBUILT rather than patched, exactly as a sort rebuilds it: the
+	 * state is a whole document, and there is no half of it that could be applied
+	 * without the rest. Measured on the 100x26 default grid this costs ~25 ms,
+	 * which is the same rebuild a sort has been doing since 1.3.0.
+	 *
+	 * `sheetHistoryApplying` closes the loop: mounting a document schedules a
+	 * save, the save path records history, and without the flag the state just
+	 * restored would be pushed as a new step (making the next Ctrl+Z a no-op).
+	 * The echo is harmless anyway - the history refuses to record bytes it is
+	 * already at - but the flag says so at the point where it is decided.
+	 */
+	private applyHistoryState(state: HistoryState): void {
+		const doc = this.docFromText(state.text);
+		if (!doc) return;
+		this.sheetHistoryApplying = true;
+		try {
+			this.renderSheet(doc);
+			if (state.cursor) this.sheetEngine?.selectCell(state.cursor.row, state.cursor.col);
+		} finally {
+			this.sheetHistoryApplying = false;
+		}
+		this.sheetDirty = true;
+		this.scheduleSave();
+		this.syncChrome();
+	}
+
+	/**
+	 * Put a version from the history dialog back into the open document.
+	 *
+	 * Through the same door as an undo, and that is the whole design: a restore
+	 * is an ordinary change to the open sheet, so it is autosaved like one,
+	 * snapshotted like one, and undone with one Ctrl+Z like one. Nothing here
+	 * writes to the file directly.
+	 */
+	restoreVersion(text: string): void {
+		if (this.sheetReadOnly) {
+			new Notice(t("sheetReadOnly"));
+			return;
+		}
+		const doc = this.docFromText(text);
+		if (!doc) return;
+		this.captureHistory();
+		this.renderSheet(doc);
+		this.sheetDirty = true;
+		this.scheduleSave();
+		this.syncChrome();
+	}
+
+	/** For the toolbar and the commands. */
+	canUndo(): boolean {
+		return this.sheetHistory.canUndo();
+	}
+
+	canRedo(): boolean {
+		return this.sheetHistory.canRedo();
 	}
 
 	/** Toolbar button and command: exact width for the selected columns. */
@@ -769,6 +1018,17 @@ export class SheetView extends TextFileView {
 		// dropped BEFORE anything is detached, so no straggling blur or editor
 		// close can write into the document that is being mounted next.
 		this.discardPendingEdits();
+		if (this.sheetIndicator) {
+			// The state is kept on the view: the chrome is rebuilt by every sort,
+			// undo and restore, and "Saved just now" must not blink out because of it.
+			this.sheetSaveStatus = this.sheetIndicator.current();
+			try {
+				this.sheetIndicator.destroy();
+			} catch (e) {
+				console.error("leovale-sheets: save indicator teardown failed", e);
+			}
+			this.sheetIndicator = null;
+		}
 		if (this.sheetFormulaBar) {
 			try {
 				this.sheetFormulaBar.destroy();
@@ -829,11 +1089,104 @@ export class SheetView extends TextFileView {
 			return;
 		}
 		this.sheetDirty = true;
+		this.setSaveStatus({ name: "dirty" });
+		this.scheduleHistoryCapture();
 		this.cancelScheduledSave();
 		this.sheetSaveTimer = window.setTimeout(() => {
 			this.sheetSaveTimer = null;
 			this.requestSave();
 		}, SAVE_DEBOUNCE_MS);
+	}
+
+	/* ---------------------------------------------------- the save indicator */
+
+	private setSaveStatus(status: SaveStatus): void {
+		// A failure is sticky: it stays until a save actually succeeds, so the
+		// next keystroke cannot quietly relabel a broken file as "unsaved changes".
+		if (this.sheetSaveStatus.name === "error" && status.name !== "saved" && status.name !== "error") {
+			return;
+		}
+		this.sheetSaveStatus = status;
+		this.sheetIndicator?.set(status);
+	}
+
+	/**
+	 * Every write of this file goes through here, whoever asked for it (our own
+	 * debounce, Obsidian's `requestSave`, a tab being closed).
+	 *
+	 * Three things hang off it, and all three are the reason it is overridden:
+	 *
+	 *  - the indicator gets its "Saving..." and "Saved" transitions from the real
+	 *    write rather than from a guess;
+	 *  - a FAILED write is reported to the user. Until this release it went to
+	 *    `console.error` and nowhere else, i.e. a vault on a disconnected network
+	 *    drive silently stopped saving while the grid kept accepting edits;
+	 *  - the bytes that landed are handed to the version store, which is the only
+	 *    place that knows they are new (`getViewData` is also called for other
+	 *    reasons, and a snapshot per call would be a snapshot per keystroke).
+	 *
+	 * The rejection is swallowed on purpose: `requestSave` is a fire-and-forget
+	 * debounce, so a rethrow here becomes an unhandled promise rejection and
+	 * nothing more. The user has the red state and the notice behind it.
+	 */
+	override async save(clear?: boolean): Promise<void> {
+		// The bytes about to be written are a step of their own; close it first so
+		// a crash right after the write cannot lose the operation that caused it.
+		this.captureHistory();
+		const writing = this.sheetDirty && !this.sheetReadOnly;
+		if (writing) this.setSaveStatus({ name: "saving" });
+		try {
+			await super.save(clear);
+		} catch (e) {
+			const message = (e as Error)?.message ?? String(e);
+			console.error("leovale-sheets: saving the spreadsheet failed", e);
+			this.setSaveStatus({ name: "error", message });
+			return;
+		}
+		// A save nobody asked for (Obsidian writes on a few of its own occasions)
+		// must not turn a view that never became dirty into "Saved just now".
+		if (writing || this.sheetSaveStatus.name !== "idle") {
+			this.setSaveStatus({ name: "saved", at: Date.now() });
+		}
+		// Unconditional: `getViewData()` clears the dirty flag, so the one path
+		// that flushes by hand (releaseEngine) reaches here with `writing` false
+		// and real new bytes on disk. The store deduplicates, so a call with
+		// nothing new costs one string comparison.
+		await this.snapshotVersion();
+	}
+
+	/**
+	 * Keep what was just written as a version.
+	 *
+	 * The FIRST snapshot of a session is the document as it was OPENED, not as
+	 * it was just saved: without it the state before today's first edit would
+	 * never be in the log, which is precisely the state a user asks for. The
+	 * store deduplicates, so re-opening a file does not add a copy of a version
+	 * it already has.
+	 *
+	 * Failures are logged and dropped. A backup that cannot be written must not
+	 * take the save down with it - the file itself is already on disk.
+	 */
+	private async snapshotVersion(): Promise<void> {
+		// Versions are kept for OUR format only: the summary reads a document, and
+		// a CSV round-trip through the grid is lossy enough that "what changed"
+		// would be a guess. A .csv is also usually somebody else's file.
+		if (this.sheetMode !== "sheet") return;
+		const file = this.file;
+		const text = this.sheetLastGood;
+		if (!file || !text) return;
+		try {
+			const store = backupStore(this.app);
+			if (this.sheetVersionedText === null && this.sheetLoadedText !== null) {
+				await store.save(file.path, this.sheetLoadedText, null);
+				this.sheetVersionedText = this.sheetLoadedText;
+			}
+			if (text === this.sheetVersionedText) return;
+			await store.save(file.path, text, this.sheetVersionedText);
+			this.sheetVersionedText = text;
+		} catch (e) {
+			console.error("leovale-sheets: could not keep a version of this spreadsheet", e);
+		}
 	}
 
 	private cancelScheduledSave(): void {

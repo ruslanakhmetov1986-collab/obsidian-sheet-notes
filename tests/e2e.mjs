@@ -46,7 +46,11 @@ function check(name, ok, detail = "") {
 	return ok;
 }
 
+/** The step being run, so a stray console error can be blamed on one. */
+let currentStep = "(startup)";
+
 function step(n) {
+	currentStep = n;
 	console.log(`\n== ${n}`);
 }
 
@@ -852,10 +856,13 @@ async function main() {
 		const page = ctx.pages().find((p) => p.url() === "app://obsidian.md/index.html");
 		if (!page) throw new Error("Obsidian app page not found (vault picker?)");
 
+		// Tagged with the step that was running when it arrived: a bare
+		// "illegal access" at the end of a nine-hundred-check run is
+		// unattributable, and this is the only place that knows the timing.
 		const pageErrors = [];
-		page.on("pageerror", (e) => pageErrors.push(e.message));
+		page.on("pageerror", (e) => pageErrors.push(`${e.message} [in: ${currentStep}]`));
 		page.on("console", (m) => {
-			if (m.type() === "error") pageErrors.push(m.text());
+			if (m.type() === "error") pageErrors.push(`${m.text()} [in: ${currentStep}]`);
 		});
 
 		await page.waitForFunction(() => !!window.app?.workspace?.layoutReady, null, {
@@ -924,6 +931,22 @@ async function main() {
 			String(enabled.csvOwner));
 		check("create command registered", enabled.commands.includes(`${PLUGIN_ID}:create-sheet`));
 		check("ribbon icon present", enabled.ribbon);
+
+		// A vault opened for the VERY FIRST time asks whether its author is
+		// trusted ("mod-trust-folder"), and that dialog's overlay swallows every
+		// click until it is answered - so the whole suite timed out on its first
+		// `page.click`, with the grid perfectly present behind it. Enabling the
+		// plugins over the API (above) answers the question but leaves the dialog
+		// on screen. Only ever seen on a brand-new user-data-dir, which is
+		// exactly what a second checkout or a CI runner starts with.
+		const startupModals = await page.evaluate(async () => {
+			const seen = [...document.querySelectorAll(".modal")].map((m) => m.className);
+			for (const el of document.querySelectorAll(".modal-close-button")) el.click();
+			await new Promise((r) => setTimeout(r, 300));
+			for (const el of document.querySelectorAll(".modal-container")) el.remove();
+			return seen;
+		});
+		if (startupModals.length > 0) console.log("  dismissed startup modals:", startupModals);
 
 		step("clean previous run");
 		// Both side docks shut, always. Their state is remembered per user-data-dir,
@@ -1255,8 +1278,8 @@ async function main() {
 		console.log("  toolbar icons:", icons);
 		check(
 			"every icon button actually rendered its glyph",
-			// 1.4.0 added two: merge and checkbox
-			icons.length === 14 && icons.every((i) => i.glyphs === 1 || i.cls.includes("tb-size")),
+			// 1.4.0 added two (merge, checkbox); 1.7.0 two more (undo, redo).
+			icons.length === 16 && icons.every((i) => i.glyphs === 1 || i.cls.includes("tb-size")),
 			JSON.stringify(icons),
 		);
 		check(
@@ -4852,19 +4875,36 @@ async function main() {
 				2,
 			);
 
-			const from = await p.locator(selCell(0, 0)).boundingBox();
-			const to = await p.locator(selCell(2, 2)).boundingBox();
-			await p.mouse.move(from.x + from.width / 2, from.y + from.height / 2);
-			await p.mouse.down();
-			await p.mouse.move(to.x + to.width / 2, to.y + to.height / 2, { steps: 8 });
-			await p.mouse.up();
-			await p.waitForTimeout(500);
+			/**
+			 * Drag A1:C3, and be sure it took.
+			 *
+			 * Retried, because this one drag is the entire premise of the eleven
+			 * assertions below: if the range did not get selected they all report a
+			 * missing tint, which is the loudest possible way to say "the mouse
+			 * moves were dropped". Measured on a loaded machine (two suites of this
+			 * repo running at once): the first drag in a pop-out that has just been
+			 * repainted for a theme change extends nothing, and the second one,
+			 * 300 ms later, works every time.
+			 */
+			let highlighted = 0;
+			for (let attempt = 0; attempt < 3 && highlighted !== 9; attempt++) {
+				const from = await p.locator(selCell(0, 0)).boundingBox();
+				const to = await p.locator(selCell(2, 2)).boundingBox();
+				await p.mouse.move(from.x + from.width / 2, from.y + from.height / 2);
+				await p.mouse.down();
+				await p.waitForTimeout(60);
+				await p.mouse.move(to.x + to.width / 2, to.y + to.height / 2, { steps: 12 });
+				await p.waitForTimeout(60);
+				await p.mouse.up();
+				await p.waitForTimeout(500);
+				highlighted = await p.evaluate(
+					() =>
+						document.querySelectorAll(".leovale-sheet-content .leovale-sheet-root td.highlight")
+							.length,
+				);
+				if (highlighted !== 9) console.log(`  ${label}: drag attempt ${attempt + 1} selected ${highlighted}`);
+			}
 
-			const highlighted = await p.evaluate(
-				() =>
-					document.querySelectorAll(".leovale-sheet-content .leovale-sheet-root td.highlight")
-						.length,
-			);
 			const after = {};
 			for (const [k, sel] of Object.entries(probes)) after[k] = await avgColor(sess, p, sel);
 			const tickAfter = await paintedRatio(
@@ -5394,6 +5434,17 @@ async function main() {
 			await zoomShot(popCdp, selPopout, await borderedRect(selPopout), "36-selection-outline-popout");
 
 			await setBaseTheme(page, "obsidian");
+			// A theme change is applied to a pop-out by Obsidian's own
+			// `css-change` plumbing, one window at a time, and on a loaded machine
+			// the pop-out has repainted noticeably later than the main window.
+			// Waiting for the CLASS on the pop-out's body rather than for a fixed
+			// timeout is what stops this section reading light-theme pixels and
+			// reporting a tint that is missing only because it has not arrived yet.
+			await selPopout
+				.waitForFunction(() => document.body.classList.contains("theme-dark"), null, {
+					timeout: 15_000,
+				})
+				.catch(() => undefined);
 			await selPopout.waitForTimeout(1200);
 			await tintRun({ p: selPopout, sess: popCdp, label: "pop-out dark" });
 			await zoomShot(popCdp, selPopout, await gridRect(selPopout), "33-selection-range-popout-dark");
@@ -6185,11 +6236,932 @@ async function main() {
 		);
 		await page.waitForTimeout(500);
 
+		/* ==================================================================
+		 * 1.7.0: TRUE UNDO, VERSION HISTORY, SAVE STATE
+		 *
+		 * The one assertion this whole section is built around: an operation
+		 * done and then undone leaves the file ON DISK byte for byte what it
+		 * was. Not "the grid looks right" - the bytes, read back from the vault
+		 * with node's own fs, after the save has really happened. Every
+		 * document-level operation the plugin has is put through it, because
+		 * every one of them used to be irreversible: a sort permutes the rows
+		 * AND their styles, a merge drops values, a cut empties its source, a
+		 * rich paste writes values, styles and cell types at once.
+		 * ================================================================== */
+		const HIST_PATH = "History.sheet";
+		const histSeed = JSON.stringify(
+			{
+				format: "leovale-sheet",
+				version: 4,
+				sheets: [
+					{
+						name: "Sheet1",
+						rows: 12,
+						cols: 5,
+						colWidths: { 0: 140 },
+						cells: {
+							A1: { v: "Fruit", s: { b: true, bg: "#deebf7" } },
+							B1: { v: "Qty", s: { b: true, bg: "#deebf7" } },
+							// Each data row carries its OWN formatting, which is what
+							// makes a sort worth undoing: the engine's own sort moves
+							// the values and leaves the styles behind.
+							A2: { v: "Pear", s: { bg: "#ffe08a" } },
+							B2: { v: 3, s: { nf: "0.00" } },
+							A3: { v: "Apple", s: { bg: "#e2f0d9" } },
+							B3: { v: 5, s: { nf: "0.00" } },
+							A4: { v: "Cherry", s: { bg: "#f4d9e8" } },
+							B4: { v: 1, s: { nf: "0.00" } },
+							A6: { v: "Total", s: { b: true } },
+							B6: { f: "=SUM(B2:B4)" },
+						},
+					},
+				],
+			},
+			null,
+			2,
+		);
+
+		step("1.7.0: open a document worth undoing");
+		await page.evaluate(
+			async ([p, text]) => {
+				const app = window.app;
+				app.workspace.detachLeavesOfType("leovale-sheet-view");
+				const old = app.vault.getAbstractFileByPath(p);
+				if (old) await app.vault.delete(old);
+				const file = await app.vault.create(p, text);
+				await app.workspace.getLeaf(true).openFile(file);
+				await new Promise((r) => setTimeout(r, 1200));
+			},
+			[HIST_PATH, histSeed],
+		);
+		await page.waitForTimeout(1400);
+		await installViewIndex(page);
+		const histDisk = path.join(VAULT, HIST_PATH);
+		const readDisk = () => fs.readFileSync(histDisk, "utf8");
+
+		/**
+		 * Write now rather than in 1.5 s + Obsidian's own 2 s.
+		 *
+		 * The same command a user has ("Save spreadsheet now"), so the bytes
+		 * being compared went through the ordinary save path - `getViewData`,
+		 * the length floor, `vault.modify` - and not through a test-only door.
+		 */
+		const flushSheet = async (p = page) => {
+			await p.evaluate((id) => window.app.commands.executeCommandById(`${id}:save-sheet`), PLUGIN_ID);
+			await p.waitForTimeout(900);
+		};
+
+		const undoBtn = ".leovale-sheet-content .leovale-sheet-tb-undo";
+		const redoBtn = ".leovale-sheet-content .leovale-sheet-tb-redo";
+		const btnState = (p = page) =>
+			p.evaluate(
+				([u, r]) => {
+					const undo = document.querySelector(u);
+					const redo = document.querySelector(r);
+					return {
+						undo: !!undo,
+						redo: !!redo,
+						undoOff: undo?.hasAttribute("disabled") ?? null,
+						redoOff: redo?.hasAttribute("disabled") ?? null,
+						undoIcon: undo?.querySelector("svg.lucide-undo-2, svg")?.tagName ?? null,
+						redoIcon: redo?.querySelector("svg.lucide-redo-2, svg")?.tagName ?? null,
+					};
+				},
+				[undoBtn, redoBtn],
+			);
+
+		const fresh = await btnState();
+		console.log("  toolbar:", JSON.stringify(fresh));
+		check(
+			"undo and redo are in the toolbar and carry a rendered icon",
+			fresh.undo && fresh.redo && fresh.undoIcon === "svg" && fresh.redoIcon === "svg",
+			JSON.stringify(fresh),
+		);
+		check(
+			"both are disabled on a document nobody has touched",
+			fresh.undoOff === true && fresh.redoOff === true,
+			JSON.stringify(fresh),
+		);
+		// The glyph is really painted, not merely present: a lucide name this
+		// build does not ship renders an empty <span> and a DOM test is happy.
+		const undoInk = await paintedRatio(cdp, page, undoBtn);
+		check(
+			"the undo glyph is actually on screen",
+			(undoInk?.ratio ?? 0) > 0.01,
+			JSON.stringify(undoInk),
+		);
+
+		// One edit, so the file on disk is in OUR canonical form before the
+		// operations below are measured against it.
+		await typeInCell(page, 4, 0, "note");
+		await flushSheet();
+		const canonical = readDisk();
+		check(
+			"the seeded file was rewritten in the canonical format",
+			canonical.includes('"format": "leovale-sheet"') && canonical.endsWith("\n"),
+			canonical.slice(0, 60),
+		);
+
+		const armed = await btnState();
+		check(
+			"one edit arms undo and leaves redo dead",
+			armed.undoOff === false && armed.redoOff === true,
+			JSON.stringify(armed),
+		);
+		await shot(page, "60-history-toolbar-armed");
+
+		/**
+		 * Do an operation, undo it, redo it, and compare the FILE each time.
+		 *
+		 * A click on a cell before each keystroke is not decoration: the engine
+		 * routes Ctrl+Z to the grid the user last clicked in (`jspreadsheet
+		 * .current`), and every one of these operations rebuilds the grid.
+		 */
+		async function undoRoundTrip(name, run, opts = {}) {
+			const before = readDisk();
+			await run();
+			await flushSheet();
+			const after = readDisk();
+
+			await page.click(selCell(0, 0));
+			await page.waitForTimeout(150);
+			await page.keyboard.press("Control+z");
+			await page.waitForTimeout(700);
+			await flushSheet();
+			const undone = readDisk();
+
+			await page.click(selCell(0, 0));
+			await page.waitForTimeout(150);
+			await page.keyboard.press(opts.redoKey ?? "Control+y");
+			await page.waitForTimeout(700);
+			await flushSheet();
+			const redone = readDisk();
+
+			check(`${name}: the operation reached the file`, after !== before, `${before.length} -> ${after.length}`);
+			check(
+				`${name}: ONE Ctrl+Z restored the file byte for byte`,
+				undone === before,
+				firstDiff(before, undone),
+			);
+			check(`${name}: redo applied it again, byte for byte`, redone === after, firstDiff(after, redone));
+
+			// Leave the document where the operation left it, so the next test
+			// starts from a known state.
+			return after;
+		}
+
+		/** Where two documents part company, for a failure message worth reading. */
+		function firstDiff(a, b) {
+			if (a === b) return "identical";
+			const la = a.split("\n");
+			const lb = b.split("\n");
+			for (let i = 0; i < Math.max(la.length, lb.length); i++) {
+				if (la[i] !== lb[i]) return `line ${i + 1}: ${JSON.stringify(la[i])} vs ${JSON.stringify(lb[i])}`;
+			}
+			return `same lines, ${a.length} vs ${b.length} bytes`;
+		}
+
+		step("1.7.0: a typed value, undone and redone");
+		await undoRoundTrip("typed value", async () => {
+			await typeInCell(page, 1, 7, "42");
+		});
+
+		step("1.7.0: a SORT - the operation this feature exists for");
+		const sortedText = await undoRoundTrip("sort", async () => {
+			await page.click(selCell(0, 1));
+			await page.waitForTimeout(200);
+			await page.evaluate(() => window.sheetViewAt(0).sortSelectedColumn("asc"));
+			await page.waitForTimeout(900);
+		});
+		check(
+			"the sort moved the rows AND their fills (which is what makes it hard to undo)",
+			/"v": "Apple", "s": \{ "bg": "#e2f0d9" \}/.test(sortedText) &&
+				sortedText.indexOf('"v": "Apple"') < sortedText.indexOf('"v": "Pear"'),
+			sortedText.split("\n").filter((l) => /"A[0-9]+":/.test(l)).join(" | "),
+		);
+		// Undo it for good; the merge below refuses to run on a sorted sheet's
+		// sibling state anyway, and every later comparison wants a stable base.
+		await page.click(selCell(0, 0));
+		await page.keyboard.press("Control+z");
+		await page.waitForTimeout(700);
+		await flushSheet();
+
+		step("1.7.0: the sort marker follows the history, not the other way round");
+		await page.click(selCell(0, 1));
+		await page.waitForTimeout(200);
+		await page.evaluate(() => window.sheetViewAt(0).sortSelectedColumn("desc"));
+		await page.waitForTimeout(900);
+		const marked = await page.evaluate(() => ({
+			marks: document.querySelectorAll(
+				".leovale-sheet-content .leovale-sheet-root thead td[data-sort-dir]",
+			).length,
+			dir: document
+				.querySelector(".leovale-sheet-content .leovale-sheet-root thead td[data-sort-dir]")
+				?.getAttribute("data-sort-dir"),
+		}));
+		await page.click(selCell(0, 0));
+		await page.keyboard.press("Control+z");
+		await page.waitForTimeout(800);
+		const unmarked = await page.evaluate(
+			() =>
+				document.querySelectorAll(
+					".leovale-sheet-content .leovale-sheet-root thead td[data-sort-dir]",
+				).length,
+		);
+		await page.click(selCell(0, 0));
+		await page.keyboard.press("Control+y");
+		await page.waitForTimeout(800);
+		const remarked = await page.evaluate(
+			() =>
+				document.querySelectorAll(
+					".leovale-sheet-content .leovale-sheet-root thead td[data-sort-dir]",
+				).length,
+		);
+		console.log("  sort marker:", JSON.stringify({ marked, unmarked, remarked }));
+		check("sorting marks its column header", marked.marks === 1 && marked.dir === "desc",
+			JSON.stringify(marked));
+		check("undoing the sort takes the marker with it", unmarked === 0, String(unmarked));
+		check("and redoing it brings the marker back", remarked === 1, String(remarked));
+		await page.click(selCell(0, 0));
+		await page.keyboard.press("Control+z");
+		await page.waitForTimeout(800);
+		await flushSheet();
+
+		step("1.7.0: a MERGE, undone");
+		await undoRoundTrip("merge", async () => {
+			await dragSelect(page, 3, 1, 4, 1); // D2:E2, both empty -> no confirm
+			await page.evaluate(() => window.sheetViewAt(0).mergeSelection());
+			await page.waitForTimeout(700);
+		});
+
+		step("1.7.0: a CUT completed by a paste (a move), undone");
+		await undoRoundTrip("cut and paste", async () => {
+			await dragSelect(page, 0, 1, 1, 1); // A2:B2
+			await page.keyboard.press("Control+x");
+			await page.waitForTimeout(500);
+			await page.click(selCell(0, 9)); // A10
+			await page.waitForTimeout(200);
+			await page.keyboard.press("Control+v");
+			await page.waitForTimeout(1200);
+		});
+
+		step("1.7.0: a rich paste (values, styles and types at once), undone");
+		await undoRoundTrip("rich paste", async () => {
+			await dragSelect(page, 0, 0, 1, 0); // A1:B1, both styled
+			await page.keyboard.press("Control+c");
+			await page.waitForTimeout(500);
+			await page.click(selCell(2, 9)); // C10
+			await page.waitForTimeout(200);
+			await page.keyboard.press("Control+v");
+			await page.waitForTimeout(1200);
+		});
+
+		step("1.7.0: fill-down, undone");
+		await undoRoundTrip("fill down", async () => {
+			await dragSelect(page, 1, 1, 1, 3); // B2:B4
+			await page.keyboard.press("Control+d");
+			await page.waitForTimeout(700);
+		});
+
+		step("1.7.0: a fill-handle DRAG is exactly one step of the document history");
+		/*
+		 * The two layers have to agree about this one.
+		 *
+		 * 1.6.0's fill handle folds everything a drag pushes onto the ENGINE's
+		 * undo stack into a single entry, because a fill is a `setValue` per cell
+		 * plus a style write and would otherwise cost twenty presses of Ctrl+Z.
+		 * 1.7.0 takes Ctrl+Z away from that stack entirely and walks the document
+		 * history instead - so the folding has nothing to do with what the user
+		 * now gets, and the guarantee has to hold for a different reason: every
+		 * write of a fill happens inside one synchronous call, so the 300 ms
+		 * coalescing window closes once, after the last of them. This asserts the
+		 * outcome rather than the reason, on the file: a drag of a dozen cells,
+		 * one Ctrl+Z, the bytes back to what they were.
+		 */
+		await page.evaluate(() => {
+			const e = window.engineAt(0);
+			e.setRawValue("C2", "1");
+			e.setRawValue("C3", "2");
+			e.setRawValue("C4", "3");
+		});
+		await page.waitForTimeout(700);
+		await flushSheet();
+		await undoRoundTrip("fill drag", async () => {
+			// C2:C4 dragged down to C9: six cells written plus their styles.
+			await fillDrag([2, 1], [2, 3], [2, 8]);
+		});
+		const series = await page.evaluate(() => {
+			const e = window.engineAt(0);
+			const num = document.querySelectorAll(
+				".leovale-sheet-content .leovale-sheet-root td.leovale-sheet-num",
+			).length;
+			return {
+				c5: e.getRawValue("C5"),
+				c9: e.getRawValue("C9"),
+				numericCells: num,
+			};
+		});
+		console.log("  after the redone fill:", JSON.stringify(series));
+		check(
+			"the drag continued the series (and the redo put all of it back)",
+			Number(series.c5) === 4 && Number(series.c9) === 8,
+			JSON.stringify(series),
+		);
+		// 1.6.0's numeric right-alignment is a CLASS derived from the values, not
+		// something the file stores - so an undo, which REBUILDS the grid from a
+		// snapshot, has to leave it correctly applied rather than stale.
+		check(
+			"numbers are still right-aligned after a grid rebuilt from history",
+			series.numericCells >= 8,
+			String(series.numericCells),
+		);
+
+		step("1.7.0: rows and columns inserted and deleted through our menu, undone");
+		await undoRoundTrip("insert row", async () => {
+			await page.click(selCell(0, 2));
+			await page.waitForTimeout(200);
+			await page.evaluate(() => window.engineAt(0).insertRows(2, 1, true));
+			await page.waitForTimeout(700);
+		});
+		await undoRoundTrip("delete column", async () => {
+			await page.click(selCell(2, 0));
+			await page.waitForTimeout(200);
+			await page.evaluate(() => window.engineAt(0).deleteColumns(2, 1));
+			await page.waitForTimeout(700);
+		});
+
+		step("1.7.0: Ctrl+Shift+Z is redo as well");
+		await undoRoundTrip(
+			"styling with Ctrl+Shift+Z",
+			async () => {
+				await dragSelect(page, 0, 0, 1, 0);
+				await page.evaluate(() =>
+					window.engineAt(0).applyStyle(["A1", "B1"], (cur) => ({ ...cur, bg: "#f4d9e8" })),
+				);
+				await page.waitForTimeout(700);
+			},
+			{ redoKey: "Control+Shift+z" },
+		);
+
+		step("1.7.0: one keystroke is exactly one step, three edits deep");
+		// The trap this catches: two undo stacks racing (the vendor's and ours),
+		// or a coalescing window wide enough to swallow a whole operation.
+		await page.click(selCell(0, 0));
+		await flushSheet();
+		const step0 = readDisk();
+		await typeInCell(page, 3, 4, "one");
+		await flushSheet();
+		const step1 = readDisk();
+		await typeInCell(page, 3, 5, "two");
+		await flushSheet();
+		const step2 = readDisk();
+		await typeInCell(page, 3, 6, "three");
+		await flushSheet();
+		const step3 = readDisk();
+		check(
+			"three edits are three different documents",
+			new Set([step0, step1, step2, step3]).size === 4,
+			`${step0.length}/${step1.length}/${step2.length}/${step3.length}`,
+		);
+		await page.click(selCell(0, 0));
+		await page.keyboard.press("Control+z");
+		await page.waitForTimeout(700);
+		await flushSheet();
+		check("one Ctrl+Z went back exactly one edit", readDisk() === step2, firstDiff(step2, readDisk()));
+		await page.click(selCell(0, 0));
+		await page.keyboard.press("Control+z");
+		await page.waitForTimeout(700);
+		await page.click(selCell(0, 0));
+		await page.keyboard.press("Control+z");
+		await page.waitForTimeout(700);
+		await flushSheet();
+		check("two more went back exactly two edits", readDisk() === step0, firstDiff(step0, readDisk()));
+		const deep = await btnState();
+		check("with three steps ahead, redo is live", deep.redoOff === false, JSON.stringify(deep));
+		await shot(page, "61-history-toolbar-redo-live");
+
+		step("1.7.0: undo walks back to the beginning and then says so");
+		for (let i = 0; i < 40; i++) {
+			await page.click(selCell(0, 0));
+			await page.keyboard.press("Control+z");
+			await page.waitForTimeout(120);
+			if ((await btnState()).undoOff === true) break;
+		}
+		const exhausted = await btnState();
+		check("undo is disabled once the history is spent", exhausted.undoOff === true, JSON.stringify(exhausted));
+		const noticeAfterUndo = await page.evaluate(async () => {
+			document.querySelectorAll(".notice").forEach((n) => n.remove());
+			window.app.commands.executeCommandById("leovale-sheets:undo-sheet");
+			await new Promise((r) => setTimeout(r, 400));
+			return [...document.querySelectorAll(".notice")].map((n) => n.textContent).join(" | ");
+		});
+		check(
+			"and an undo with nothing left says so instead of doing something else",
+			/Nothing left to undo/.test(noticeAfterUndo),
+			noticeAfterUndo,
+		);
+		// Forward again, so the file is not left at its oldest state.
+		for (let i = 0; i < 40; i++) {
+			await page.click(selCell(0, 0));
+			await page.keyboard.press("Control+y");
+			await page.waitForTimeout(120);
+			if ((await btnState()).redoOff === true) break;
+		}
+		await flushSheet();
+		check("redo walked all the way forward again", readDisk() === step3, firstDiff(step3, readDisk()));
+
+		step("1.7.0: the save indicator says what is happening");
+		const indicator = ".leovale-sheet-content .leovale-sheet-save-state";
+		const indicatorState = (p = page) =>
+			p.evaluate((sel) => {
+				const el = document.querySelector(sel);
+				if (!el) return null;
+				const cs = getComputedStyle(el);
+				return {
+					text: el.textContent,
+					error: el.hasClass("is-error"),
+					hidden: el.hasClass("is-hidden"),
+					color: cs.color,
+					visibility: cs.visibility,
+				};
+			}, indicator);
+
+		check("the indicator sits on the formula-bar row, at its right end", await page.evaluate(
+			(sel) => {
+				const el = document.querySelector(sel);
+				const bar = document.querySelector(".leovale-sheet-content .leovale-sheet-formulabar");
+				if (!el || !bar) return false;
+				const r = el.getBoundingClientRect();
+				const b = bar.getBoundingClientRect();
+				return el.parentElement === bar && r.right <= b.right + 1 && r.left > b.left + b.width / 2;
+			},
+			indicator,
+		));
+
+		// Typing: the "unsaved" state has to appear BEFORE the 1.5 s debounce
+		// fires, which is the whole point of it.
+		await page.click(selCell(2, 10));
+		await page.waitForTimeout(120);
+		await page.keyboard.type("dirty", { delay: 10 });
+		await page.keyboard.press("Enter");
+		await page.waitForTimeout(250);
+		const dirtyState = await indicatorState();
+		console.log("  dirty:", JSON.stringify(dirtyState));
+		check(
+			'an unsaved change is announced as such',
+			/Unsaved changes/.test(dirtyState?.text ?? ""),
+			JSON.stringify(dirtyState),
+		);
+		check("and it is really painted, not just in the DOM", (await seenByUser(page, indicator)).painted);
+		await shot(page, "62-save-indicator-dirty");
+
+		await flushSheet();
+		const savedState = await indicatorState();
+		check(
+			"a completed save says so",
+			/Saved just now/.test(savedState?.text ?? "") && savedState?.error === false,
+			JSON.stringify(savedState),
+		);
+		await shot(page, "63-save-indicator-saved");
+
+		// A minute later the same state reads as a clock time. Pushed rather than
+		// waited for: the transition is a render of the state, and a test that
+		// sleeps 60 s to see it is a test nobody runs.
+		const aged = await page.evaluate(() => {
+			const view = window.sheetViewAt(0);
+			view.sheetIndicator.set({ name: "saved", at: Date.now() - 61_000 });
+			return document.querySelector(".leovale-sheet-content .leovale-sheet-save-state")?.textContent;
+		});
+		check("after a minute it shows the time of the save", /^Saved at \d\d:\d\d$/.test(aged ?? ""), String(aged));
+		await shot(page, "64-save-indicator-clock");
+
+		step("1.7.0: a failed save is reported to the USER, not to the console");
+		const failure = await page.evaluate(async () => {
+			const app = window.app;
+			const original = app.vault.modify.bind(app.vault);
+			let thrown = false;
+			app.vault.modify = async (...args) => {
+				if (!thrown) {
+					thrown = true;
+					throw new Error("the disk said no");
+				}
+				return original(...args);
+			};
+			window.__restoreModify = () => {
+				app.vault.modify = original;
+			};
+			const view = window.sheetViewAt(0);
+			view.sheetEngine.setRawValue("D12", "fails");
+			await new Promise((r) => setTimeout(r, 500));
+			await view.flushSheet();
+			await new Promise((r) => setTimeout(r, 400));
+			const el = document.querySelector(".leovale-sheet-content .leovale-sheet-save-state");
+			return {
+				text: el?.textContent,
+				error: el?.hasClass("is-error"),
+				color: el ? getComputedStyle(el).color : null,
+				title: el?.getAttribute("title"),
+			};
+		});
+		console.log("  failed save:", JSON.stringify(failure));
+		check(
+			"a write that threw leaves a red, sticky failure state",
+			/Save failed/.test(failure.text ?? "") && failure.error === true,
+			JSON.stringify(failure),
+		);
+		const errorInk = rgbTriple(failure.color ?? "");
+		check(
+			"and it is painted in the theme's error colour, not in muted grey",
+			!!errorInk && errorInk[0] > errorInk[1] + 40 && errorInk[0] > errorInk[2] + 40,
+			String(failure.color),
+		);
+		await shot(page, "65-save-indicator-failed");
+
+		const failureNotice = await page.evaluate(async () => {
+			document.querySelectorAll(".notice").forEach((n) => n.remove());
+			document.querySelector(".leovale-sheet-content .leovale-sheet-save-state").click();
+			await new Promise((r) => setTimeout(r, 300));
+			return [...document.querySelectorAll(".notice")].map((n) => n.textContent).join(" | ");
+		});
+		check(
+			"clicking it shows the actual error",
+			/the disk said no/.test(failureNotice),
+			failureNotice,
+		);
+
+		// The state is sticky: a later keystroke must not quietly relabel it.
+		await typeInCell(page, 3, 11, "still broken?");
+		await page.waitForTimeout(300);
+		const stickyState = await indicatorState();
+		check(
+			"the failure stays up while the document is edited on",
+			stickyState?.error === true,
+			JSON.stringify(stickyState),
+		);
+		await page.evaluate(() => window.__restoreModify?.());
+		await flushSheet();
+		const recovered = await indicatorState();
+		check(
+			"and it clears only when a save actually succeeds",
+			/Saved just now/.test(recovered?.text ?? "") && recovered?.error === false,
+			JSON.stringify(recovered),
+		);
+		check(
+			"the keystroke made during the outage is on disk now",
+			readDisk().includes("still broken?"),
+			readDisk().split("\n").filter((l) => /D1[12]/.test(l)).join(" | "),
+		);
+
+		step("1.7.0: the version log on disk");
+		const backupTree = await page.evaluate(async (p) => {
+			const app = window.app;
+			const root = `${app.vault.configDir}/plugins/leovale-sheets/backups`;
+			if (!(await app.vault.adapter.exists(root))) return { root, missing: true };
+			const listing = await app.vault.adapter.list(root);
+			const out = [];
+			for (const dir of listing.folders) {
+				const index = JSON.parse(await app.vault.adapter.read(`${dir}/${"index.json"}`));
+				const files = (await app.vault.adapter.list(dir)).files.map((f) => f.split("/").pop());
+				out.push({
+					path: index.path,
+					versions: index.versions.length,
+					gz: index.versions.every((v) => v.gz),
+					payloads: files.filter((f) => f !== "index.json").length,
+					summaries: index.versions.slice(-3).map((v) => v.summary),
+					stored: index.versions.reduce((n, v) => n + v.stored, 0),
+					size: index.versions.reduce((n, v) => n + v.size, 0),
+				});
+			}
+			return { root, tree: out.filter((e) => e.path === p) };
+		}, HIST_PATH);
+		console.log("  backups:", JSON.stringify(backupTree, null, 1));
+		const log = backupTree.tree?.[0];
+		check("a version folder exists for the file, with an index", !!log, JSON.stringify(backupTree));
+		check("every version was gzipped", !!log?.gz, JSON.stringify(log));
+		check(
+			"the payload count matches the index",
+			log?.payloads === log?.versions,
+			`${log?.payloads} payloads, ${log?.versions} entries`,
+		);
+		check(
+			"gzip really pays for itself, even on documents this small",
+			(log?.stored ?? 1) * 2 < (log?.size ?? 0),
+			`${log?.stored} stored vs ${log?.size} raw`,
+		);
+		check(
+			"the summaries name the cells that changed",
+			(log?.summaries ?? []).some((s) => s.kind === "cells" && s.cells.length > 0),
+			JSON.stringify(log?.summaries),
+		);
+
+		step("1.7.0: the version history dialog lists, previews and restores");
+		// Two known states, one after the other, so the assertions below do not
+		// depend on how many versions the operations above happened to leave (the
+		// log rotates at 50, and this suite writes more than that).
+		await typeInCell(page, 0, 10, "MARKER-OLD");
+		await flushSheet();
+		const markerOld = readDisk();
+		await typeInCell(page, 0, 10, "MARKER-NEW");
+		await flushSheet();
+		const current = readDisk();
+		check(
+			"the two marker states really are different documents",
+			markerOld.includes("MARKER-OLD") && current.includes("MARKER-NEW") && !current.includes("MARKER-OLD"),
+			`${markerOld.length} vs ${current.length}`,
+		);
+		await page.evaluate((id) => window.app.commands.executeCommandById(`${id}:version-history`), PLUGIN_ID);
+		await page.waitForTimeout(1200);
+		const modal = await page.evaluate(() => {
+			const m = document.querySelector(".modal.leovale-sheet-vh-modal");
+			if (!m) return null;
+			const items = [...m.querySelectorAll(".leovale-sheet-vh-item")];
+			return {
+				title: m.querySelector(".modal-title")?.textContent,
+				items: items.length,
+				first: {
+					time: items[0]?.querySelector(".leovale-sheet-vh-item-time")?.textContent,
+					size: items[0]?.querySelector(".leovale-sheet-vh-item-size")?.textContent,
+					summary: items[0]?.querySelector(".leovale-sheet-vh-item-summary")?.textContent,
+				},
+				hint: m.querySelector(".leovale-sheet-vh-hint")?.textContent,
+				restoreDisabled: [...m.querySelectorAll("button")]
+					.find((b) => b.textContent === "Restore")
+					?.hasAttribute("disabled"),
+			};
+		});
+		console.log("  modal:", JSON.stringify(modal));
+		check("the dialog opened with a list of versions", (modal?.items ?? 0) > 3, JSON.stringify(modal));
+		check(
+			"each row carries a time, a size and what changed",
+			/\d\d:\d\d/.test(modal?.first.time ?? "") &&
+				/KB/.test(modal?.first.size ?? "") &&
+				(modal?.first.summary ?? "").length > 0,
+			JSON.stringify(modal?.first),
+		);
+		check(
+			"nothing is selected yet, so Restore cannot be pressed",
+			modal?.restoreDisabled === true && (modal?.hint ?? "").length > 0,
+			JSON.stringify(modal),
+		);
+		await shot(page, "66-version-history-empty-preview");
+
+		// The version BELOW the newest is the MARKER-OLD state written a moment
+		// ago (the newest is the document as it stands). Selecting it must show
+		// that one, read-only.
+		const previewState = await page.evaluate(async () => {
+			const items = [...document.querySelectorAll(".leovale-sheet-vh-item")];
+			items[1].click();
+			await new Promise((r) => setTimeout(r, 900));
+			const root = document.querySelector(".leovale-sheet-vh-preview .leovale-sheet-root");
+			const cells = [...(root?.querySelectorAll("tbody td[data-x]") ?? [])].map(
+				(td) => td.textContent,
+			);
+			return {
+				mounted: !!root,
+				cells,
+				readOnly: !!root?.querySelector("td.readonly, table.jss_worksheet"),
+				editable: !!root?.querySelector("td[contenteditable='true']"),
+				selected: document.querySelectorAll(".leovale-sheet-vh-item.is-selected").length,
+			};
+		});
+		console.log("  preview:", JSON.stringify(previewState));
+		check("picking a version mounts a grid of it", previewState.mounted && previewState.cells.length > 0, JSON.stringify(previewState));
+		check(
+			"the preview shows THAT version, not the document on screen",
+			previewState.cells.join("|").includes("MARKER-OLD") &&
+				!previewState.cells.join("|").includes("MARKER-NEW"),
+			previewState.cells.join("|").slice(0, 200),
+		);
+		check("the preview is read-only", previewState.editable === false && previewState.selected === 1);
+		await shot(page, "67-version-history-preview");
+
+		await setBaseTheme(page, "obsidian");
+		await page.waitForTimeout(900);
+		await shot(page, "68-version-history-dark");
+		await setBaseTheme(page, "moonstone");
+		await page.waitForTimeout(700);
+
+		const restoredVersion = await page.evaluate(async () => {
+			const button = [...document.querySelectorAll(".modal button")].find(
+				(b) => b.textContent === "Restore",
+			);
+			button.click();
+			await new Promise((r) => setTimeout(r, 1200));
+			return {
+				closed: !document.querySelector(".modal.leovale-sheet-vh-modal"),
+				notice: [...document.querySelectorAll(".notice")].map((n) => n.textContent).join(" | "),
+			};
+		});
+		await flushSheet();
+		const afterRestore = readDisk();
+		check("Restore closes the dialog and says what it did", restoredVersion.closed && /Restored/.test(restoredVersion.notice),
+			JSON.stringify(restoredVersion));
+		check(
+			"the restored document is on disk, and it is the older one",
+			afterRestore === markerOld,
+			firstDiff(markerOld, afterRestore),
+		);
+		check(
+			"and what the newer state had is gone from it",
+			!afterRestore.includes("MARKER-NEW"),
+			afterRestore.split("\n").filter((l) => /MARKER/.test(l)).join(" | "),
+		);
+
+		await page.click(selCell(0, 0));
+		await page.waitForTimeout(200);
+		await page.keyboard.press("Control+z");
+		await page.waitForTimeout(800);
+		await flushSheet();
+		check(
+			"a restore is itself one undo step: Ctrl+Z brings the document back",
+			readDisk() === current,
+			firstDiff(current, readDisk()),
+		);
+
+		step("1.7.0: a version can be deleted, and the log shrinks");
+		const deletion = await page.evaluate(async (id) => {
+			window.app.commands.executeCommandById(`${id}:version-history`);
+			await new Promise((r) => setTimeout(r, 1000));
+			const before = document.querySelectorAll(".leovale-sheet-vh-item").length;
+			const items = [...document.querySelectorAll(".leovale-sheet-vh-item")];
+			const victim = items[items.length - 1].getAttribute("data-id");
+			items[items.length - 1].click();
+			await new Promise((r) => setTimeout(r, 700));
+			[...document.querySelectorAll(".modal button")].find((b) => b.textContent === "Delete").click();
+			await new Promise((r) => setTimeout(r, 500));
+			// The confirm is our own modal, not window.confirm().
+			const confirmText = document.querySelector(".leovale-sheet-confirm-body")?.textContent ?? "";
+			[...document.querySelectorAll(".modal button")]
+				.filter((b) => b.textContent === "Delete")
+				.pop()
+				.click();
+			await new Promise((r) => setTimeout(r, 900));
+			const after = document.querySelectorAll(".leovale-sheet-vh-item").length;
+			const root = `${window.app.vault.configDir}/plugins/leovale-sheets/backups`;
+			const dirs = (await window.app.vault.adapter.list(root)).folders;
+			let stillOnDisk = false;
+			for (const dir of dirs) {
+				const files = (await window.app.vault.adapter.list(dir)).files;
+				if (files.some((f) => f.includes(victim))) stillOnDisk = true;
+			}
+			document.querySelector(".modal-close-button")?.click();
+			await new Promise((r) => setTimeout(r, 400));
+			return { before, after, confirmText, stillOnDisk };
+		}, PLUGIN_ID);
+		console.log("  deletion:", JSON.stringify(deletion));
+		check("deleting asks first, in our own themed dialog", deletion.confirmText.length > 0, deletion.confirmText);
+		check("the version is gone from the list", deletion.after === deletion.before - 1,
+			`${deletion.before} -> ${deletion.after}`);
+		check("and its payload is gone from the disk", deletion.stillOnDisk === false);
+
+		step("1.7.0: undo in an Obsidian pop-out window");
+		const histPagesBefore = new Set(ctx.pages());
+		await page.evaluate(async (p) => {
+			const app = window.app;
+			app.workspace.detachLeavesOfType("leovale-sheet-view");
+			await new Promise((r) => setTimeout(r, 500));
+			const leaf = app.workspace.openPopoutLeaf();
+			await leaf.openFile(app.vault.getAbstractFileByPath(p));
+		}, HIST_PATH);
+		let histPopout = null;
+		for (let i = 0; i < 40 && !histPopout; i++) {
+			await page.waitForTimeout(500);
+			histPopout = ctx.pages().find((q) => !histPagesBefore.has(q));
+		}
+		check("the pop-out opened", !!histPopout);
+		if (histPopout) {
+			await histPopout.waitForTimeout(1800);
+			await installViewIndex(histPopout);
+			const popBase = readDisk();
+			await histPopout.click(selCell(2, 6));
+			await histPopout.waitForTimeout(200);
+			await histPopout.keyboard.type("popout", { delay: 12 });
+			await histPopout.keyboard.press("Enter");
+			await histPopout.waitForTimeout(400);
+			await flushSheet(histPopout);
+			const popEdited = readDisk();
+			check("the pop-out edit reached the file", popEdited !== popBase, `${popBase.length} -> ${popEdited.length}`);
+
+			await histPopout.click(selCell(0, 0));
+			await histPopout.waitForTimeout(200);
+			await histPopout.keyboard.press("Control+z");
+			await histPopout.waitForTimeout(800);
+			await flushSheet(histPopout);
+			check(
+				"Ctrl+Z works in a pop-out too, byte for byte",
+				readDisk() === popBase,
+				firstDiff(popBase, readDisk()),
+			);
+			const popToolbar = await btnState(histPopout);
+			check("the pop-out has its own live undo/redo buttons", popToolbar.undo && popToolbar.redoOff === false,
+				JSON.stringify(popToolbar));
+			await histPopout.screenshot({
+				path: path.join(SHOTS, "69-history-popout.png"),
+			});
+			shots.push(path.join(SHOTS, "69-history-popout.png"));
+			await page.evaluate(() => {
+				for (const l of window.app.workspace.getLeavesOfType("leovale-sheet-view")) l.detach();
+			});
+			await page.waitForTimeout(1200);
+		}
+
+		step("1.7.0: does Obsidian's own File Recovery keep .sheet snapshots?");
+		/*
+		 * Empirical, in this sandbox, because the answer decides whether this
+		 * whole feature duplicates a core one.
+		 *
+		 * The core plugin keeps its snapshots in an IndexedDB called
+		 * `<vault id>-backup`, store `backups`, rows of `{path, ts, data}` -
+		 * found by listing the databases rather than by guessing a name. The
+		 * probe writes a NOTE and a SPREADSHEET through the same `vault.modify`
+		 * within the same second, so a `.sheet` missing from the result cannot
+		 * be blamed on the probe.
+		 */
+		const recovery = await page.evaluate(async () => {
+			const app = window.app;
+			const internal = app.internalPlugins?.getPluginById?.("file-recovery");
+			const enabled = !!internal?.enabled;
+			const seed =
+				'{\n\t"format": "leovale-sheet",\n\t"version": 4,\n\t"sheets": [\n\t\t{\n' +
+				'\t\t\t"name": "Sheet1",\n\t\t\t"rows": 3,\n\t\t\t"cols": 3,\n\t\t\t"colWidths": {},\n' +
+				'\t\t\t"rowHeights": {},\n\t\t\t"merges": {},\n\t\t\t"view": {},\n\t\t\t"freeze": {},\n' +
+				'\t\t\t"cells": {\n\t\t\t\t"A1": { "v": "one" }\n\t\t\t}\n\t\t}\n\t]\n}\n';
+			for (const p of ["recovery-probe.md", "recovery-probe.sheet"]) {
+				const old = app.vault.getAbstractFileByPath(p);
+				if (old) await app.vault.delete(old);
+			}
+			const note = await app.vault.create("recovery-probe.md", "# probe\n");
+			const sheet = await app.vault.create("recovery-probe.sheet", seed);
+			await new Promise((r) => setTimeout(r, 1500));
+			await app.vault.modify(note, "# probe\n\nedited\n");
+			await app.vault.modify(sheet, seed.replace('"one"', '"two"'));
+			await new Promise((r) => setTimeout(r, 4000));
+
+			const dbName = (await indexedDB.databases())
+				.map((d) => d.name)
+				.find((n) => typeof n === "string" && n.endsWith("-backup"));
+			const dump = await new Promise((resolve) => {
+				if (!dbName) return resolve({ rows: [], names: [] });
+				const req = indexedDB.open(dbName);
+				req.onerror = () => resolve({ error: String(req.error), rows: [] });
+				req.onsuccess = () => {
+					const db = req.result;
+					const names = [...db.objectStoreNames];
+					if (names.length === 0) return resolve({ names, rows: [] });
+					const tx = db.transaction(names[0], "readonly");
+					const all = tx.objectStore(names[0]).getAll();
+					all.onsuccess = () =>
+						resolve({
+							names,
+							rows: (all.result ?? []).map((r) => String(r.path ?? r.file ?? "")),
+						});
+					all.onerror = () => resolve({ names, rows: [], error: String(all.error) });
+				};
+			});
+			for (const p of ["recovery-probe.md", "recovery-probe.sheet"]) {
+				const old = app.vault.getAbstractFileByPath(p);
+				if (old) await app.vault.delete(old);
+			}
+			const paths = dump.rows ?? [];
+			return {
+				enabled,
+				db: dbName ?? null,
+				stores: dump.names ?? [],
+				total: paths.length,
+				md: paths.filter((s) => s === "recovery-probe.md").length,
+				sheet: paths.filter((s) => s === "recovery-probe.sheet").length,
+				anySheet: paths.filter((s) => s.endsWith(".sheet")).length,
+				sample: paths.slice(0, 5),
+				error: dump.error ?? null,
+			};
+		});
+		console.log("  File Recovery:", JSON.stringify(recovery));
+		check(
+			"the File Recovery database was found and holds the probe NOTE",
+			recovery.md > 0,
+			JSON.stringify(recovery),
+		);
+		check(
+			"...and NOT the .sheet written through the same call in the same second",
+			recovery.sheet === 0,
+			JSON.stringify(recovery),
+		);
+
+		await page.evaluate(async (p) => {
+			const app = window.app;
+			app.workspace.detachLeavesOfType("leovale-sheet-view");
+			const f = app.vault.getAbstractFileByPath(p);
+			if (f) await app.vault.delete(f);
+		}, HIST_PATH);
+		await page.waitForTimeout(500);
+
 		const realErrors = pageErrors.filter(
 			(e) =>
 				!/Failed to load resource|net::ERR|DevTools|Autofill/.test(e) &&
 				// the guard test deliberately throws inside a fake engine
-				!/serialize failed Error: boom/.test(e),
+				!/serialize failed Error: boom/.test(e) &&
+				// ...and the save-indicator test deliberately breaks vault.modify
+				!/the disk said no/.test(e),
 		);
 		check("no console errors / page errors", realErrors.length === 0, realErrors.slice(0, 5).join(" | "));
 	} finally {

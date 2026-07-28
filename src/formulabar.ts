@@ -207,6 +207,18 @@ export class SheetFormulaBar {
 		this.input.focus();
 	}
 
+	/**
+	 * The strip itself.
+	 *
+	 * The save indicator hangs off it (right-aligned, after the CSV badge): it
+	 * belongs to the file rather than to the selection, and this is the one row
+	 * of chrome that is always visible and never scrolls sideways - the toolbar
+	 * does, and a status that can scroll out of sight is not a status.
+	 */
+	rowEl(): HTMLElement {
+		return this.el;
+	}
+
 	destroy(): void {
 		// Disarm first: detaching a focused input can still run our blur handler,
 		// and by then the view may already be mounting another document.

@@ -206,6 +206,7 @@ test("t() works for every locale and every key without throwing", () => {
 				total: 5,
 				sheets: 2,
 				cells: 17,
+				time: "14:03",
 			});
 			assert.ok(value.length > 0, `${code}.${key} rendered empty`);
 			assert.ok(!/\{\w+\}/.test(value), `${code}.${key} left a placeholder: ${value}`);

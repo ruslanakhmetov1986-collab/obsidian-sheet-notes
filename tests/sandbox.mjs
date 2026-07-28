@@ -12,7 +12,16 @@ import { fileURLToPath } from "node:url";
 import { spawn, execFileSync } from "node:child_process";
 
 export const PROJECT_ROOT = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
-export const SANDBOX = path.join(PROJECT_ROOT, ".sandbox");
+/**
+ * Home of the throwaway Obsidian: its user-data-dir, its vault, its logs.
+ *
+ * `SHEETS_SANDBOX_DIR` renames it, for the same reason `SHEETS_CDP_PORT`
+ * exists: two checkouts of this repo (a worktree building the next release
+ * beside the one on master) run their suites at the same time, and they must
+ * not share a folder, a port, or - see {@link sandboxPids} - each other's
+ * processes. Unset, everything is exactly as it was.
+ */
+export const SANDBOX = path.resolve(PROJECT_ROOT, process.env.SHEETS_SANDBOX_DIR || ".sandbox");
 export const UDATA = path.join(SANDBOX, "udata");
 export const VAULT = path.join(SANDBOX, "test-vault");
 export const PLUGIN_DIR = path.join(VAULT, ".obsidian", "plugins", "leovale-sheets");
@@ -93,11 +102,19 @@ export function deployPlugin() {
 }
 
 function sandboxPids() {
-	// Same rule as on Windows: only processes whose command line names OUR
-	// --user-data-dir, so a developer's real Obsidian is never in the list.
+	// THIS sandbox's own --user-data-dir, spelled out in full, and never a
+	// looser pattern. `*.sandbox*` used to be the filter, and it matched every
+	// checkout on the machine: a second working copy of this repo (a git
+	// worktree, a release branch built side by side) has a `.sandbox` of its own
+	// under a different path, so one suite's `--fresh` killed the other suite's
+	// Obsidian in the middle of its run. Verified failure: "Target page, context
+	// or browser has been closed" in a run nothing was wrong with.
+	const mine = path.resolve(UDATA);
 	if (ON_LINUX) {
 		try {
-			const out = execFileSync("pgrep", ["-f", "\\.sandbox/udata"], { encoding: "utf8" });
+			const out = execFileSync("pgrep", ["-f", mine.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")], {
+				encoding: "utf8",
+			});
 			return out
 				.split(/\r?\n/)
 				.map((s) => s.trim())
@@ -116,7 +133,7 @@ function sandboxPids() {
 				"-NonInteractive",
 				"-Command",
 				"Get-CimInstance Win32_Process -Filter \"Name='Obsidian.exe'\" | " +
-					"Where-Object { $_.CommandLine -like '*.sandbox*' } | " +
+					`Where-Object { $_.CommandLine -like '*${mine.replace(/'/g, "''")}*' } | ` +
 					"Select-Object -ExpandProperty ProcessId",
 			],
 			{ encoding: "utf8" },

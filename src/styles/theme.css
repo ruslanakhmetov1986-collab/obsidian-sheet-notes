@@ -1504,6 +1504,183 @@ body.is-mobile .leovale-sheet-root input.leovale-sheet-cb {
 	color: color-mix(in srgb, var(--link-color, var(--text-accent)) 72%, #ffffff);
 }
 
+/* ---- save indicator (right end of the formula bar) ---------------------
+ *
+ * Google Docs' line, in Obsidian's colours: muted while everything is fine,
+ * `--text-error` and clickable when a write failed. It is the last child of the
+ * formula-bar row, so `margin-left: auto` is what pins it to the right edge
+ * whatever else that row is carrying (the CSV badge, a long formula).
+ * ---------------------------------------------------------------------- */
+
+.leovale-sheet-save-state {
+	flex: 0 0 auto;
+	margin-left: auto;
+	padding-left: 8px;
+	white-space: nowrap;
+	color: var(--text-faint);
+	font-size: var(--font-ui-smaller);
+	user-select: none;
+}
+
+/* Pending work reads a shade stronger than a finished save, without shouting. */
+.leovale-sheet-save-state.is-busy {
+	color: var(--text-muted);
+}
+
+/* A failed write is the one state here that is not decoration: it stays until a
+   save succeeds, and a click on it opens the notice with the actual error. */
+.leovale-sheet-save-state.is-error {
+	color: var(--text-error);
+	font-weight: var(--font-semibold, 600);
+	cursor: pointer;
+}
+
+.leovale-sheet-save-state.is-error:hover {
+	text-decoration: underline;
+}
+
+/* Nothing to say yet: the strip keeps its layout, the text does not appear. */
+.leovale-sheet-save-state.is-hidden {
+	visibility: hidden;
+}
+
+/* ---- version history dialog --------------------------------------------
+ *
+ * Two panes: the log on the left, a read-only preview of the selected version
+ * on the right. The preview is the same grid mount an embedded sheet uses, so
+ * everything inside it is already themed; the rules here are only about the
+ * frame around it.
+ * ---------------------------------------------------------------------- */
+
+.modal.leovale-sheet-vh-modal {
+	width: min(920px, 92vw);
+	max-width: 92vw;
+}
+
+.leovale-sheet-vh-body {
+	display: flex;
+	gap: 12px;
+	align-items: stretch;
+	height: min(56vh, 460px);
+	font-family: var(--font-interface);
+}
+
+.leovale-sheet-vh-list {
+	flex: 0 0 42%;
+	overflow-y: auto;
+	padding-right: 4px;
+	border-right: 1px solid var(--background-modifier-border);
+}
+
+.leovale-sheet-vh-count {
+	padding: 2px 6px 6px;
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+}
+
+.leovale-sheet-vh-empty {
+	padding: 12px 6px;
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+}
+
+.leovale-sheet-vh-item {
+	padding: 6px 8px;
+	border-radius: 6px;
+	cursor: pointer;
+}
+
+.leovale-sheet-vh-item:hover {
+	background-color: var(--background-modifier-hover);
+}
+
+.leovale-sheet-vh-item.is-selected {
+	background-color: var(--background-modifier-active-hover, var(--background-modifier-hover));
+	box-shadow: inset 2px 0 0 var(--interactive-accent);
+}
+
+.leovale-sheet-vh-item-head {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+}
+
+.leovale-sheet-vh-item-icon {
+	display: inline-flex;
+	align-items: center;
+	color: var(--text-muted);
+}
+
+.leovale-sheet-vh-item-icon svg {
+	width: 14px;
+	height: 14px;
+}
+
+.leovale-sheet-vh-item-time {
+	color: var(--text-normal);
+	font-size: var(--font-ui-small);
+}
+
+.leovale-sheet-vh-item-size {
+	margin-left: auto;
+	color: var(--text-faint);
+	font-size: var(--font-ui-smaller);
+	font-variant-numeric: tabular-nums;
+}
+
+.leovale-sheet-vh-item-summary {
+	margin-top: 2px;
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.leovale-sheet-vh-preview {
+	flex: 1 1 auto;
+	min-width: 0;
+	overflow: auto;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 6px;
+	background-color: var(--background-primary);
+}
+
+.leovale-sheet-vh-hint,
+.leovale-sheet-vh-error {
+	padding: 12px;
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+}
+
+.leovale-sheet-vh-error {
+	color: var(--text-error);
+}
+
+/* The action row hugs the right edge, like every other dialog here. */
+.leovale-sheet-vh .setting-item.leovale-sheet-vh-actions {
+	padding-bottom: 0;
+	border-top: none;
+}
+
+/* A phone has no room for two panes; the preview goes under the log. */
+body.is-mobile .leovale-sheet-vh-body {
+	flex-direction: column;
+	height: auto;
+}
+
+body.is-mobile .leovale-sheet-vh-list {
+	flex: 0 0 auto;
+	max-height: 40vh;
+	padding-right: 0;
+	border-right: none;
+	border-bottom: 1px solid var(--background-modifier-border);
+}
+
+body.is-mobile .leovale-sheet-vh-preview {
+	min-height: 200px;
+}
+
 /* ---- printing (Ctrl+P / "Sheets: Print spreadsheet") -------------------
  *
  * A spreadsheet on paper is the grid and nothing else. The rules below are the

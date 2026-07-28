@@ -8,6 +8,8 @@ import {
 } from "obsidian";
 import { SheetView, VIEW_TYPE_SHEET } from "./view";
 import { releaseEngineGlobals } from "./engine";
+import { VersionHistoryModal } from "./versionmodal";
+import { backupStore, releaseBackupStore } from "./versions";
 import { registerSheetEmbeds } from "./embed";
 import { newSheetDoc, parseSheet, serializeSheet } from "./format";
 import {
@@ -132,6 +134,44 @@ export default class LeovaleSheetsPlugin extends Plugin {
 			},
 		});
 
+		// --- 1.7.0: document-level history ------------------------------------
+		// Plain commands rather than editor commands, for the same reason the
+		// Markdown ones above are: they act on the spreadsheet view. Registering
+		// them is also what makes the shortcuts re-bindable in Settings ->
+		// Hotkeys; the view's own Scope handles the default Ctrl+Z/Ctrl+Y.
+		this.addCommand({
+			id: "undo-sheet",
+			name: "Undo spreadsheet change",
+			checkCallback: (checking: boolean) => {
+				const view = this.app.workspace.getActiveViewOfType(SheetView);
+				if (!view) return false;
+				if (!checking) view.undoStep();
+				return true;
+			},
+		});
+
+		this.addCommand({
+			id: "redo-sheet",
+			name: "Redo spreadsheet change",
+			checkCallback: (checking: boolean) => {
+				const view = this.app.workspace.getActiveViewOfType(SheetView);
+				if (!view) return false;
+				if (!checking) view.redoStep();
+				return true;
+			},
+		});
+
+		this.addCommand({
+			id: "version-history",
+			name: "Version history",
+			checkCallback: (checking: boolean) => {
+				const file = this.app.workspace.getActiveViewOfType(SheetView)?.file;
+				if (!file) return false;
+				if (!checking) void openVersionHistory(this.app, file);
+				return true;
+			},
+		});
+
 		this.addCommand({
 			id: "find-in-sheet",
 			name: "Find in spreadsheet",
@@ -230,6 +270,14 @@ export default class LeovaleSheetsPlugin extends Plugin {
 							.setIcon("file-spreadsheet")
 							.onClick(() => void exportSheetFile(this.app, file)),
 					);
+					// The version log is kept for our own format only, so this is
+					// exactly where it belongs: on a file that has one.
+					menu.addItem((item) =>
+						item
+							.setTitle(t("vhTitle"))
+							.setIcon("history")
+							.onClick(() => void openVersionHistory(this.app, file)),
+					);
 				} else if (ext === XLSX_EXT) {
 					menu.addItem((item) =>
 						item
@@ -279,12 +327,56 @@ export default class LeovaleSheetsPlugin extends Plugin {
 				}
 			}
 		}
+		// The version store caches a byte total for the whole tree; a reload of the
+		// plugin must not carry it into a vault that may have been swapped.
+		releaseBackupStore();
 		// And the handlers this copy of the engine put on `document`, which no
 		// individual grid teardown is allowed to remove any more. Deliberately not
 		// awaited (onunload is synchronous): the module's closures outlive the
 		// plugin object, so the removal still lands on the right functions.
 		void releaseEngineGlobals();
 	}
+}
+
+/**
+ * Open the version history of a spreadsheet.
+ *
+ * The file is OPENED FIRST if it is not on screen already, and that is not
+ * convenience: restoring a version goes through the view's normal save path
+ * (which is what makes a restore undoable and snapshotted like any other
+ * change), so there has to be a view. It also means the user sees what they are
+ * about to replace, next to the version they are replacing it with.
+ */
+export async function openVersionHistory(app: App, file: TFile): Promise<void> {
+	let view = findSheetView(app, file);
+	if (!view) {
+		await app.workspace.getLeaf(false).openFile(file);
+		// The view mounts synchronously enough in practice, but not always: a
+		// deferred leaf can still be building when openFile resolves.
+		for (let i = 0; i < 20 && !view; i++) {
+			await new Promise((r) => setTimeout(r, 50));
+			view = findSheetView(app, file);
+		}
+	}
+	if (!view) {
+		new Notice(t("vhNoView"), 8000);
+		return;
+	}
+	const target = view;
+	new VersionHistoryModal(app, {
+		path: file.path,
+		store: backupStore(app),
+		restore: (text) => target.restoreVersion(text),
+	}).open();
+}
+
+/** The open spreadsheet view showing this file, if there is one. */
+function findSheetView(app: App, file: TFile): SheetView | null {
+	for (const leaf of app.workspace.getLeavesOfType(VIEW_TYPE_SHEET)) {
+		const view = leaf.view;
+		if (view instanceof SheetView && view.file?.path === file.path) return view;
+	}
+	return null;
 }
 
 /**
