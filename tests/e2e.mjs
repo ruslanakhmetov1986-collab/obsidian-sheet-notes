@@ -6603,6 +6603,294 @@ async function main() {
 			{ redoKey: "Control+Shift+z" },
 		);
 
+		/* ==================================================================
+		 * 1.7.x: a checkbox can be taken OFF again
+		 *
+		 * The bug report: pressing the toolbar's checkbox button on a cell that
+		 * already IS a checkbox "just shows false and the cell stays a checkbox
+		 * forever". Three faults behind it, and each has its own checks below:
+		 *
+		 *  - the type came off but the BOOLEAN stayed, so the cell showed the
+		 *    word `false` and the file kept `{ "v": false }` - which is a cell
+		 *    with content, i.e. exactly what "it did nothing" looks like;
+		 *  - Delete cleared the value and left the type, so an emptied checkbox
+		 *    came straight back as an unticked box;
+		 *  - the button was lit off the FIRST cell of the selection while the
+		 *    press acted on "is any of them not a checkbox", so on a mixed range
+		 *    a lit button made even more checkboxes.
+		 *
+		 * Everything here is measured on the FILE (the type and the value are
+		 * two different keys of one cell) and on the rendered cell, never on the
+		 * engine's own state.
+		 * ================================================================== */
+		const cbBtn = ".leovale-sheet-content .leovale-sheet-tb-checkbox";
+		const cbSectionStart = readDisk();
+		/** Select a cell by its top-left corner: the tick box sits in the middle. */
+		const selectCell = async (x, y) => {
+			await page.click(selCell(x, y), { position: { x: 4, y: 4 } });
+			await page.waitForTimeout(180);
+		};
+		const cbState = (x, y) =>
+			page.evaluate(
+				([sel, btn]) => {
+					const el = document.querySelector(sel);
+					const box = el?.querySelector("input.leovale-sheet-cb") ?? null;
+					return {
+						type: el?.getAttribute("data-ct") ?? null,
+						box: !!box,
+						checked: !!box?.checked,
+						text: (el?.textContent ?? "").trim(),
+						active: !!document.querySelector(btn)?.classList.contains("is-active"),
+					};
+				},
+				[selCell(x, y), cbBtn],
+			);
+		const fileLine = (ref) =>
+			readDisk()
+				.split("\n")
+				.filter((l) => l.includes(`"${ref}"`))
+				.join(" | ") || "(not in the file)";
+		/** Make the selected cell a checkbox with the toolbar button. */
+		const pressCbButton = async () => {
+			await page.click(cbBtn);
+			await page.waitForTimeout(500);
+		};
+
+		step("1.7.x: a checkbox that HAS a value, taken off by the same button");
+		await selectCell(3, 7); // D8, empty
+		await pressCbButton();
+		await page.click(`${selCell(3, 7)} input.leovale-sheet-cb`); // tick it
+		await page.waitForTimeout(300);
+		await flushSheet();
+		const cbTicked = await cbState(3, 7);
+		check("D8 starts as a TICKED checkbox", cbTicked.box && cbTicked.checked, JSON.stringify(cbTicked));
+		check(
+			"...and the file holds both its value and its type",
+			/"D8": \{ "v": true, "t": "cb" \}/.test(readDisk()),
+			fileLine("D8"),
+		);
+		await selectCell(3, 7);
+		const lit = await cbState(3, 7);
+		check("the button is lit while that checkbox is selected", lit.active === true, JSON.stringify(lit));
+
+		const removed = await undoRoundTrip("checkbox taken off", async () => {
+			await selectCell(3, 7);
+			await pressCbButton();
+		});
+		const plainAgain = await cbState(3, 7);
+		check(
+			"the box is gone from the cell",
+			plainAgain.box === false && plainAgain.type === null,
+			JSON.stringify(plainAgain),
+		);
+		check(
+			'and it left NO "true"/"false" text sitting in the cell',
+			plainAgain.text === "",
+			JSON.stringify(plainAgain),
+		);
+		check("the button went dark with it", plainAgain.active === false, JSON.stringify(plainAgain));
+		check(
+			"the file dropped the TYPE and the VALUE, so the cell is simply gone",
+			!removed.includes('"D8"'),
+			fileLine("D8"),
+		);
+
+		step("1.7.x: Delete on a checkbox cell empties it COMPLETELY");
+		await selectCell(3, 8); // D9
+		await pressCbButton();
+		await page.click(`${selCell(3, 8)} input.leovale-sheet-cb`);
+		await page.waitForTimeout(300);
+		await flushSheet();
+		check(
+			"D9 is a ticked checkbox to start with",
+			/"D9": \{ "v": true, "t": "cb" \}/.test(readDisk()),
+			fileLine("D9"),
+		);
+		const deleted = await undoRoundTrip("Delete on a checkbox", async () => {
+			await selectCell(3, 8);
+			await page.keyboard.press("Delete");
+			await page.waitForTimeout(500);
+		});
+		const cbAfterDelete = await cbState(3, 8);
+		check(
+			"Delete left a plain empty cell, not an unticked box",
+			cbAfterDelete.box === false && cbAfterDelete.type === null && cbAfterDelete.text === "",
+			JSON.stringify(cbAfterDelete),
+		);
+		check(
+			"and the cell is gone from the file entirely",
+			!deleted.includes('"D9"'),
+			fileLine("D9"),
+		);
+
+		step("1.7.x: the same over a RANGE, with Backspace");
+		await typeInCell(page, 2, 9, "text"); // C10
+		await selectCell(3, 9); // D10
+		await pressCbButton();
+		await flushSheet();
+		check(
+			"the range holds a word and an untouched checkbox",
+			/"C10": \{ "v": "text" \}/.test(readDisk()) && /"D10": \{ "v": false, "t": "cb" \}/.test(readDisk()),
+			`${fileLine("C10")} | ${fileLine("D10")}`,
+		);
+		await dragSelect(page, 2, 9, 3, 9);
+		await page.keyboard.press("Backspace");
+		await page.waitForTimeout(500);
+		await flushSheet();
+		const rangeCleared = { left: await cbState(2, 9), right: await cbState(3, 9) };
+		check(
+			"Backspace cleared the whole range, the type included",
+			rangeCleared.right.box === false && rangeCleared.right.type === null &&
+				rangeCleared.left.text === "",
+			JSON.stringify(rangeCleared),
+		);
+		check(
+			"neither cell is left in the file",
+			!readDisk().includes('"C10"') && !readDisk().includes('"D10"'),
+			`${fileLine("C10")} | ${fileLine("D10")}`,
+		);
+
+		step("1.7.x: a MIXED selection: one press makes them all, the next takes them all off");
+		// The checkbox is the TOP-LEFT cell of the range on purpose: a selection
+		// is always handed over in row-major order, so that is the cell the
+		// button used to read - and reading it alone is what lit the button on a
+		// range whose press would add checkboxes rather than remove them.
+		await selectCell(2, 7); // C8 alone becomes a checkbox again
+		await pressCbButton();
+		await flushSheet();
+		await dragSelect(page, 2, 7, 3, 7); // C8 (checkbox) + D8 (empty)
+		const cbMixed = await cbState(2, 7);
+		check(
+			"the button is DARK on a mixed selection, so the direction is predictable",
+			cbMixed.active === false,
+			JSON.stringify(cbMixed),
+		);
+		await pressCbButton();
+		const bothBoxes = { left: await cbState(2, 7), right: await cbState(3, 7) };
+		check(
+			"one press made every cell of the range a checkbox",
+			bothBoxes.left.box === true && bothBoxes.right.box === true,
+			JSON.stringify(bothBoxes),
+		);
+		check("...and only now is the button lit", bothBoxes.right.active === true, JSON.stringify(bothBoxes));
+		await pressCbButton();
+		await flushSheet();
+		const bothPlain = { left: await cbState(2, 7), right: await cbState(3, 7) };
+		check(
+			"the second press took them all off again",
+			bothPlain.left.box === false && bothPlain.right.box === false &&
+				bothPlain.left.type === null && bothPlain.right.type === null,
+			JSON.stringify(bothPlain),
+		);
+		check(
+			"with no booleans printed into the cells",
+			bothPlain.left.text === "" && bothPlain.right.text === "",
+			JSON.stringify(bothPlain),
+		);
+		check(
+			"and the file kept neither the type nor the value",
+			!readDisk().includes('"C8"') && !readDisk().includes('"D8"'),
+			`${fileLine("C8")} | ${fileLine("D8")}`,
+		);
+
+		step("1.7.x: cutting a checkbox leaves a plain cell behind, not an empty box");
+		await selectCell(3, 7);
+		await pressCbButton();
+		await page.click(`${selCell(3, 7)} input.leovale-sheet-cb`);
+		await page.waitForTimeout(300);
+		await flushSheet();
+		await selectCell(3, 7);
+		await page.keyboard.press("Control+x");
+		await page.waitForTimeout(300);
+		await selectCell(3, 9);
+		await page.keyboard.press("Control+v");
+		await page.waitForTimeout(800);
+		await flushSheet();
+		const cutSrc = await cbState(3, 7);
+		const cutDst = await cbState(3, 9);
+		check(
+			"the checkbox arrived at the destination, ticked",
+			cutDst.box === true && cutDst.checked === true,
+			JSON.stringify(cutDst),
+		);
+		check(
+			"the source is a plain cell, not an empty checkbox",
+			cutSrc.box === false && cutSrc.type === null && cutSrc.text === "",
+			JSON.stringify(cutSrc),
+		);
+		check("and the source is not in the file at all", !readDisk().includes('"D8"'), fileLine("D8"));
+
+		step("1.7.x: taking the type off a FORMULA cell keeps the formula");
+		// The value a checkbox holds is a boolean put there for the box, and it
+		// is ours to clear. A formula the user typed is not: clearing it on a
+		// toolbar press would be silent data loss.
+		await typeInCell(page, 3, 7, "=1+1"); // D8
+		await selectCell(3, 7);
+		await pressCbButton();
+		await flushSheet();
+		check(
+			"the formula cell became a checkbox and kept its formula",
+			/"D8": \{ "f": "=1\+1", "t": "cb" \}/.test(readDisk()),
+			fileLine("D8"),
+		);
+		await selectCell(3, 7);
+		await pressCbButton();
+		await flushSheet();
+		check(
+			"and taking the checkbox off left the formula alone",
+			/"D8": \{ "f": "=1\+1" \}/.test(readDisk()),
+			fileLine("D8"),
+		);
+		await selectCell(3, 7);
+		await page.keyboard.press("Delete");
+		await page.waitForTimeout(400);
+		await flushSheet();
+
+		step("1.7.x: the pressed state of the checkbox button is really PAINTED");
+		/*
+		 * DOM-only proof that the button "shows" its state is exactly the class
+		 * of test that let an invisible palette ship three releases running. The
+		 * lit button is measured through the compositor in both themes: the same
+		 * button, same size, same glyph, selection moved from a checkbox cell to
+		 * a plain one, so the only difference in the pixels is `is-active`.
+		 */
+		const cbPaintDelta = async (label) => {
+			await selectCell(3, 9); // the checkbox that arrived in D10
+			const on = await avgColor(cdp, page, cbBtn);
+			const onCls = (await cbState(3, 9)).active;
+			await selectCell(0, 0); // a plain cell
+			const off = await avgColor(cdp, page, cbBtn);
+			const offCls = (await cbState(0, 0)).active;
+			const delta = colorDelta(on, off);
+			console.log(`  checkbox button paint (${label}):`, JSON.stringify({ on, off, delta }));
+			check(
+				`${label}: the button says "this cell is a checkbox" in PIXELS, not just in a class`,
+				onCls === true && offCls === false && delta >= 6,
+				JSON.stringify({ on, off, delta, onCls, offCls }),
+			);
+		};
+		await cbPaintDelta("light");
+		await selectCell(3, 9);
+		await shot(page, "70-checkbox-button-active-light");
+		await setBaseTheme(page, "obsidian");
+		await page.waitForTimeout(700);
+		await cbPaintDelta("dark");
+		await selectCell(3, 9);
+		await shot(page, "71-checkbox-button-active-dark");
+		await setBaseTheme(page, "moonstone");
+		await page.waitForTimeout(600);
+
+		step("1.7.x: the checkbox section leaves the document exactly as it found it");
+		await selectCell(3, 9);
+		await page.keyboard.press("Delete");
+		await page.waitForTimeout(400);
+		await flushSheet();
+		check(
+			"every cell this section touched is back to nothing",
+			readDisk() === cbSectionStart,
+			firstDiff(cbSectionStart, readDisk()),
+		);
+
 		step("1.7.0: one keystroke is exactly one step, three edits deep");
 		// The trap this catches: two undo stacks racing (the vendor's and ours),
 		// or a coalescing window wide enough to swallow a whole operation.

@@ -13,12 +13,15 @@ import { FILL_COLORS } from "./cellcss";
 import type { SheetEngine } from "./engine";
 import {
 	type CellStyle,
+	type CellType,
 	type HAlign,
 	MAX_FONT_SIZE,
 	MIN_FONT_SIZE,
 	type SortDir,
 	type VAlign,
 	colToName,
+	isAllCheckbox,
+	nextCheckboxType,
 	parseRef,
 } from "./format";
 import { freezeFromRef } from "./sheetops";
@@ -717,18 +720,41 @@ export class SheetToolbar {
 	}
 
 	/**
-	 * Checkbox cells. Same "any of them is off means turn them all on" rule as
-	 * Bold, and the values are left alone: a column of `true`/`false` becomes a
-	 * column of ticked boxes, and switching it back gives the words back.
+	 * Checkbox cells, as a real toggle.
+	 *
+	 * Same "any of them is off means turn them all on" rule as Bold, so the
+	 * second press on any selection takes every box off again - and the button's
+	 * lit state (see {@link sync}) is decided by the SAME question, so the
+	 * direction is never a guess.
+	 *
+	 * Taking the type off clears the value with it, which is what Google Sheets
+	 * does and what makes the toggle reversible: a checkbox's `false` is there
+	 * for the box, and a cell left holding it would show the WORD `false` and be
+	 * written to the file as content nobody typed. Undo brings both back
+	 * together (the history step is the whole document).
 	 */
 	private toggleCheckbox(): void {
 		const engine = this.getEngine();
 		if (!engine) return;
 		const refs = this.targetRefs();
 		if (refs.length === 0) return;
-		const makeCheckbox = refs.some((r) => engine.getCellType(r) !== "cb");
-		engine.setCellType(refs, makeCheckbox ? "cb" : null);
+		const next = nextCheckboxType(this.cellTypes(refs));
+		engine.setCellType(refs, next, next === null);
 		this.sync();
+	}
+
+	/**
+	 * The types of the selected cells, read one at a time.
+	 *
+	 * A generator rather than a `map`, because both callers stop at the first
+	 * cell that is not a checkbox and the selection can be a whole column: the
+	 * usual answer is decided after one lookup and nothing is allocated for the
+	 * rest.
+	 */
+	private *cellTypes(refs: string[]): Generator<CellType | undefined> {
+		const engine = this.getEngine();
+		if (!engine) return;
+		for (const ref of refs) yield engine.getCellType(ref);
 	}
 
 	/* -------------------------------------------------------------- popups */
@@ -962,10 +988,15 @@ export class SheetToolbar {
 		const mergeLabel = merged ? t("tbUnmerge") : t("tbMerge");
 		this.mergeButton.setAttribute("title", mergeLabel);
 		this.mergeButton.setAttribute("aria-label", mergeLabel);
-		this.checkboxButton.toggleClass(
-			"is-active",
-			!!refs[0] && engine.getCellType(refs[0] as string) === "cb",
-		);
+		// Lit only when the WHOLE selection is already a checkbox, because that is
+		// the only state in which the next press REMOVES them. Reading the first
+		// cell alone lit the button on a mixed range, where pressing it made more
+		// checkboxes instead - a toggle whose direction the user cannot predict.
+		const allBoxes = isAllCheckbox(this.cellTypes(refs));
+		this.checkboxButton.toggleClass("is-active", allBoxes);
+		const checkboxLabel = allBoxes ? t("tbCheckboxRemove") : t("tbCheckbox");
+		this.checkboxButton.setAttribute("title", checkboxLabel);
+		this.checkboxButton.setAttribute("aria-label", checkboxLabel);
 	}
 
 	destroy(): void {
