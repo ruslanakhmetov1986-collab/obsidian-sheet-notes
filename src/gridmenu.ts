@@ -22,6 +22,7 @@
 
 import { Menu, Notice, Platform } from "obsidian";
 import type { GridMenuContext, SheetEngine } from "./engine";
+import { applyPendingCut, cancelCut, clipFor, setClip } from "./clipboard";
 import { isTouchUi } from "./platform";
 import { t } from "./i18n";
 
@@ -38,20 +39,53 @@ function span(engine: SheetEngine): { rows: number; cols: number } {
 	return { rows: rect.r2 - rect.r1 + 1, cols: rect.c2 - rect.c1 + 1 };
 }
 
-async function copySelection(engine: SheetEngine): Promise<void> {
-	const text = engine.selectionTsv();
-	if (text === "") return;
+/**
+ * Copy (or cut) the selection.
+ *
+ * TWO destinations, on purpose: the plain tab-separated text goes to the SYSTEM
+ * clipboard, so the range still pastes into Excel or into a note, and the
+ * structured payload - values, formulas, styles, types - is kept in the
+ * plugin's own store keyed on that same text. See clipboard.ts.
+ *
+ * The store is written only after the system write SUCCEEDED. If it throws, the
+ * system clipboard still holds whatever it held before, and so must the store,
+ * or the next paste would silently write a range the user never copied.
+ */
+export async function copySelection(engine: SheetEngine, cut = false): Promise<void> {
+	const cutting = cut && !engine.isReadOnly;
+	const clip = engine.selectionClip(cutting);
+	if (!clip || clip.tsv === "") return;
 	const { rows, cols } = span(engine);
 	try {
-		await navigator.clipboard.writeText(text);
+		await navigator.clipboard.writeText(clip.tsv);
 	} catch (e) {
 		new Notice(t("clipboardFailed", { message: (e as Error).message }));
 		return;
 	}
-	new Notice(t("cmCopied", { rows, cols }));
+	setClip(clip);
+	new Notice(cutting ? t("cmCutReady", { rows, cols }) : t("cmCopied", { rows, cols }));
 }
 
-async function pasteInto(engine: SheetEngine): Promise<void> {
+/**
+ * Paste at the selection: the rich payload when the system clipboard still
+ * holds the text it was copied with, the clipboard's own text otherwise.
+ *
+ * A pending cut is completed BEFORE the write, not after: a range moved one
+ * column to the right overlaps itself, and clearing afterwards would erase the
+ * half that had just been pasted. The payload is already in memory by then, so
+ * there is nothing left to read out of the source. Both halves run in the same
+ * task, so the view's autosave sees one state, not two.
+ */
+export async function pasteInto(engine: SheetEngine): Promise<void> {
+	// Before anything else, and it is about the CUT rather than about the paste:
+	// completing a move empties the source, so a destination that cannot be
+	// written to would take the cells away and put them nowhere. Both callers
+	// already refuse (the view checks its own flag, the menu hides the item on a
+	// read-only sheet); this is the guard that does not depend on either.
+	if (engine.isReadOnly) {
+		new Notice(t("sheetReadOnly"));
+		return;
+	}
 	let text = "";
 	try {
 		text = await navigator.clipboard.readText();
@@ -59,12 +93,24 @@ async function pasteInto(engine: SheetEngine): Promise<void> {
 		new Notice(t("clipboardFailed", { message: (e as Error).message }));
 		return;
 	}
+	const clip = clipFor(text);
+	if (clip) {
+		applyPendingCut();
+		const written = engine.pasteClip(clip);
+		if (written.rows > 0) new Notice(t("cmPasted", { rows: written.rows, cols: written.cols }));
+		return;
+	}
 	if (text.trim() === "") {
 		new Notice(t("cmPasteEmpty"));
 		return;
 	}
 	const written = engine.pasteTsv(text);
-	if (written.rows > 0) new Notice(t("mdPasted", { rows: written.rows, cols: written.cols }));
+	if (written.rows > 0) new Notice(t("cmPasted", { rows: written.rows, cols: written.cols }));
+}
+
+/** Escape: withdraw a pending cut, leaving its source exactly as it is. */
+export function cancelPendingCut(): void {
+	cancelCut();
 }
 
 /**
@@ -111,6 +157,12 @@ export function openGridMenu(
 			.onClick(() => void copySelection(engine)),
 	);
 	if (editable) {
+		menu.addItem((item) =>
+			item
+				.setTitle(t("cmCut"))
+				.setIcon("scissors")
+				.onClick(() => void copySelection(engine, true)),
+		);
 		menu.addItem((item) =>
 			item
 				.setTitle(t("cmPaste"))

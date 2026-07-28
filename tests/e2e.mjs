@@ -395,6 +395,154 @@ async function paintedRatio(cdp, page, selector, nth = 0, scale = 4) {
 	}, data);
 }
 
+/**
+ * The MEAN COLOUR a human sees inside one element, straight off the compositor.
+ *
+ * The selection tint exists to be seen, and nothing short of a screenshot can
+ * say whether it was painted: it is drawn as a `background-image` LAYER over
+ * whatever background the cell already has, so `getComputedStyle` reports the
+ * declaration on both a cell that shows it and a cell whose inline
+ * `background-color` used to swallow it whole. That was the bug - three
+ * releases of a "selected" class on cells the user saw as pure white.
+ *
+ * Only the interior is averaged (the middle ~56% of the box). The outer fifth
+ * is the range border and the corner handle, which are the parts of a selection
+ * that always DID paint, so counting them would let a broken tint pass.
+ */
+async function avgColor(cdp, page, selector, nth = 0, scale = 4) {
+	const rect = await page.evaluate(
+		([sel, i]) => {
+			const el = document.querySelectorAll(sel)[i];
+			if (!el) return null;
+			const r = el.getBoundingClientRect();
+			if (r.width < 2 || r.height < 2) return null;
+			return { x: r.left, y: r.top, width: r.width, height: r.height };
+		},
+		[selector, nth],
+	);
+	if (!rect) return null;
+	const { data } = await cdp.send("Page.captureScreenshot", {
+		format: "png",
+		clip: { ...rect, scale },
+		captureBeyondViewport: false,
+	});
+	return page.evaluate(async (b64) => {
+		const img = new Image();
+		img.src = `data:image/png;base64,${b64}`;
+		await img.decode();
+		const canvas = document.createElement("canvas");
+		canvas.width = img.width;
+		canvas.height = img.height;
+		const ctx = canvas.getContext("2d", { willReadFrequently: true });
+		ctx.drawImage(img, 0, 0);
+		const { data: px, width: w, height: h } = ctx.getImageData(0, 0, canvas.width, canvas.height);
+		const x0 = Math.round(w * 0.22);
+		const x1 = Math.round(w * 0.78);
+		const y0 = Math.round(h * 0.22);
+		const y1 = Math.round(h * 0.78);
+		let r = 0;
+		let g = 0;
+		let b = 0;
+		let n = 0;
+		for (let y = y0; y < y1; y++) {
+			for (let x = x0; x < x1; x++) {
+				const i = (y * w + x) * 4;
+				r += px[i];
+				g += px[i + 1];
+				b += px[i + 2];
+				n++;
+			}
+		}
+		return n > 0 ? [Math.round(r / n), Math.round(g / n), Math.round(b / n)] : null;
+	}, data);
+}
+
+/** Manhattan distance between two mean colours; `null` anywhere means -1. */
+function colorDelta(a, b) {
+	if (!a || !b) return -1;
+	return Math.abs(a[0] - b[0]) + Math.abs(a[1] - b[1]) + Math.abs(a[2] - b[2]);
+}
+
+/** `rgb(r, g, b)` -> `[r, g, b]`. */
+function rgbTriple(css) {
+	const m = /(\d+)\D+(\d+)\D+(\d+)/.exec(String(css));
+	return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
+}
+
+/**
+ * The colour actually painted at the midpoint of each edge of an element.
+ *
+ * This is the assertion the outline bug needed and no DOM question could give.
+ * The outline used to be the edge cells' own borders, and a border is a SHARED
+ * edge: a user's cell border, written inline, took it. On screen that was an
+ * outline with two sides missing; in the DOM every class and every rule was
+ * exactly where it should be. So each edge is sampled through the compositor,
+ * one CSS pixel at its middle, blown up 8x.
+ */
+async function edgePaint(cdp, page, selector) {
+	const r = await page.evaluate((s) => {
+		const el = document.querySelector(s);
+		if (!el) return null;
+		const b = el.getBoundingClientRect();
+		if (b.width < 4 || b.height < 4) return null;
+		return { x: b.left, y: b.top, w: b.width, h: b.height };
+	}, selector);
+	if (!r) return null;
+	// One pixel INTO the 2px border from each side.
+	const points = {
+		top: [r.x + r.w / 2, r.y + 1],
+		bottom: [r.x + r.w / 2, r.y + r.h - 1],
+		left: [r.x + 1, r.y + r.h / 2],
+		right: [r.x + r.w - 1, r.y + r.h / 2],
+	};
+	const out = {};
+	for (const [side, [x, y]] of Object.entries(points)) {
+		const { data } = await cdp.send("Page.captureScreenshot", {
+			format: "png",
+			clip: { x: x - 0.5, y: y - 0.5, width: 1, height: 1, scale: 8 },
+			captureBeyondViewport: false,
+		});
+		out[side] = await page.evaluate(async (b64) => {
+			const img = new Image();
+			img.src = `data:image/png;base64,${b64}`;
+			await img.decode();
+			const canvas = document.createElement("canvas");
+			canvas.width = img.width;
+			canvas.height = img.height;
+			const ctx = canvas.getContext("2d", { willReadFrequently: true });
+			ctx.drawImage(img, 0, 0);
+			const { data: px } = ctx.getImageData(0, 0, canvas.width, canvas.height);
+			let r = 0;
+			let g = 0;
+			let b = 0;
+			let n = 0;
+			for (let i = 0; i < px.length; i += 4) {
+				r += px[i];
+				g += px[i + 1];
+				b += px[i + 2];
+				n++;
+			}
+			return [Math.round(r / n), Math.round(g / n), Math.round(b / n)];
+		}, data);
+	}
+	return out;
+}
+
+/** A zoomed screenshot of a region, for the eyes that sign the release off. */
+async function zoomShot(cdp, page, rect, name, scale = 3) {
+	fs.mkdirSync(SHOTS, { recursive: true });
+	const file = path.join(SHOTS, `${name}.png`);
+	const { data } = await cdp.send("Page.captureScreenshot", {
+		format: "png",
+		clip: { ...rect, scale },
+		captureBeyondViewport: false,
+	});
+	fs.writeFileSync(file, Buffer.from(data, "base64"));
+	shots.push(file);
+	console.log(`  shot ${file}`);
+	return file;
+}
+
 /* ------------------------------------------------- is it really on screen? */
 
 /**
@@ -4600,6 +4748,689 @@ async function main() {
 				}
 			},
 			[MATRIX_PATH, MATRIX2_PATH],
+		);
+		await page.waitForTimeout(500);
+
+		/* ------------------------------------------------------------------------
+		 * A selected range has to LOOK selected, on every cell inside it.
+		 *
+		 * The bug this replaces: the tint was a `background-color` on a class, and
+		 * every cell that has ever been styled carries a `background-color` INLINE
+		 * (the engine writes the whole declaration block, using the grid's own
+		 * default as the "off" value). An inline declaration beats a rule, so a
+		 * range that covered a filled cell, a bold cell or a checkbox cell painted
+		 * a border round them and nothing inside. Reported by the user; measured in
+		 * the live vault before the fix: mean colour of a selected filled cell
+		 * identical to its unselected mean, to the byte.
+		 *
+		 * So this asks the COMPOSITOR, cell by cell, in both themes and in both
+		 * kinds of window. A DOM assertion cannot see this bug: the class is on,
+		 * the declaration is in the stylesheet, and the pixels are white.
+		 * -------------------------------------------------------------------- */
+		const SEL_PATH = "Selection.sheet";
+		const selSeed = JSON.stringify(
+			{
+				format: "leovale-sheet",
+				version: 4,
+				sheets: [
+					{
+						name: "Sheet1",
+						rows: 14,
+						cols: 6,
+						cells: {
+							A1: { v: "plain" },
+							B1: { v: "filled", s: { bg: "#ffe08a" } },
+							C1: { v: true, t: "cb" },
+							D1: { v: "[[Note]]" },
+							A2: { v: "x2" },
+							B2: { v: "y2", s: { bg: "#a8e6a1" } },
+							C2: { v: false, t: "cb" },
+							A3: { v: "x3" },
+							B3: { v: "y3", s: { b: true } },
+							C3: { v: true, t: "cb" },
+							// A block of cells with USER BORDERS on all four sides, for
+							// the outline: the centre one is bordered AND surrounded by
+							// bordered cells, which is the case where the old
+							// border-on-the-cell outline lost every edge it shared.
+							B5: { v: "nw", s: { bd: "trbl" } },
+							C5: { v: "n", s: { bd: "trbl" } },
+							D5: { v: "ne", s: { bd: "trbl" } },
+							B6: { v: "w", s: { bd: "trbl" } },
+							C6: { v: "mid", s: { bd: "trbl", bg: "#ffe08a" } },
+							D6: { v: "e", s: { bd: "trbl" } },
+							B7: { v: "sw", s: { bd: "trbl" } },
+							C7: { v: "s", s: { bd: "trbl" } },
+							D7: { v: "se", s: { bd: "trbl" } },
+						},
+					},
+				],
+			},
+			null,
+			2,
+		);
+
+		const selCell = (x, y) =>
+			`.leovale-sheet-content .leovale-sheet-root td[data-x="${x}"][data-y="${y}"]`;
+
+		/**
+		 * Measure A1:C3 unselected, select it with a real drag, measure again.
+		 * `sess` is the CDP session of the window `p` lives in - a pop-out has its
+		 * own, and screenshotting it through the main window's session would clip
+		 * the wrong pixels.
+		 */
+		async function tintRun({ p, sess, label }) {
+			const headSel = '.leovale-sheet-content .leovale-sheet-root thead td[data-x="1"]';
+			const rowSel =
+				'.leovale-sheet-content .leovale-sheet-root tbody tr[data-y="1"] > td:first-child';
+			const probes = {
+				anchor: selCell(0, 0),
+				unfilled: selCell(0, 1),
+				filled: selCell(1, 1),
+				checkbox: selCell(2, 1),
+				bold: selCell(1, 2),
+				colLetter: headSel,
+				rowNumber: rowSel,
+			};
+
+			// Park the selection far away: E9 is outside the block under test.
+			await p.click(selCell(4, 8));
+			await p.waitForTimeout(400);
+			const before = {};
+			for (const [k, sel] of Object.entries(probes)) before[k] = await avgColor(sess, p, sel);
+			const tickBefore = await paintedRatio(
+				sess,
+				p,
+				".leovale-sheet-content .leovale-sheet-root input.leovale-sheet-cb",
+				2,
+			);
+
+			const from = await p.locator(selCell(0, 0)).boundingBox();
+			const to = await p.locator(selCell(2, 2)).boundingBox();
+			await p.mouse.move(from.x + from.width / 2, from.y + from.height / 2);
+			await p.mouse.down();
+			await p.mouse.move(to.x + to.width / 2, to.y + to.height / 2, { steps: 8 });
+			await p.mouse.up();
+			await p.waitForTimeout(500);
+
+			const highlighted = await p.evaluate(
+				() =>
+					document.querySelectorAll(".leovale-sheet-content .leovale-sheet-root td.highlight")
+						.length,
+			);
+			const after = {};
+			for (const [k, sel] of Object.entries(probes)) after[k] = await avgColor(sess, p, sel);
+			const tickAfter = await paintedRatio(
+				sess,
+				p,
+				".leovale-sheet-content .leovale-sheet-root input.leovale-sheet-cb",
+				2,
+			);
+
+			const d = {};
+			for (const k of Object.keys(probes)) d[k] = colorDelta(before[k], after[k]);
+			console.log(`  ${label}: highlighted=${highlighted} deltas=${JSON.stringify(d)}`);
+			console.log(`  ${label}: filled ${JSON.stringify(after.filled)} vs unfilled ${JSON.stringify(after.unfilled)}`);
+
+			check(`${label}: the whole 3x3 range is highlighted`, highlighted === 9, String(highlighted));
+			check(`${label}: an UNFILLED cell in the range is tinted`, d.unfilled >= 10, String(d.unfilled));
+			// The one the bug was about.
+			check(`${label}: a FILLED cell in the range is tinted too`, d.filled >= 10, String(d.filled));
+			check(`${label}: a CHECKBOX cell in the range is tinted`, d.checkbox >= 8, String(d.checkbox));
+			check(`${label}: a BOLD (styled, unfilled) cell is tinted`, d.bold >= 10, String(d.bold));
+			// ... and the fill is still the fill: a tint, not a repaint.
+			check(
+				`${label}: the fill still shows through the tint`,
+				colorDelta(after.filled, after.unfilled) >= 40,
+				JSON.stringify([after.filled, after.unfilled]),
+			);
+			check(`${label}: the anchor cell stays clear, as in Google Sheets`, d.anchor <= 6,
+				String(d.anchor));
+			check(`${label}: the column letter of a selected column lights up`, d.colLetter >= 8,
+				String(d.colLetter));
+			check(`${label}: the row number of a selected row lights up`, d.rowNumber >= 8,
+				String(d.rowNumber));
+			check(
+				`${label}: the tick still reads as ticked under the tint`,
+				tickAfter && tickBefore && tickAfter.ratio > 0.15 && Math.abs(tickAfter.ratio - tickBefore.ratio) < 0.1,
+				JSON.stringify([tickBefore?.ratio, tickAfter?.ratio]),
+			);
+			return { before, after, d };
+		}
+
+		const SELBOX = ".leovale-sheet-content .leovale-sheet-selbox";
+
+		/**
+		 * The outline round the selection, over cells that own borders of their own.
+		 * Both cases the user reported: one bordered cell with bordered neighbours,
+		 * and a range whose whole edge runs along user borders.
+		 */
+		async function outlineRun({ p, sess, label }) {
+			const accent = rgbTriple(
+				await p.evaluate(() => {
+					const probe = document.createElement("div");
+					probe.style.color = "var(--interactive-accent)";
+					document.body.appendChild(probe);
+					const c = getComputedStyle(probe).color;
+					probe.remove();
+					return c;
+				}),
+			);
+			const near = (got) => got && accent && colorDelta(got, accent) <= 40;
+			const report = (edges) =>
+				JSON.stringify({ accent, ...edges });
+
+			// C6: borders on all four sides, a fill, and eight bordered neighbours.
+			await p.click(selCell(2, 5));
+			await p.waitForTimeout(450);
+			const single = await edgePaint(sess, p, SELBOX);
+			console.log(`  ${label} outline (single bordered cell):`, report(single));
+			check(`${label}: the outline of a BORDERED cell is drawn on all four edges`,
+				!!single && ["top", "right", "bottom", "left"].every((s) => near(single[s])),
+				report(single));
+
+			const from = await p.locator(selCell(1, 4)).boundingBox();
+			const to = await p.locator(selCell(3, 6)).boundingBox();
+			await p.mouse.move(from.x + from.width / 2, from.y + from.height / 2);
+			await p.mouse.down();
+			await p.mouse.move(to.x + to.width / 2, to.y + to.height / 2, { steps: 8 });
+			await p.mouse.up();
+			await p.waitForTimeout(500);
+			const range = await edgePaint(sess, p, SELBOX);
+			console.log(`  ${label} outline (range of bordered cells):`, report(range));
+			check(`${label}: and so is the outline of a RANGE of bordered cells`,
+				!!range && ["top", "right", "bottom", "left"].every((s) => near(range[s])),
+				report(range));
+
+			// The outline is an overlay, so the two things it must never do are
+			// swallow a click and drift away from the fill handle.
+			const geometry = await p.evaluate(() => {
+				const box = document.querySelector(".leovale-sheet-content .leovale-sheet-selbox");
+				const corner = document.querySelector(
+					".leovale-sheet-content .leovale-sheet-root .jss_corner",
+				);
+				const b = box.getBoundingClientRect();
+				const c = corner?.getBoundingClientRect();
+				const cs = getComputedStyle(box);
+				const mid = document.elementFromPoint(
+					Math.round(b.left + b.width / 2),
+					Math.round(b.top + b.height / 2),
+				);
+				return {
+					pointerEvents: cs.pointerEvents,
+					z: cs.zIndex,
+					hitIsCell: mid?.tagName === "TD",
+					cornerDx: c ? Math.round(Math.abs(c.left + c.width / 2 - b.right)) : -1,
+					cornerDy: c ? Math.round(Math.abs(c.top + c.height / 2 - b.bottom)) : -1,
+				};
+			});
+			console.log(`  ${label} outline geometry:`, JSON.stringify(geometry));
+			check(`${label}: the outline never swallows a click on the cell under it`,
+				geometry.pointerEvents === "none" && geometry.hitIsCell, JSON.stringify(geometry));
+			check(`${label}: the fill handle is still on the corner of the outline`,
+				geometry.cornerDx <= 4 && geometry.cornerDy <= 4, JSON.stringify(geometry));
+			return { single, range };
+		}
+
+		/** The top-left corner of the grid, zoomed, for a human to look at. */
+		async function gridRect(p) {
+			const box = await p.locator(".leovale-sheet-content .leovale-sheet-root").boundingBox();
+			return {
+				x: Math.round(box.x),
+				y: Math.round(box.y),
+				width: Math.round(Math.min(box.width, 460)),
+				height: 170,
+			};
+		}
+
+		/** The bordered block B5:D7, with a row of context around it. */
+		async function borderedRect(p) {
+			const a = await p.locator(selCell(0, 3)).boundingBox();
+			const b = await p.locator(selCell(4, 7)).boundingBox();
+			return {
+				x: Math.round(a.x),
+				y: Math.round(a.y),
+				width: Math.round(b.x + b.width - a.x),
+				height: Math.round(b.y + b.height - a.y),
+			};
+		}
+
+		step("1.4.x: a range selection is visible on EVERY cell in it (light)");
+		await page.evaluate(
+			async ([p, text]) => {
+				const app = window.app;
+				app.workspace.detachLeavesOfType("leovale-sheet-view");
+				const old = app.vault.getAbstractFileByPath(p);
+				if (old) await app.vault.delete(old);
+				const f = await app.vault.create(p, text);
+				await app.workspace.getLeaf(true).openFile(f);
+			},
+			[SEL_PATH, selSeed],
+		);
+		await page.waitForTimeout(2400);
+		await installViewIndex(page);
+		const selCdp = await ctx.newCDPSession(page);
+		await tintRun({ p: page, sess: selCdp, label: "light" });
+		await zoomShot(selCdp, page, await gridRect(page), "30-selection-range-light");
+		await outlineRun({ p: page, sess: selCdp, label: "light" });
+		await zoomShot(selCdp, page, await borderedRect(page), "34-selection-outline-light");
+
+		step("1.4.x: the outline survives a merge and a frozen pane");
+		// A merged cell is ONE <td> for several addresses, and a frozen pane is a
+		// sticky cell that paints above the grid. Both are the cases where an
+		// outline measured cell by cell used to come apart.
+		await page.evaluate(() => {
+			const e = window.engineAt(0);
+			e.selectCell(8, 1); // B9
+			e.selectCell(8, 3, true); // ... to D9
+			e.mergeSelection();
+		});
+		await page.waitForTimeout(900);
+		await page.click(selCell(1, 8));
+		await page.waitForTimeout(500);
+		const mergedBox = await page.evaluate(() => {
+			const box = document
+				.querySelector(".leovale-sheet-content .leovale-sheet-selbox")
+				.getBoundingClientRect();
+			const td = document
+				.querySelector('.leovale-sheet-content .leovale-sheet-root td[data-x="1"][data-y="8"]')
+				.getBoundingClientRect();
+			return {
+				dw: Math.round(Math.abs(box.width - td.width)),
+				dh: Math.round(Math.abs(box.height - td.height)),
+				width: Math.round(box.width),
+			};
+		});
+		console.log("  merged outline:", JSON.stringify(mergedBox));
+		check("the outline wraps the whole MERGED cell, not one column of it",
+			mergedBox.dw <= 2 && mergedBox.dh <= 2 && mergedBox.width > 200,
+			JSON.stringify(mergedBox));
+		const readAccent = (p) =>
+			p
+				.evaluate(() => {
+					const probe = document.createElement("div");
+					probe.style.color = "var(--interactive-accent)";
+					document.body.appendChild(probe);
+					const c = getComputedStyle(probe).color;
+					probe.remove();
+					return c;
+				})
+				.then(rgbTriple);
+		const accentNow = await readAccent(page);
+		const mergedEdges = await edgePaint(selCdp, page, SELBOX);
+		console.log("  merged edges:", JSON.stringify({ accentNow, ...mergedEdges }));
+		check("and it is drawn on all four of its edges",
+			!!mergedEdges &&
+				["top", "right", "bottom", "left"].every(
+					(s) => colorDelta(mergedEdges[s], accentNow) <= 40,
+				),
+			JSON.stringify(mergedEdges));
+		await page.evaluate(() => window.engineAt(0).unmergeSelection());
+		await page.waitForTimeout(600);
+
+		await page.evaluate(() => window.engineAt(0).setFreeze({ rows: 2, cols: 0 }));
+		await page.waitForTimeout(900);
+		await page.click(selCell(1, 0)); // B1, inside the frozen pane
+		await page.waitForTimeout(500);
+		const frozenEdges = await edgePaint(selCdp, page, SELBOX);
+		const frozenAccent = await readAccent(page);
+		console.log("  frozen-pane outline:", JSON.stringify({ frozenAccent, ...frozenEdges }));
+		check("a cell selected INSIDE a frozen row keeps its whole outline",
+			!!frozenEdges &&
+				["top", "right", "bottom", "left"].every(
+					(s) => colorDelta(frozenEdges[s], frozenAccent) <= 40,
+				),
+			JSON.stringify(frozenEdges));
+		await page.evaluate(() => window.engineAt(0).setFreeze({ rows: 0, cols: 0 }));
+		await page.waitForTimeout(700);
+
+		step("1.4.x: the same in the dark theme");
+		await setBaseTheme(page, "obsidian");
+		await page.waitForTimeout(900);
+		await tintRun({ p: page, sess: selCdp, label: "dark" });
+		await zoomShot(selCdp, page, await gridRect(page), "31-selection-range-dark");
+		await outlineRun({ p: page, sess: selCdp, label: "dark" });
+		await zoomShot(selCdp, page, await borderedRect(page), "35-selection-outline-dark");
+
+		step("1.4.x: print never puts the selection on paper");
+		const selPrintCss = await page.evaluate(() => {
+			const td = document.querySelector(
+				".leovale-sheet-content .leovale-sheet-root td.highlight:not(.highlight-selected)",
+			);
+			if (!td) return null;
+			const screen = getComputedStyle(td).backgroundImage;
+			// The print rule turns the tint variable off; ask for the value the
+			// print stylesheet would resolve, by reading the rule itself.
+			const rules = [];
+			for (const sheet of Array.from(document.styleSheets)) {
+				let list = [];
+				try {
+					list = Array.from(sheet.cssRules ?? []);
+				} catch {
+					continue;
+				}
+				for (const rule of list) {
+					if (rule.type === CSSRule.MEDIA_RULE && rule.conditionText.includes("print")) {
+						for (const inner of Array.from(rule.cssRules)) {
+							if (/--leovale-sheet-sel-tint|leovale-sheet-cut|td\.highlight/.test(inner.cssText)) {
+								rules.push(inner.cssText);
+							}
+						}
+					}
+				}
+			}
+			return { screen, rules };
+		});
+		console.log("  print rules:", JSON.stringify(selPrintCss?.rules, null, 1));
+		check("on screen the tint is a background LAYER, not a colour",
+			/gradient/.test(selPrintCss?.screen ?? ""), String(selPrintCss?.screen));
+		check(
+			"@media print switches the selection tint off",
+			(selPrintCss?.rules ?? []).some((r) => /--leovale-sheet-sel-tint:\s*transparent/.test(r)),
+			JSON.stringify(selPrintCss?.rules),
+		);
+		check(
+			"@media print switches the cut marker off",
+			(selPrintCss?.rules ?? []).some((r) => /leovale-sheet-cut/.test(r) && /outline:\s*none/.test(r)),
+			JSON.stringify(selPrintCss?.rules),
+		);
+
+		/* ------------------------------------------------------------------------
+		 * Copy, cut and paste INSIDE the plugin carry the formatting.
+		 *
+		 * The system clipboard is text and stays text - the range still pastes into
+		 * Excel or into a note. What is new is the payload kept beside it, keyed on
+		 * that same text, so a paste back into a sheet brings the fill, the mask,
+		 * the bold, the borders and the fact that a cell is a tick box. And a cut
+		 * is a MOVE: the source is emptied by the paste that completes it, not by
+		 * the Ctrl+X, so an interrupted cut loses nothing.
+		 * -------------------------------------------------------------------- */
+		const CLIP_PATH = "Clip.sheet";
+		const clipSeed = JSON.stringify(
+			{
+				format: "leovale-sheet",
+				version: 4,
+				sheets: [
+					{
+						name: "Sheet1",
+						rows: 16,
+						cols: 6,
+						cells: {
+							A1: { v: "Fruit", s: { b: true, bg: "#ffe08a", ha: "c" } },
+							B1: { v: 3, s: { nf: "0.00" } },
+							A2: { v: true, t: "cb" },
+							// The formula points OUTSIDE the block that gets copied and
+							// cut, so what it computes stays a fact about the paste and
+							// not about the move. NOT at row 1: a reference to row 1
+							// evaluates to #ERROR in this engine, whoever writes it and
+							// whenever - a pre-existing fault of its own, measured on a
+							// hand-typed `=F1*2` as well as on a seeded one.
+							B2: { f: "=F3*2", s: { bd: "trbl" } },
+							F3: { v: 5 },
+						},
+					},
+				],
+			},
+			null,
+			2,
+		);
+
+		const readClipboard = (p) =>
+			p.evaluate(async () => {
+				try {
+					return require("electron").clipboard.readText();
+				} catch {
+					return await navigator.clipboard.readText();
+				}
+			});
+		const writeClipboard = (p, text) =>
+			p.evaluate(async (t) => {
+				try {
+					require("electron").clipboard.writeText(t);
+				} catch {
+					await navigator.clipboard.writeText(t);
+				}
+			}, text);
+
+		/** Everything the file format keeps about one cell, straight off the engine. */
+		const cellFacts = (p, refs) =>
+			p.evaluate((list) => {
+				const e = window.engineAt(0);
+				const out = {};
+				for (const ref of list) {
+					out[ref] = {
+						raw: e.getRawValue(ref),
+						style: e.getStyleAt(ref),
+						type: e.getCellType(ref) ?? null,
+						text:
+							document.querySelector(
+								`.leovale-sheet-content .leovale-sheet-root td[data-x="${
+									ref.charCodeAt(0) - 65
+								}"][data-y="${Number(ref.slice(1)) - 1}"]`,
+							)?.textContent ?? "",
+					};
+				}
+				return out;
+			}, refs);
+
+		const dragSelect = async (p, x1, y1, x2, y2) => {
+			const a = await p.locator(selCell(x1, y1)).boundingBox();
+			const b = await p.locator(selCell(x2, y2)).boundingBox();
+			await p.mouse.move(a.x + a.width / 2, a.y + a.height / 2);
+			await p.mouse.down();
+			await p.mouse.move(b.x + b.width / 2, b.y + b.height / 2, { steps: 8 });
+			await p.mouse.up();
+			await p.waitForTimeout(350);
+		};
+
+		step("1.4.x: Ctrl+C carries the formatting, Ctrl+V puts it back");
+		await setBaseTheme(page, "moonstone");
+		await page.waitForTimeout(600);
+		await page.evaluate(
+			async ([p, text]) => {
+				const app = window.app;
+				app.workspace.detachLeavesOfType("leovale-sheet-view");
+				const old = app.vault.getAbstractFileByPath(p);
+				if (old) await app.vault.delete(old);
+				const f = await app.vault.create(p, text);
+				await app.workspace.getLeaf(true).openFile(f);
+			},
+			[CLIP_PATH, clipSeed],
+		);
+		await page.waitForTimeout(2400);
+		await installViewIndex(page);
+
+		await dragSelect(page, 0, 0, 1, 1);
+		await page.keyboard.press("Control+c");
+		await page.waitForTimeout(700);
+		const clipText = await readClipboard(page);
+		console.log("  system clipboard after Ctrl+C:", JSON.stringify(clipText));
+		check(
+			"the SYSTEM clipboard still gets plain tab-separated text",
+			clipText.includes("\t") && clipText.split(/\r?\n/).length === 2 && clipText.startsWith("Fruit\t3.00"),
+			JSON.stringify(clipText),
+		);
+		check(
+			"a checkbox travels as its value, not as an empty cell",
+			/\btrue\b/.test(clipText),
+			JSON.stringify(clipText),
+		);
+
+		await page.click(selCell(3, 4)); // D5
+		await page.waitForTimeout(250);
+		await page.keyboard.press("Control+v");
+		await page.waitForTimeout(1200);
+		const pastedRich = await cellFacts(page, ["D5", "E5", "D6", "E6"]);
+		console.log("  pasted:", JSON.stringify(pastedRich, null, 1));
+		check("the fill, the bold and the alignment arrived with the value",
+			pastedRich.D5.style.bg === "#ffe08a" && pastedRich.D5.style.b === true &&
+				pastedRich.D5.style.ha === "c" && pastedRich.D5.raw === "Fruit",
+			JSON.stringify(pastedRich.D5));
+		check("the number mask arrived, and the cell renders through it",
+			pastedRich.E5.style.nf === "0.00" && pastedRich.E5.text === "3.00",
+			JSON.stringify(pastedRich.E5));
+		check("the CHECKBOX arrived as a checkbox",
+			pastedRich.D6.type === "cb" && pastedRich.D6.raw === true,
+			JSON.stringify(pastedRich.D6));
+		// Verbatim and NOT rebased, which is the rule everywhere else in the plugin:
+		// fill-down copies a formula unchanged, the file stores the source, and a
+		// paste of plain text has always written what it was given.
+		check("the FORMULA arrived as its source, verbatim (never rebased), and computes",
+			pastedRich.E6.raw === "=F3*2" && pastedRich.E6.style.bd === "trbl" &&
+				pastedRich.E6.text === "10",
+			JSON.stringify(pastedRich.E6));
+		check("and the source is untouched by a copy",
+			(await cellFacts(page, ["A1"])).A1.style.bg === "#ffe08a");
+
+		step("1.4.x: Ctrl+X is a MOVE, completed by the paste");
+		await dragSelect(page, 0, 0, 1, 1);
+		await page.keyboard.press("Control+x");
+		await page.waitForTimeout(700);
+		const cutMarked = await page.evaluate(
+			() =>
+				document.querySelectorAll(".leovale-sheet-content .leovale-sheet-root td.leovale-sheet-cut")
+					.length,
+		);
+		check("the cut range is marked while it waits", cutMarked === 4, String(cutMarked));
+		const stillThere = await cellFacts(page, ["A1"]);
+		check("Ctrl+X alone changes nothing: an abandoned cut loses no data",
+			stillThere.A1.raw === "Fruit" && stillThere.A1.style.bg === "#ffe08a",
+			JSON.stringify(stillThere.A1));
+
+		await page.click(selCell(3, 7)); // D8
+		await page.waitForTimeout(250);
+		await page.keyboard.press("Control+v");
+		await page.waitForTimeout(1400);
+		const moved = await cellFacts(page, ["A1", "B1", "A2", "B2", "D8", "E8", "D9", "E9"]);
+		console.log("  after the move:", JSON.stringify(moved, null, 1));
+		check("the destination has the cells, formatting included",
+			moved.D8.raw === "Fruit" && moved.D8.style.bg === "#ffe08a" && moved.D9.type === "cb" &&
+				moved.E9.raw === "=F3*2" && moved.E9.text === "10",
+			JSON.stringify([moved.D8, moved.D9, moved.E9]));
+		check("and the SOURCE is empty - values, styles and types alike",
+			!moved.A1.raw && Object.keys(moved.A1.style).length === 0 && moved.A2.type === null &&
+				!moved.B2.raw && Object.keys(moved.B1.style).length === 0,
+			JSON.stringify([moved.A1, moved.B1, moved.A2, moved.B2]));
+		const markLeft = await page.evaluate(
+			() =>
+				document.querySelectorAll(".leovale-sheet-content .leovale-sheet-root td.leovale-sheet-cut")
+					.length,
+		);
+		check("the marker comes off with the move", markLeft === 0, String(markLeft));
+
+		await page.waitForTimeout(5000);
+		const clipDisk = fs.readFileSync(path.join(VAULT, CLIP_PATH), "utf8");
+		check("BOTH halves of the move reached the file on disk",
+			/"D8":/.test(clipDisk) && /#ffe08a/.test(clipDisk) && !/"A1":/.test(clipDisk),
+			clipDisk.split("\n").filter((l) => /A1|D8/.test(l)).join(" | "));
+
+		step("1.4.x: Escape withdraws a cut, and a foreign clipboard still pastes as text");
+		await dragSelect(page, 3, 7, 4, 8); // the block that was just moved
+		await page.keyboard.press("Control+x");
+		await page.waitForTimeout(600);
+		await page.keyboard.press("Escape");
+		await page.waitForTimeout(400);
+		const afterEscape = await page.evaluate(
+			() =>
+				document.querySelectorAll(".leovale-sheet-content .leovale-sheet-root td.leovale-sheet-cut")
+					.length,
+		);
+		check("Escape takes the marker off", afterEscape === 0, String(afterEscape));
+		await page.click(selCell(0, 11)); // A12
+		await page.waitForTimeout(250);
+		await page.keyboard.press("Control+v");
+		await page.waitForTimeout(1200);
+		const escaped = await cellFacts(page, ["D8", "A12"]);
+		check("the withdrawn source is still there after pasting a copy of it",
+			escaped.D8.raw === "Fruit" && escaped.A12.raw === "Fruit",
+			JSON.stringify([escaped.D8, escaped.A12]));
+
+		await writeClipboard(page, "p\tq\nr\ts");
+		await page.click(selCell(0, 13)); // A14
+		await page.waitForTimeout(250);
+		await page.keyboard.press("Control+v");
+		await page.waitForTimeout(1200);
+		const foreign = await cellFacts(page, ["A14", "B14"]);
+		console.log("  foreign paste:", JSON.stringify(foreign));
+		check("text copied in another app pastes as values, with no borrowed styles",
+			foreign.A14.raw === "p" && foreign.B14.raw === "q" &&
+				Object.keys(foreign.A14.style).length === 0,
+			JSON.stringify(foreign));
+
+		step("1.4.x: the tint and the clipboard in an Obsidian pop-out window");
+		const selPagesBefore = new Set(ctx.pages());
+		await page.evaluate(async (a) => {
+			const app = window.app;
+			app.workspace.detachLeavesOfType("leovale-sheet-view");
+			await new Promise((r) => setTimeout(r, 400));
+			const leaf = app.workspace.openPopoutLeaf();
+			await leaf.openFile(app.vault.getAbstractFileByPath(a));
+		}, SEL_PATH);
+		let selPopout = null;
+		for (let i = 0; i < 40 && !selPopout; i++) {
+			await page.waitForTimeout(500);
+			selPopout = ctx.pages().find((q) => !selPagesBefore.has(q));
+		}
+		check("the pop-out for the selection tests appeared", !!selPopout);
+		if (selPopout) {
+			await selPopout.waitForTimeout(1800);
+			await installViewIndex(selPopout);
+			const popCdp = await ctx.newCDPSession(selPopout);
+			check(
+				"the pop-out carries Obsidian's theme classes, so the dark tint applies there",
+				await selPopout.evaluate(() => /theme-(dark|light)/.test(document.body.className)),
+				await selPopout.evaluate(() => document.body.className),
+			);
+			await tintRun({ p: selPopout, sess: popCdp, label: "pop-out light" });
+			await zoomShot(popCdp, selPopout, await gridRect(selPopout), "32-selection-range-popout");
+			await outlineRun({ p: selPopout, sess: popCdp, label: "pop-out light" });
+			await zoomShot(popCdp, selPopout, await borderedRect(selPopout), "36-selection-outline-popout");
+
+			await setBaseTheme(page, "obsidian");
+			await selPopout.waitForTimeout(1200);
+			await tintRun({ p: selPopout, sess: popCdp, label: "pop-out dark" });
+			await zoomShot(popCdp, selPopout, await gridRect(selPopout), "33-selection-range-popout-dark");
+			await outlineRun({ p: selPopout, sess: popCdp, label: "pop-out dark" });
+			await setBaseTheme(page, "moonstone");
+			await selPopout.waitForTimeout(900);
+
+			// The clipboard keys are intercepted on the pop-out's OWN document, and
+			// that is the half the vendor never got right (its keydown handler is
+			// bound to the main window's document, whatever it is configured with).
+			await dragSelect(selPopout, 1, 0, 1, 1); // B1:B2, one filled, one plain
+			await selPopout.keyboard.press("Control+c");
+			await selPopout.waitForTimeout(700);
+			const popClip = await readClipboard(selPopout);
+			check("pop-out: Ctrl+C reaches the grid and writes the clipboard",
+				popClip.replace(/\r/g, "").split("\n").join("|") === "filled|y2", JSON.stringify(popClip));
+			await selPopout.click(selCell(4, 5)); // E6
+			await selPopout.waitForTimeout(250);
+			await selPopout.keyboard.press("Control+v");
+			await selPopout.waitForTimeout(1200);
+			const popPasted = await selPopout.evaluate(() => {
+				const e = window.engineAt(0);
+				return { e6: e.getStyleAt("E6"), raw: e.getRawValue("E6"), e7: e.getRawValue("E7") };
+			});
+			console.log("  pop-out paste:", JSON.stringify(popPasted));
+			check("pop-out: Ctrl+V pastes the fill with the value",
+				popPasted.raw === "filled" && popPasted.e6.bg === "#ffe08a" && popPasted.e7 === "y2",
+				JSON.stringify(popPasted));
+
+			await page.evaluate(() => {
+				for (const l of window.app.workspace.getLeavesOfType("leovale-sheet-view")) l.detach();
+			});
+			await page.waitForTimeout(1200);
+		}
+
+		await page.evaluate(
+			async ([a, b]) => {
+				const app = window.app;
+				app.workspace.detachLeavesOfType("leovale-sheet-view");
+				for (const name of [a, b]) {
+					const f = app.vault.getAbstractFileByPath(name);
+					if (f) await app.vault.delete(f);
+				}
+			},
+			[SEL_PATH, CLIP_PATH],
 		);
 		await page.waitForTimeout(500);
 

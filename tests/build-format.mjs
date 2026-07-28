@@ -5,6 +5,7 @@ await esbuild.build({
 	entryPoints: [
 		"src/format.ts",
 		"src/cellcss.ts",
+		"src/clipboard.ts",
 		"src/csv.ts",
 		"src/formulabar.ts",
 		"src/i18n.ts",
