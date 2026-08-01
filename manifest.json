@@ -1,7 +1,7 @@
 {
   "id": "leovale-sheets",
   "name": "Spreadsheet Notes",
-  "version": "1.7.1",
+  "version": "1.8.0",
   "minAppVersion": "1.7.2",
   "description": "Edit spreadsheet notes stored as .sheet files in your vault, with formulas, cell formatting, and a Google Sheets-like grid.",
   "author": "Ruslan Akhmetov",
