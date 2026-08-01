@@ -148,46 +148,44 @@ export function bundleHasNoAd(bundle) {
 }
 
 /**
- * Close the two ways a `.sheet` file can run code of its own.
+ * Keep a `.sheet` file from running code of its own.
  *
  * A formula is evaluated as JavaScript: `new Function(preamble + "; return " +
- * expression)`. Before that the vendor upper-cases everything OUTSIDE double
- * quotes, which looks like a sandbox and is not one - it is why `process` and
- * `globalThis` do not resolve, and it protects nothing else.
+ * expression)`. The vendor upper-cases everything outside double quotes before
+ * that, which reads like a sandbox and is not one: it stops a couple of global
+ * names from resolving and nothing else.
  *
- * VECTOR 1 - the expression. Text inside double quotes keeps its case, and a
- * string can be used as a property name:
+ * Two places let file content reach that evaluation. The expression itself,
+ * where quoted text survives the upper-casing and can be used where the parser
+ * expects a name; and the cell VALUE, which the vendor wraps for the preamble by
+ * gluing quotes around it, so a value carrying a quote of its own ends the
+ * literal early and the rest is parsed as code. The second one matters more,
+ * because the formula pointing at such a cell can be entirely ordinary.
  *
- *     =""["constructor"]["constructor"]("...any JS...")()
+ * The two fixes below: refuse the syntax the first case depends on (no
+ * spreadsheet formula needs it, so nothing legitimate is lost), and build a real
+ * escaped string literal instead of gluing quotes on.
  *
- * Property access through a DOT cannot do this (the name is upper-cased with
- * everything else), so the escape needs bracket access. No spreadsheet formula
- * does - SUM, IF, CONCATENATE, ranges and arithmetic were all checked - so
- * brackets and backticks are refused and the cell shows #ERROR.
- *
- * VECTOR 2 - the cell value, and the worse of the two. jspreadsheet wraps a
- * text value for the preamble by CONCATENATION, `'"' + value + '"'`, so a value
- * containing a double quote closes the literal early:
- *
- *     value:    "; fetchAndSendYourVault(); var q="
- *     preamble: var A1 = ""; fetchAndSendYourVault(); var q="";
- *
- * The formula referencing it can be as ordinary as `=A1`. The fix is to build a
- * real string literal instead of gluing quotes on.
+ * The details of what exactly gets through are in tests/vendorpatch.test.mjs,
+ * which drives the unpatched vendor and then the patched one. Keep them there:
+ * a test can prove the hole is shut without this file spelling out a recipe.
  *
  * Both patches are asserted like the others here: a vendor bump that rewrites
  * either line fails the build instead of silently reopening the hole.
  */
 
-/** Characters that only ever appear in an escape attempt. */
+/**
+ * Syntax refused inside a formula expression: bracket access and backticks.
+ * Neither appears in spreadsheet formulas (SUM, IF, CONCATENATE, ranges and
+ * arithmetic were all checked); both are needed to reach past the evaluator.
+ */
 export const FORMULA_DENY = /[[\]`]/;
 
 /**
  * Is this formula expression safe to evaluate?
  *
- * Deliberately a syntactic check on the raw expression rather than a denylist of
- * words: `"const"+"ructor"` defeats word matching, bracket access defeats
- * nothing once the brackets are gone.
+ * A syntactic check on the raw expression, deliberately, rather than a list of
+ * forbidden words: words can be assembled from pieces at runtime, syntax cannot.
  *
  * @param {string} expression
  */
