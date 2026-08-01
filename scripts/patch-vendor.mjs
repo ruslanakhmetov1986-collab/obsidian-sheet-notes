@@ -93,6 +93,187 @@ export function bundleIsPatched(bundle) {
 }
 
 /**
+ * Build-time removal of the vendor's promo badge.
+ *
+ * jspreadsheet-ce builds a `<div class="jss_about">` holding a link to the
+ * vendor's own site and appends it to every grid. CSS used to hide it, which
+ * left the link in the DOM and the address in the bundle; this takes it out
+ * instead.
+ *
+ * The div itself STAYS. It is created here and appended later
+ * (`e.element.appendChild(e.ads)`), so removing the assignment would leave that
+ * line reading an undefined property. What goes is the anchor, the caption and
+ * the class - the empty div renders as nothing.
+ *
+ * MIT asks for the copyright notice to travel with the code, not for a badge in
+ * the interface; the notice is in the footer of the built `main.js`.
+ */
+export const VENDOR_AD = `const i=document.createElement("a");i.setAttribute("href","https://bossanova.uk/jspreadsheet/"),e.ads=document.createElement("div"),e.ads.className="jss_about";const a=document.createElement("span");a.innerHTML="Jspreadsheet CE",i.appendChild(a),e.ads.appendChild(i),`;
+
+/** The bare element the rest of the vendor still expects to find. */
+export const VENDOR_AD_FIX = `e.ads=document.createElement("div"),`;
+
+/**
+ * Strip the promo badge from the vendor source.
+ *
+ * Asserted like the formula patch: a vendor bump that rewrites this block fails
+ * the build rather than quietly putting the badge back.
+ *
+ * @param {string} source contents of `jspreadsheet-ce/dist/index.js`
+ * @returns {{ code: string, count: number }}
+ */
+export function patchVendorAd(source) {
+	if (typeof source !== "string") throw new TypeError("patchVendorAd: source must be a string");
+	const count = source.split(VENDOR_AD).length - 1;
+	if (count === 0) {
+		throw new Error(
+			"jspreadsheet-ce: the promo badge block is not where it was in dist/index.js. " +
+				"Re-check how the badge is built before removing this patch (scripts/patch-vendor.mjs).",
+		);
+	}
+	return { code: source.split(VENDOR_AD).join(VENDOR_AD_FIX), count };
+}
+
+/**
+ * Is a bundled build free of the badge? The bundle is what ships, so that is
+ * where it has to be gone.
+ *
+ * @param {string} bundle contents of the built `main.js`
+ */
+export function bundleHasNoAd(bundle) {
+	return {
+		classGone: !bundle.includes("jss_about"),
+		linkGone: !bundle.includes("bossanova.uk/jspreadsheet/"),
+	};
+}
+
+/**
+ * Close the two ways a `.sheet` file can run code of its own.
+ *
+ * A formula is evaluated as JavaScript: `new Function(preamble + "; return " +
+ * expression)`. Before that the vendor upper-cases everything OUTSIDE double
+ * quotes, which looks like a sandbox and is not one - it is why `process` and
+ * `globalThis` do not resolve, and it protects nothing else.
+ *
+ * VECTOR 1 - the expression. Text inside double quotes keeps its case, and a
+ * string can be used as a property name:
+ *
+ *     =""["constructor"]["constructor"]("...any JS...")()
+ *
+ * Property access through a DOT cannot do this (the name is upper-cased with
+ * everything else), so the escape needs bracket access. No spreadsheet formula
+ * does - SUM, IF, CONCATENATE, ranges and arithmetic were all checked - so
+ * brackets and backticks are refused and the cell shows #ERROR.
+ *
+ * VECTOR 2 - the cell value, and the worse of the two. jspreadsheet wraps a
+ * text value for the preamble by CONCATENATION, `'"' + value + '"'`, so a value
+ * containing a double quote closes the literal early:
+ *
+ *     value:    "; fetchAndSendYourVault(); var q="
+ *     preamble: var A1 = ""; fetchAndSendYourVault(); var q="";
+ *
+ * The formula referencing it can be as ordinary as `=A1`. The fix is to build a
+ * real string literal instead of gluing quotes on.
+ *
+ * Both patches are asserted like the others here: a vendor bump that rewrites
+ * either line fails the build instead of silently reopening the hole.
+ */
+
+/** Characters that only ever appear in an escape attempt. */
+export const FORMULA_DENY = /[[\]`]/;
+
+/**
+ * Is this formula expression safe to evaluate?
+ *
+ * Deliberately a syntactic check on the raw expression rather than a denylist of
+ * words: `"const"+"ructor"` defeats word matching, bracket access defeats
+ * nothing once the brackets are gone.
+ *
+ * @param {string} expression
+ */
+export function formulaIsSafe(expression) {
+	return typeof expression === "string" && !FORMULA_DENY.test(expression);
+}
+
+/**
+ * Where the guard goes: the start of the transformation chain, while `n` is
+ * still the expression the FILE contained.
+ *
+ * Not at the `new Function` call, which is the obvious spot and the wrong one -
+ * by then the vendor has expanded `A1:A3` into a bracketed list of its own, so a
+ * check there refuses every range. Measured, not guessed: `SUM(A1:A3)` and
+ * `AVERAGE(A1:A3)` returned #ERROR until the guard moved here.
+ */
+export const FORMULA_EVAL = "let h=(n=function(n,t){";
+
+/**
+ * What replaces it. `#ERROR` is what every other formula failure produces, so a
+ * refused formula behaves like a broken one and the rest of the sheet keeps
+ * working.
+ */
+export const FORMULA_EVAL_FIX = 'if(/[[\\]`]/.test(n))return"#ERROR";let h=(n=function(n,t){';
+
+/**
+ * Refuse expressions that reach for bracket access.
+ *
+ * @param {string} source contents of `@jspreadsheet/formula/dist/index.js`
+ * @returns {{ code: string, count: number }}
+ */
+export function patchFormulaEscape(source) {
+	if (typeof source !== "string") throw new TypeError("patchFormulaEscape: source must be a string");
+	const count = source.split(FORMULA_EVAL).length - 1;
+	if (count === 0) {
+		throw new Error(
+			"@jspreadsheet/formula: the expression transformation chain moved in dist/index.js. " +
+				"Re-check how a formula reaches `new Function` before removing this patch " +
+				"(scripts/patch-vendor.mjs).",
+		);
+	}
+	return { code: source.split(FORMULA_EVAL).join(FORMULA_EVAL_FIX), count };
+}
+
+/** The vendor line that quotes a cell value for the preamble, verbatim. */
+export const CELL_QUOTING = "formulaExpressions[tokens[i]]='\"'+t+'\"'";
+
+/**
+ * What replaces it. `JSON.stringify` emits a correctly escaped JavaScript string
+ * literal, which is what the concatenation was pretending to do.
+ */
+export const CELL_QUOTING_FIX = "formulaExpressions[tokens[i]]=JSON.stringify(String(t))";
+
+/**
+ * Escape cell values instead of gluing quotes around them.
+ *
+ * @param {string} source contents of `jspreadsheet-ce/dist/index.js`
+ * @returns {{ code: string, count: number }}
+ */
+export function patchCellQuoting(source) {
+	if (typeof source !== "string") throw new TypeError("patchCellQuoting: source must be a string");
+	const count = source.split(CELL_QUOTING).length - 1;
+	if (count === 0) {
+		throw new Error(
+			"jspreadsheet-ce: the cell-value quoting moved in dist/index.js. " +
+				"Re-check how a value reaches the formula preamble before removing this patch " +
+				"(scripts/patch-vendor.mjs).",
+		);
+	}
+	return { code: source.split(CELL_QUOTING).join(CELL_QUOTING_FIX), count };
+}
+
+/**
+ * Is a bundled build free of both holes? The bundle is what ships.
+ *
+ * @param {string} bundle contents of the built `main.js`
+ */
+export function bundleIsSealed(bundle) {
+	return {
+		expressionGuarded: bundle.includes('return"#ERROR"'),
+		valuesEscaped: bundle.includes("JSON.stringify(String("),
+		rawQuotingGone: !bundle.includes("='\"'+t+'\"'"),
+	};
+}
+
+/**
  * Top-level identifiers in a bundle that look like a cell reference (`A1`,
  * `C1`, `AB12`). Nothing to fix about them once the guard is patched - they are
  * reported so the tests can prove the collision the fix is about is REAL on the
