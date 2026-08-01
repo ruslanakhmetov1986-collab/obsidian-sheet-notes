@@ -550,3 +550,31 @@ test("a rewritten payload that no longer matches forces a new version", async ()
 	assert.ok(again, "an unreadable newest version must not block a new one");
 	assert.equal((await store.list("Budget.sheet")).length, 2);
 });
+
+test("ids stay unique when two files are saved in the same millisecond", async () => {
+	// The CI runner is fast enough to write several versions inside one tick,
+	// and the id used to be checked against the saving file's own index only,
+	// so two files came out with identical ids. The total cap tells versions
+	// apart by id, so that ambiguity could evict the wrong file's version.
+	const realNow = Date.now;
+	Date.now = () => 1_700_000_000_000;
+	try {
+		const fs = fakeAdapter();
+		const store = new BackupStore(fs, ROOT, { compress: false });
+		const ids = { "a.sheet": [], "b.sheet": [] };
+		for (let i = 0; i < 4; i++) {
+			for (const file of ["a.sheet", "b.sheet"]) {
+				const meta = await store.save(file, docText({ A1: { v: `${file} ${i}` } }), null);
+				ids[file].push(meta.id);
+			}
+		}
+		const all = [...ids["a.sheet"], ...ids["b.sheet"]];
+		assert.equal(new Set(all).size, all.length, "two versions were handed the same id");
+		// And within a file they still go forwards.
+		for (const file of ["a.sheet", "b.sheet"]) {
+			assert.deepEqual(ids[file], [...ids[file]].sort((x, y) => x - y), `${file} ids went backwards`);
+		}
+	} finally {
+		Date.now = realNow;
+	}
+});

@@ -19,15 +19,29 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import { createRequire } from "node:module";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
+	CELL_QUOTING,
+	CELL_QUOTING_FIX,
+	FORMULA_EVAL,
+	FORMULA_EVAL_FIX,
 	FORMULA_SCOPE_GUARD,
 	FORMULA_SCOPE_GUARD_FIX,
+	VENDOR_AD,
+	VENDOR_AD_FIX,
+	bundleHasNoAd,
 	bundleIsPatched,
+	bundleIsSealed,
 	cellShapedIdentifiers,
+	formulaIsSafe,
+	patchCellQuoting,
+	patchFormulaEscape,
 	patchFormulaScopeGuard,
+	patchVendorAd,
 } from "../scripts/patch-vendor.mjs";
 
 // Loading the evaluator is what installs SUM, LOG10 and the rest as GLOBALS -
@@ -46,6 +60,33 @@ test("the vendor line the patch replaces is still exactly where it was", () => {
 	// It is a DIRECT eval, which is the whole problem: an indirect one would see
 	// the global scope only and there would be nothing to fix.
 	assert.match(source, /,eval\("typeof\("/);
+});
+
+test("the vendor still builds its promo badge exactly where the patch expects", () => {
+	const source = fs.readFileSync(VENDOR, "utf8");
+	assert.equal(source.split(VENDOR_AD).length - 1, 1, "the promo badge block moved in jspreadsheet-ce");
+});
+
+test("stripping the badge keeps the element the rest of the vendor appends", () => {
+	const { code, count } = patchVendorAd(`x();${VENDOR_AD}y();`);
+	assert.equal(count, 1);
+	assert.equal(code, `x();${VENDOR_AD_FIX}y();`);
+	// The later `e.element.appendChild(e.ads)` still has something to append.
+	assert.match(code, /e\.ads=document\.createElement\("div"\)/);
+	// And the badge itself is gone.
+	assert.ok(!code.includes("jss_about"));
+	assert.ok(!code.includes("bossanova.uk/jspreadsheet/"));
+});
+
+test("a vendor bump that rewrites the badge breaks the build", () => {
+	assert.throws(() => patchVendorAd("nothing like the badge here"), /promo badge block is not where it was/);
+});
+
+test("the shipped bundle carries no promo badge", () => {
+	if (!fs.existsSync(BUNDLE)) return; // built artefact, not in the repo
+	const { classGone, linkGone } = bundleHasNoAd(fs.readFileSync(BUNDLE, "utf8"));
+	assert.ok(classGone, "main.js still contains the jss_about badge");
+	assert.ok(linkGone, "main.js still contains the vendor promo link");
 });
 
 test("patching replaces the guard and leaves one expression behind", () => {
@@ -114,4 +155,119 @@ test("the shipped bundle carries the fix, and the collision it fixes is real", (
 		rowOne.length > 0,
 		`expected the bundle to contain cell-shaped identifiers; found ${shaped.join(",") || "none"}`,
 	);
+});
+
+// ---------------------------------------------------------------------------
+// A .sheet file is data, and it must not be able to behave like a program.
+// Both holes were REAL on the unpatched vendor and are demonstrated as such
+// below: a test that only proves the patched build is safe cannot tell you
+// whether it is still fixing anything.
+
+const FORMULA_SRC = path.join(ROOT, "node_modules", "@jspreadsheet", "formula", "dist", "index.js");
+
+/** Load a copy of the evaluator with the escape guard applied. */
+async function patchedEvaluator() {
+	const patched = patchFormulaEscape(fs.readFileSync(FORMULA_SRC, "utf8")).code;
+	const file = path.join(os.tmpdir(), `sheet-formula-patched-${process.pid}.cjs`);
+	fs.writeFileSync(file, patched);
+	const mod = createRequire(import.meta.url)(file);
+	fs.rmSync(file, { force: true });
+	const f = mod.default ?? mod;
+	return typeof f === "function" ? f : f.formula;
+}
+
+/** How jspreadsheet-ce hands a text cell value to the evaluator, before/after. */
+const quotedTheOldWay = (v) => `"${v}"`;
+const quotedTheNewWay = (v) => JSON.stringify(String(v));
+
+test("both vendor lines the security patches replace are still where they were", () => {
+	assert.equal(fs.readFileSync(FORMULA_SRC, "utf8").split(FORMULA_EVAL).length - 1, 1);
+	assert.equal(fs.readFileSync(VENDOR, "utf8").split(CELL_QUOTING).length - 1, 1);
+});
+
+test("a vendor bump that moves either line breaks the build", () => {
+	assert.throws(() => patchFormulaEscape("nothing like it"), /transformation chain moved/);
+	assert.throws(() => patchCellQuoting("nothing like it"), /cell-value quoting moved/);
+});
+
+test("the guard refuses bracket access and backticks, and nothing else", () => {
+	assert.ok(!formulaIsSafe('""["constructor"]'));
+	assert.ok(!formulaIsSafe("[][`x`]"));
+	// Everything a spreadsheet actually writes.
+	for (const ok of ["SUM(1,2,3)", "A1+B1*2", 'IF(A1>2,"да","нет")', "SUM(A1:A3)", "A1*0.5", "MAX(A1:A3)-MIN(A1:A3)"]) {
+		assert.ok(formulaIsSafe(ok), ok);
+	}
+});
+
+test("patching rewrites each line into exactly what it should be", () => {
+	assert.equal(patchFormulaEscape(`x;${FORMULA_EVAL}y`).code, `x;${FORMULA_EVAL_FIX}y`);
+	assert.equal(patchCellQuoting(`x;${CELL_QUOTING};y`).code, `x;${CELL_QUOTING_FIX};y`);
+	// The replacement has to parse on its own, not just look right.
+	assert.doesNotThrow(() => new Function("t", `return ${CELL_QUOTING_FIX.split("=").slice(1).join("=")}`));
+});
+
+test("a formula can no longer reach the Function constructor", async () => {
+	const evaluate = await patchedEvaluator();
+	const escapes = [
+		'""["constructor"]["constructor"]("globalThis.__ESCAPED__=1; return 1")()',
+		'[]["constructor"]["constructor"]("globalThis.__ESCAPED__=1")()',
+		// Word-matching would miss this one; refusing brackets does not.
+		'""["const"+"ructor"]["const"+"ructor"]("globalThis.__ESCAPED__=1")()',
+	];
+	for (const attack of escapes) {
+		assert.equal(evaluate(attack, {}, 0, 0, {}), "#ERROR", attack);
+	}
+	assert.notEqual(globalThis.__ESCAPED__, 1, "a formula executed code of its own");
+});
+
+test("refusing the escape does not cost a single ordinary formula", async () => {
+	const evaluate = await patchedEvaluator();
+	const cases = [
+		["SUM(1,2,3)", {}, 6],
+		["A1+B1*2", { A1: 5, B1: 3 }, 11],
+		['CONCATENATE("a","b")', {}, "ab"],
+		['IF(A1>2,"да","нет")', { A1: 5 }, "да"],
+		// Ranges are why the guard sits before the vendor's own expansion: it
+		// rewrites A1:A3 into a bracketed list, so a later check refuses them all.
+		["SUM(A1:A3)", { A1: 1, A2: 2, A3: 3 }, 6],
+		["AVERAGE(A1:A3)", { A1: 2, A2: 4, A3: 6 }, 4],
+		["MAX(A1:A3)-MIN(A1:A3)", { A1: 1, A2: 9, A3: 5 }, 8],
+		["A1*0.5", { A1: 10 }, 5],
+	];
+	for (const [expression, values, expected] of cases) {
+		assert.equal(evaluate(expression, values, 0, 0, {}), expected, expression);
+	}
+});
+
+test("a cell VALUE cannot break out of the preamble", async () => {
+	const evaluate = await patchedEvaluator();
+	const payload = '"; globalThis.__INJECTED__=1; var q="';
+
+	// The hole, on the vendor's own quoting: the value closes the string literal
+	// early and the rest of it becomes statements.
+	evaluate("A1", { A1: quotedTheOldWay(payload) }, 0, 0, {});
+	assert.equal(globalThis.__INJECTED__, 1, "the unpatched quoting was expected to be injectable");
+	delete globalThis.__INJECTED__;
+
+	// Escaped properly, the same value is just text.
+	assert.equal(evaluate("A1", { A1: quotedTheNewWay(payload) }, 0, 0, {}), payload);
+	assert.notEqual(globalThis.__INJECTED__, 1, "a cell value executed code of its own");
+});
+
+test("escaping the value also fixes text that merely contains a quote", async () => {
+	const evaluate = await patchedEvaluator();
+	// This is an ordinary cell, and the old concatenation broke it outright.
+	assert.equal(evaluate("A1", { A1: quotedTheNewWay('он сказал "да"') }, 0, 0, {}), 'он сказал "да"');
+	assert.equal(
+		evaluate("CONCATENATE(A1,B1)", { A1: quotedTheNewWay("а"), B1: quotedTheNewWay("б") }, 0, 0, {}),
+		"аб",
+	);
+});
+
+test("the shipped bundle carries both fixes", () => {
+	if (!fs.existsSync(BUNDLE)) return; // built artefact, not in the repo
+	const { expressionGuarded, valuesEscaped, rawQuotingGone } = bundleIsSealed(fs.readFileSync(BUNDLE, "utf8"));
+	assert.ok(expressionGuarded, "main.js does not refuse bracket access in formulas");
+	assert.ok(valuesEscaped, "main.js does not escape cell values");
+	assert.ok(rawQuotingGone, "main.js still glues quotes around cell values");
 });

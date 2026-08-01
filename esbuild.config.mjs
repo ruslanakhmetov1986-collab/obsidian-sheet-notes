@@ -5,7 +5,12 @@ import path from "node:path";
 import { builtinModules } from "node:module";
 import postcss from "postcss";
 import prefixer from "postcss-prefix-selector";
-import { patchFormulaScopeGuard } from "./scripts/patch-vendor.mjs";
+import {
+	patchCellQuoting,
+	patchFormulaEscape,
+	patchFormulaScopeGuard,
+	patchVendorAd,
+} from "./scripts/patch-vendor.mjs";
 
 const prod = process.argv[2] === "production";
 const ROOT_CLASS = ".leovale-sheet-root";
@@ -72,12 +77,25 @@ const stubCodepagePlugin = {
  * reintroducing the bug.
  */
 const patchFormulaEvalPlugin = {
-	name: "patch-formula-scope-guard",
+	name: "patch-vendor",
 	setup(build) {
 		build.onLoad({ filter: /jspreadsheet-ce[\\/]dist[\\/]index\.js$/ }, async (args) => {
 			const source = await fs.promises.readFile(args.path, "utf8");
-			const { code, count } = patchFormulaScopeGuard(source);
-			console.log(`[formula] scope guard patched (${count} site${count === 1 ? "" : "s"})`);
+			const guard = patchFormulaScopeGuard(source);
+			console.log(`[formula] scope guard patched (${guard.count} site${guard.count === 1 ? "" : "s"})`);
+			// Same file, same reason to be loud: see scripts/patch-vendor.mjs.
+			const ad = patchVendorAd(guard.code);
+			console.log(`[vendor] promo badge removed (${ad.count} site${ad.count === 1 ? "" : "s"})`);
+			const cells = patchCellQuoting(ad.code);
+			console.log(`[security] cell values escaped (${cells.count} site${cells.count === 1 ? "" : "s"})`);
+			return { contents: cells.code, loader: "js" };
+		});
+
+		// The evaluator itself lives in a separate package.
+		build.onLoad({ filter: /@jspreadsheet[\\/]formula[\\/]dist[\\/]index\.js$/ }, async (args) => {
+			const source = await fs.promises.readFile(args.path, "utf8");
+			const { code, count } = patchFormulaEscape(source);
+			console.log(`[security] formula escape blocked (${count} site${count === 1 ? "" : "s"})`);
 			return { contents: code, loader: "js" };
 		});
 	},

@@ -319,6 +319,18 @@ export class BackupStore {
 	/** Stored bytes across the whole tree; computed on first need, then kept. */
 	private total: number | null = null;
 
+	/**
+	 * The last id handed out, across every file.
+	 *
+	 * A version id is a millisecond timestamp, and uniqueness used to be checked
+	 * against the file's OWN index only. Two files saved inside the same
+	 * millisecond therefore got the same id: measured, with the clock held still,
+	 * two files came out with identical id sets. That matters because the total
+	 * cap evicts the oldest versions across ALL files and tells them apart by id,
+	 * so an ambiguous id can drop the wrong file's version.
+	 */
+	private lastId = 0;
+
 	constructor(adapter: BackupAdapter, root: string, opts: BackupStoreOptions = {}) {
 		this.adapter = adapter;
 		this.root = root.replace(/\/+$/, "");
@@ -426,8 +438,11 @@ export class BackupStore {
 		await this.ensureDir(this.root);
 		await this.ensureDir(dir);
 
-		let id = Date.now();
+		// Strictly increasing, so ids stay comparable between files however fast
+		// the saves come.
+		let id = Math.max(Date.now(), this.lastId + 1);
 		while (index.versions.some((v) => v.id === id)) id++;
+		this.lastId = id;
 
 		const packed = this.compress ? await gzipText(text) : null;
 		const meta: VersionMeta = {
